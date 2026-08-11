@@ -1,0 +1,62 @@
+name: Build & Release
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    # Nordic's official NCS toolchain container has west + the ARM
+    # cross-compiler + all Python deps pre-installed, so we skip the
+    # per-run west init dance.
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.0.0
+    steps:
+      - name: Checkout application
+        uses: actions/checkout@v4
+        # Default checkout goes to $GITHUB_WORKSPACE — that's the workspace
+        # root layout the local dev flow uses too. `updater/` inside it is
+        # the manifest project.
+
+      - name: Initialize west workspace
+        run: west init -l updater
+
+      - name: West update
+        # --narrow -o=--depth=1 keeps clones shallow; NCS + zephyr + modules
+        # is otherwise multi-GB per run.
+        run: west update --narrow -o=--depth=1
+
+      - name: Build firmware
+        run: west build -b xiao_nrf54lm20a updater --build-dir updater/build
+
+      - name: Stage release artifacts
+        run: |
+          mkdir -p out
+          VER="${GITHUB_REF_NAME}"
+          [[ "$GITHUB_REF" == refs/tags/* ]] || VER="dev-${GITHUB_SHA::7}"
+          BASE="xiao_nrf54_updater-${VER}"
+          cp updater/build/zephyr/zephyr.hex           out/${BASE}.hex
+          cp updater/build/zephyr/zephyr.bin           out/${BASE}.bin
+          cp updater/build/zephyr/app_update.bin       out/${BASE}-app_update.bin || true
+          cp updater/build/zephyr/dfu_application.zip  out/${BASE}-dfu.zip        || true
+          ls -la out/
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: out/*
+
+      - name: Create draft release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          draft: true
+          files: out/*

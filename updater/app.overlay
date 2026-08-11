@@ -1,0 +1,50 @@
+/*
+ * Application-level device-tree overlay.
+ *
+ * Seeed's vendored board file defines the on-board PY25Q64H QSPI flash
+ * (as `py25q64` on `spi00`) but ships it `status = "disabled"` with no
+ * partitions. We flip it on and reserve the entire 8 MiB as a single
+ * LittleFS partition — same layout intent as the CONFIG.TXT / firmware /
+ * LOG.TXT storage on the nRF52 sibling project, just implemented as a
+ * proper filesystem instead of a manually-written FAT12 image.
+ */
+
+/ {
+	fstab {
+		compatible = "zephyr,fstab";
+
+		lfs1: lfs1 {
+			compatible = "zephyr,fstab,littlefs";
+			/* Mount point intentionally matches the DT node label
+			 * `lfs1` — nRF Connect Device Manager defaults its
+			 * upload/download destination to `/<label>/`, so
+			 * keeping them aligned means the app's default paths
+			 * "just work" and users don't have to hand-type
+			 * `/lfs/` every time.
+			 */
+			mount-point = "/lfs1";
+			partition = <&lfs_partition>;
+			automount;
+			read-size = <16>;
+			prog-size = <16>;
+			cache-size = <64>;
+			lookahead-size = <32>;
+			block-cycles = <512>;
+		};
+	};
+};
+
+&py25q64 {
+	status = "okay";
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		lfs_partition: partition@0 {
+			label = "littlefs_storage";
+			reg = <0x00000000 DT_SIZE_M(8)>;
+		};
+	};
+};

@@ -1,0 +1,55 @@
+# -----------------------------------------------------------------------------
+# Repo root doubles as the west workspace root. `west update` pulls the
+# following trees in as siblings of `updater/` — all ignored here.
+# -----------------------------------------------------------------------------
+.west/
+zephyr/
+modules/
+bootloader/
+tools/
+nrf/
+nrfxlib/
+# test/cmock — pulled transitively (it's in no local west.yml, only `west list`).
+# Everything under this root-level test/ belongs to west; our own tests live in
+# web/test/.
+test/
+
+# Zephyr / west build trees (in-tree or per-app)
+build/
+build_*/
+updater/build/
+updater/build_*/
+
+# Toolchain-manager pyc caches
+__pycache__/
+*.pyc
+
+# Editor/IDE
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*~
+
+# Claude
+.claude/
+CLAUDE.md
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+
+# Web client: generated single-file build + on-demand test deps.
+# web/vendor/ is deliberately NOT ignored — Vue is vendored on purpose.
+web/dist/
+node_modules/
+
+# Occasional stray artifacts
+*.hex
+*.bin
+*.elf
+*.uf2
+*.map

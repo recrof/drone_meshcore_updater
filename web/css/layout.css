@@ -1,0 +1,161 @@
+/* Header, toolbar, listing, footer, log, progress bar, drop overlay. */
+
+/* --- status bar / header -------------------------------------- */
+header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px; border-bottom: 1px solid var(--line);
+  background: var(--card);
+}
+header .title {
+  font-size: 12px; font-weight: 600; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--muted);
+}
+header .device { font-family: var(--mono); font-size: 13px; }
+header .grow { flex: 1; }
+header .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--muted); display: inline-block; margin-right: 6px;
+  vertical-align: middle;
+  box-shadow: 0 0 0 0 var(--accent);
+}
+header.connected .dot {
+  background: var(--accent);
+  animation: pulse 2.2s ease-out infinite;
+}
+@keyframes pulse {
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 60%, transparent); }
+  70%  { box-shadow: 0 0 0 10px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  header.connected .dot { animation: none; }
+}
+
+/* --- toolbar --------------------------------------------------- */
+.toolbar {
+  display: flex; gap: 6px; padding: 8px 14px;
+  border-bottom: 1px solid var(--line); align-items: center; flex-wrap: wrap;
+}
+.toolbar .path {
+  flex: 1; font-family: var(--mono); font-size: 13px;
+  padding: 5px 10px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--bg); color: var(--fg); min-width: 200px;
+  outline: none;
+}
+.toolbar .path:focus { border-color: var(--accent); }
+
+/* --- listing table --------------------------------------------- */
+main { flex: 1; overflow: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+thead th {
+  text-align: left;
+  padding: 8px 14px 6px;
+  color: var(--muted); font-weight: 500; font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.1em;
+  background: var(--bg); border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; z-index: 1;
+}
+tbody td {
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+tbody tr { position: relative; }
+tbody tr:hover td { background: var(--card); }
+
+/* Left stripe encodes entry type — dirs get an accent stripe, files stay quiet. */
+tbody td.name {
+  font-family: var(--mono); cursor: pointer; user-select: none;
+  padding-left: 22px; position: relative;
+}
+tbody td.name::before {
+  content: ""; position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+  width: 4px; height: 16px; border-radius: 2px;
+  background: var(--stripe-file);
+}
+tbody td.name.dir::before { background: var(--stripe-dir); }
+tbody td.name.dir::after  { content: "/"; color: var(--muted); }
+
+/* The live config.txt opens the editor rather than downloading, so it gets its
+   own stripe — same language as the dir stripe, different meaning. */
+tbody td.name.cfg::before { background: var(--warn); }
+
+td.size, td.actions {
+  color: var(--muted); font-variant-numeric: tabular-nums;
+  font-family: var(--mono); font-size: 12px;
+}
+td.actions { text-align: right; white-space: nowrap; }
+td.actions button { padding: 2px 8px; font-size: 12px; margin-left: 4px; }
+
+.empty {
+  text-align: center; padding: 60px 20px; color: var(--muted);
+  font-family: var(--mono);
+}
+
+/* --- footer + log ---------------------------------------------- */
+footer {
+  padding: 6px 14px; border-top: 1px solid var(--line);
+  display: flex; justify-content: space-between; align-items: center;
+  background: var(--card); font-size: 12px; color: var(--muted);
+  font-family: var(--mono);
+}
+#log {
+  max-height: 18vh; overflow: auto; padding: 8px 14px; margin: 0;
+  border-top: 1px solid var(--line); background: var(--bg);
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  white-space: pre-wrap; line-height: 1.55;
+}
+#log .err { color: var(--danger); }
+#log .ok  { color: var(--accent); }
+#log .ts  { color: var(--muted); opacity: 0.6; margin-right: 6px; }
+
+/* --- top-of-viewport progress bar (YouTube style) -------------- */
+#progress {
+  position: fixed; top: 0; left: 0; right: 0; height: 2px;
+  background: transparent; z-index: 10;
+  pointer-events: none;
+}
+#progress .fill {
+  height: 100%; width: 0%; background: var(--accent);
+  transition: width 120ms linear;
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+#progress.indeterminate .fill {
+  width: 30%; animation: indet 1s linear infinite;
+}
+@keyframes indet {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+#progress-label {
+  position: fixed; top: 10px; right: 14px; z-index: 10;
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  background: var(--card); border: 1px solid var(--line);
+  padding: 3px 8px; border-radius: 4px;
+  display: none;
+}
+#progress-label.shown { display: block; }
+
+/* --- drag-and-drop overlay ------------------------------------- */
+#drop-overlay {
+  position: fixed; inset: 0; z-index: 20;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(3px);
+  display: none;
+  pointer-events: none;
+}
+#drop-overlay.shown { display: block; }
+#drop-overlay .frame {
+  position: absolute; inset: 24px;
+  border: 2px dashed var(--accent);
+  border-radius: 12px;
+  display: grid; place-items: center;
+  color: var(--fg);
+}
+#drop-overlay .frame-inner { text-align: center; }
+#drop-overlay .frame-title { font-size: 20px; font-weight: 500; margin: 0 0 6px; }
+#drop-overlay .frame-sub {
+  font-family: var(--mono); color: var(--muted); font-size: 13px;
+}
+#drop-overlay.reject .frame { border-color: var(--danger); }
+#drop-overlay.reject .frame-sub { color: var(--danger); }

@@ -1,0 +1,39 @@
+# West manifest pinning the Nordic Connect SDK revision we build against.
+#
+# NCS v3.4.0 is the minimum for our board files: it renames the SoC dtsi
+# from `nrf54lm20a_enga_cpuapp.dtsi` (engineering-A silicon) to
+# `nrf54lm20a_cpuapp.dtsi` (finalized). Seeed's vendored board files under
+# updater/boards/seeed/xiao_nrf54lm20a/ include the finalized name, so
+# anything pre-v3.4.0 fails DTS preprocessing with "file not found".
+#
+# Bump `revision` deliberately — bumping means re-verifying that:
+#   1. External PY25Q64 spi-nor device tree still probes on spi00.
+#   2. mcumgr fs_mgmt still uploads through nRF Connect Device Manager.
+#   3. Central-role bt_gatt_discover behavior we depend on didn't drift.
+manifest:
+  version: "0.13"
+  remotes:
+    - name: ncs
+      url-base: https://github.com/nrfconnect
+  projects:
+    # Nordic Connect SDK. NCS's internal modules.cmake sets
+    #   SYSBUILD_NRF_KCONFIG (short name), but Zephyr's zephyr_module.py
+    # generates the env var used inside auto-generated sysbuild Kconfig
+    # snippets from the west project name, sanitised + uppercased. So the
+    # project MUST be named `nrf` — otherwise sysbuild emits
+    # `osource "$(SYSBUILD_SDK_NRF_KCONFIG)"` which is set by nothing and
+    # kconfiglib bombs with EISDIR when the empty string resolves to the
+    # CWD. `path:` is set explicitly so the checkout dir also matches
+    # NCS's internal expectation.
+    - name: nrf
+      repo-path: sdk-nrf
+      path: nrf
+      remote: ncs
+      revision: v3.4.0
+      import: true
+  self:
+    # Application lives in the `updater/` subdirectory of the repo (which is
+    # also the west workspace root once `west init -l updater` is run).
+    # After `west update`, siblings zephyr/, modules/, bootloader/, tools/
+    # appear at the workspace root — all gitignored.
+    path: updater
