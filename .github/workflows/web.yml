@@ -1,9 +1,12 @@
 name: Web client
 
 # The web client is plain ES modules — no build step for development. This
-# workflow only (a) runs the tests, (b) publishes web/ to GitHub Pages, and
-# (c) bundles a single self-contained updater.html for people who'd rather
-# host one file than a directory.
+# workflow runs the tests, publishes web/ to GitHub Pages, and bundles a single
+# self-contained updater.html for people who'd rather host one file.
+#
+# Pages must be enabled for the repo with Source = "GitHub Actions"
+# (Settings -> Pages). Without it, deploy-pages fails with a bare 404:
+# "Failed to create deployment ... Ensure GitHub Pages has been enabled".
 
 on:
   push:
@@ -26,8 +29,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
 
@@ -42,21 +45,25 @@ jobs:
           npm install --no-save jsdom
           node web/test/render.test.mjs web/dist/updater.html
 
+      - name: Upload single-file build
+        uses: actions/upload-artifact@v7
+        with:
+          name: updater-single-file
+          path: web/dist/updater.html
+
+      # Only stage/upload the Pages artifact when we are actually going to
+      # deploy. On a PR it would be built and thrown away.
       - name: Stage site
+        if: github.event_name != 'pull_request'
         run: |
           mkdir -p _site
           cp -r web/index.html web/css web/js web/vendor _site/
           cp web/dist/updater.html _site/updater.html
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
+        if: github.event_name != 'pull_request'
         with:
           path: _site
-
-      - name: Upload single-file build
-        uses: actions/upload-artifact@v4
-        with:
-          name: updater-single-file
-          path: web/dist/updater.html
 
   deploy:
     needs: test
@@ -67,4 +74,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

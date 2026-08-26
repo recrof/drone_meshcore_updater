@@ -19,7 +19,7 @@ jobs:
       image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.0.0
     steps:
       - name: Checkout application
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         # Default checkout goes to $GITHUB_WORKSPACE — that's the workspace
         # root layout the local dev flow uses too. `updater/` inside it is
         # the manifest project.
@@ -33,7 +33,7 @@ jobs:
         run: west update --narrow -o=--depth=1
 
       - name: Build firmware
-        run: west build -b xiao_nrf54lm20a updater --build-dir updater/build
+        run: west build -b xiao_nrf54lm20a/nrf54lm20a/cpuapp updater --build-dir updater/build
 
       - name: Stage release artifacts
         run: |
@@ -41,14 +41,21 @@ jobs:
           VER="${GITHUB_REF_NAME}"
           [[ "$GITHUB_REF" == refs/tags/* ]] || VER="dev-${GITHUB_SHA::7}"
           BASE="xiao_nrf54_updater-${VER}"
-          cp updater/build/zephyr/zephyr.hex           out/${BASE}.hex
-          cp updater/build/zephyr/zephyr.bin           out/${BASE}.bin
-          cp updater/build/zephyr/app_update.bin       out/${BASE}-app_update.bin || true
-          cp updater/build/zephyr/dfu_application.zip  out/${BASE}-dfu.zip        || true
+          # Sysbuild nests the application domain: the images are under
+          # <build>/<app>/zephyr, not <build>/zephyr. The latter exists but
+          # only holds sysbuild's own Kconfig output, so copying from it fails.
+          APP=updater/build/updater/zephyr
+          cp ${APP}/zephyr.hex out/${BASE}.hex
+          cp ${APP}/zephyr.bin out/${BASE}.bin
+          # MCUboot images only exist when sysbuild builds MCUboot, which needs
+          # SB_CONFIG_BOOTLOADER_MCUBOOT (a sysbuild.conf), not the app-level
+          # CONFIG_BOOTLOADER_MCUBOOT that prj.conf sets. Absent today.
+          cp ${APP}/app_update.bin      out/${BASE}-app_update.bin || true
+          cp ${APP}/dfu_application.zip out/${BASE}-dfu.zip        || true
           ls -la out/
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: firmware
           path: out/*
