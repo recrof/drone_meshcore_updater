@@ -2,17 +2,21 @@
 # Repo root doubles as the west workspace root. `west update` pulls the
 # following trees in as siblings of `updater/` — all ignored here.
 # -----------------------------------------------------------------------------
-.west/
-zephyr/
-modules/
-bootloader/
-tools/
-nrf/
-nrfxlib/
+# Anchored with a leading slash: these names also occur *inside* our own
+# tree (updater/modules/ holds in-tree Zephyr modules, and any Zephyr module
+# has a zephyr/ subdirectory holding its module.yml). Unanchored, git
+# silently ignored those too.
+/.west/
+/zephyr/
+/modules/
+/bootloader/
+/tools/
+/nrf/
+/nrfxlib/
 # test/cmock — pulled transitively (it's in no local west.yml, only `west list`).
 # Everything under this root-level test/ belongs to west; our own tests live in
 # web/test/.
-test/
+/test/
 
 # Zephyr / west build trees (in-tree or per-app)
 build/

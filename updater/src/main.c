@@ -7,7 +7,7 @@
  *   storage.c    — LittleFS bring-up + first-boot config.txt seeding
  *   upload_hook.c — SMP fs_mgmt upload-complete callback that arms DFU
  *
- * The dfu_legacy port + BLE central scanner are placeholders in this
+ * The DFU client + BLE central scanner are placeholders in this
  * first commit — this skeleton is intended to boot, expose SMP over BLE,
  * accept file uploads, and log to /lfs/LOG*. The Nordic Legacy DFU
  * client from the nRF52 project ports on top of Zephyr's bt_gatt in a
@@ -89,7 +89,7 @@ static void on_connected(struct bt_conn *conn, uint8_t err)
 	 * would trigger an LL negotiation mid-way through firmware
 	 * streaming, and the transient state during negotiation was
 	 * dropping ~24 packets and killing the PRN sync (observed on
-	 * RAK4631_OTA). dfu_legacy sets its own params on the target link
+	 * RAK4631_OTA). The DFU client sets its own params on the target link
 	 * via bt_conn_le_create's `conn_param`; it doesn't want ours.
 	 */
 	struct bt_conn_info info;

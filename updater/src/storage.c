@@ -31,7 +31,7 @@ static const char kDefaultConfig[] =
 	"# BLE name filter for the target we flash (pipe-delimited OR).\n"
 	"ble_name=OTA | DFU\n"
 	"\n"
-	"prn=1\n"
+	"prn=32\n"
 	"high_mtu=1\n"
 	"retries=5\n"
 	"min_rssi=-75\n"

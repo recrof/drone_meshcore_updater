@@ -4,9 +4,9 @@
  * Runs on a private thread (not the system workqueue) because a full
  * DFU can take tens of seconds to minutes, and we don't want to block
  * whatever else the system workqueue is doing (mcumgr transport work,
- * logging FS backend, etc.). Own stack sized generously — dfu_legacy_run
- * internally calls into bt_gatt_discover callbacks, fs_read, and CBOR-
- * free but non-trivial buffer manipulation.
+ * logging FS backend, etc.). Own stack sized generously — the DFU client
+ * runs bt_gatt_discover callbacks, fs_read, and non-trivial buffer
+ * manipulation on this thread.
  */
 
 #include "dfu_runner.h"
@@ -20,7 +20,7 @@
 #include "ble_scanner.h"
 #include "firmware_zip.h"
 #include "firmware_map.h"
-#include "dfu_legacy.h"
+#include "dfu_client.h"
 #include "app.h"
 
 LOG_MODULE_REGISTER(dfu_runner, LOG_LEVEL_INF);
@@ -142,7 +142,7 @@ static void run_thread(void *a, void *b, void *c)
 			bundle_open = true;
 		}
 
-		enum dfu_result r = dfu_legacy_run(&target, &bundle, cfg);
+		enum dfu_result r = dfu_client_run(&target, &bundle, cfg);
 		switch (r) {
 		case DFU_OK:
 			LOG_INF("DFU runner: SUCCESS");

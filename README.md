@@ -1,12 +1,12 @@
 # xiao_nrf54_updater
 
-A standalone BLE DFU client that runs on a **Seeed XIAO nRF54LM20A** and flashes Nordic-format firmware bundles to *other* nRF52/nRF54 devices over Bluetooth. Companion to [xiao_nrf52_updater](../xiao_nrf52_updater) — same job, different hardware constraints.
+A standalone BLE DFU client that runs on a **Seeed XIAO nRF54LM20A** and flashes Nordic-format firmware bundles to *other* nRF52/nRF54 devices over Bluetooth.
 
 ## Why a separate project?
 
 **Not because the chip lacks USB** — the nRF54LM20A actually has native HS-USB, marketed as a first for the nRF54L line. The catch is at the *carrier board* level: on the Seeed XIAO nRF54LM20A, the USB-C connector is wired to an on-board SAMD11 running CMSIS-DAP firmware (used for flashing + debug + a CDC log stream), **not** to the nRF54's native USB pins. The chip's USB peripheral is broken out to the XIAO headers but not to a connector.
 
-So on stock XIAO hardware there's no path from "drop a `.zip` on a USB drive that the nRF54 exposes" — the SAMD11 is in the middle of every USB-C conversation. That's what pushes this project to a different UX than the nRF52 sibling: instead of dropping files onto a USB drive, we expose an **SMP (Simple Management Protocol) transport over BLE**. Firmware zips, `config.txt`, and `LOG.TXT` all live on the on-board 8 MB QSPI flash as LittleFS files. To manage them you use Nordic's official **[nRF Connect Device Manager](https://play.google.com/store/apps/details?id=no.nordicsemi.android.mcumgr)** app (Android/iOS) — file browser, log viewer, and image DFU all built in.
+So on stock XIAO hardware there's no path from "drop a `.zip` on a USB drive that the nRF54 exposes" — the SAMD11 is in the middle of every USB-C conversation. That's what pushes this project to a BLE-first UX: instead of dropping files onto a USB drive, we expose an **SMP (Simple Management Protocol) transport over BLE**. Firmware zips, `config.txt`, and `LOG.TXT` all live on the on-board 8 MB QSPI flash as LittleFS files. To manage them you use Nordic's official **[nRF Connect Device Manager](https://play.google.com/store/apps/details?id=no.nordicsemi.android.mcumgr)** app (Android/iOS) — file browser, log viewer, and image DFU all built in.
 
 Because SMP is a Zephyr subsystem, this project is built with the **Nordic Connect SDK (NCS)** rather than Arduino / PlatformIO. That's the reason it's a separate repo: the two projects share no build system, no BLE library, and no filesystem layer. If a future custom carrier (or a Seeed variant) ever routes the nRF54's native HS-USB to a USB-C jack, we could add USB MSC + USB CDC transports alongside the BLE one without changing the rest of the stack.
 
@@ -62,7 +62,7 @@ web/tools/build-single.mjs  bundles everything into one self-contained file
 |---|---|
 | **SMP over BLE** | mcumgr transport — file upload/download/delete + image DFU + log viewer, all via nRF Connect Device Manager |
 | **LittleFS** | 8 MB PY25Q64 external flash, mounted at `/lfs1`, wear-leveled |
-| **BLE central** | Zephyr `bt_gatt_discover` — Legacy DFU client (ported from nRF52 project) |
+| **BLE central** | Zephyr `bt_gatt_discover` — Legacy DFU client ported from the Android DFU Library |
 | **MCUboot** | Dual-slot bootloader so the updater can update itself over BLE |
 | **fsx_stream** | Custom GATT byte-stream service for fast uploads (~59 KB/s vs ~10 KB/s over SMP) |
 
@@ -86,10 +86,20 @@ xiao_nrf54_updater/                       ← git repo root == west workspace ro
       xiao_nrf54lm20a.dts
       xiao_nrf54lm20a-pinctrl.dtsi
       xiao_nrf54lm20a_defconfig
+    modules/nordic-legacy-dfu/            # Legacy DFU protocol, ported from the
+                                          #   Android DFU Library (C++, own README)
     src/
       main.c                              # boot + BLE + state machine loop
       led.c                               # single-LED patterns (idle / smp / dfu / ok / fail)
       storage.c                           # LittleFS confirm + default config.txt seeding
+      config.c                            # config.txt parser
+      ble_scanner.c                       # find a Legacy DFU peer by name / RSSI / UUID
+      firmware_zip.c                      # STORED-only ZIP walker + manifest.json
+      firmware_map.c                      # ble_firmware_mapping: peer name -> bundle
+      dfu_client.cpp                      # connects, adapts zip -> Stream, runs the module
+      dfu_runner.c                        # DFU worker thread: scan, run, retry, cooldown
+      fsx_mgmt.c                          # custom SMP group 64 (ls/mkdir/rm/mv/statvfs/dfu)
+      fsx_stream.c                        # fast-upload GATT service
       upload_hook.c                       # SMP fs_mgmt access-hook (auto-arm now a no-op)
       app.h                               # shared types/protos
 
@@ -173,7 +183,7 @@ Two mistakes to avoid:
 
 ## Config knobs
 
-The `config.txt` file on `/lfs1/` mirrors the schema of the nRF52 project — same keys, same semantics — because the ported Legacy DFU client uses the same struct, plus `pkt_gap_ms` (inter-packet pacing) which is nRF54-only. It is reloaded on every retry attempt, so edits apply mid-run. See the [nRF52 project README](../xiao_nrf52_updater/README.md#configtxt) for the full documented list. On first boot the file is seeded with sensible defaults if absent.
+The `config.txt` file on `/lfs1/` holds the scan filter, the retry policy, and the transfer tuning. It is reloaded on every retry attempt, so edits apply mid-run. Every key is documented in the web client's Config dialog, which is generated from the same schema the firmware parses; `web/js/lib/config-file.js` is the single list. On first boot the file is seeded with sensible defaults if absent.
 
 ## Status of this repo
 
@@ -181,7 +191,7 @@ The `config.txt` file on `/lfs1/` mirrors the schema of the nRF52 project — sa
 
 ## TODO
 
-- Port `dfu_legacy` (Legacy DFU control-point + packet-point state machine) from the nRF52 project onto Zephyr `bt_gatt`.
+- Legacy DFU control-point + packet-point state machine, ported from the Android DFU Library (`updater/modules/nordic-legacy-dfu`).
 - Port `ble_scanner` name-matching + pipe-delimited filter + MAC+1 fallback.
 - Port `firmware_zip.c` (STORE-only manifest walker) — SdFat File objects become Zephyr `fs_file_t`.
 - Port `config.c` parser — same format, `fs_read()` instead of `File::fgets()`.
@@ -193,4 +203,3 @@ The `config.txt` file on `/lfs1/` mirrors the schema of the nRF52 project — sa
 - [Nordic nRF Connect Device Manager](https://developer.nordicsemi.com/nRF_Connect_SDK/doc/latest/nrf/samples/mcumgr_smp_svr.html) — the phone/PC clients this project targets
 - [Zephyr mcumgr subsystem](https://docs.zephyrproject.org/latest/services/device_mgmt/mcumgr.html) — SMP protocol reference
 - [MCUboot documentation](https://docs.mcuboot.com/) — dual-slot bootloader used for self-updating
-- [xiao_nrf52_updater](../xiao_nrf52_updater) — the USB-native sibling project

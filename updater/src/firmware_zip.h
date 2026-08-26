@@ -9,14 +9,19 @@
  * from offset 0 and pick out `manifest.json`, `<something>.bin`, and
  * `<something>.dat` based on the manifest contents.
  *
- * Same public shape as the nRF52 sibling's firmware_zip.h so higher-level
- * DFU code stays largely portable.
+ * Deliberately narrow: resolve bin/dat to absolute offsets once, then hand
+ * out bytes. The DFU client never needs to know it is reading from a ZIP.
  */
 
 #include <zephyr/kernel.h>
 #include <zephyr/fs/fs.h>
 #include <stdbool.h>
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 #define ZIP_NAME_MAX 64
 
@@ -50,7 +55,7 @@ struct firmware_bundle {
 /* Open the zip at `zip_path`, parse manifest.json, and resolve bin/dat
  * entries. On success the archive stays open under the hood — call
  * firmware_zip_close() when streaming is done. Only one archive open at
- * a time (matches the nRF52 sibling).
+ * a time.
  *
  * `err` receives a short human-readable failure reason on error.
  * Returns 0 on success, negative errno otherwise.
@@ -66,3 +71,7 @@ int firmware_zip_read(const struct zip_entry *entry, uint32_t offset,
 
 /* Release the archive file handle. Safe to call when nothing is open. */
 void firmware_zip_close(void);
+
+#ifdef __cplusplus
+}
+#endif

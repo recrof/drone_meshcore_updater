@@ -1,7 +1,7 @@
 #pragma once
 
 /*
- * Small workqueue wrapper around dfu_legacy_run(). fsx_mgmt's TRIGGER_DFU
+ * Small workqueue wrapper around dfu_client_run(). fsx_mgmt's TRIGGER_DFU
  * handler must not block (it runs on mcumgr's workqueue and would starve
  * SMP), so we spawn the actual DFU sequence on a dedicated thread.
  *

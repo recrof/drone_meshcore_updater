@@ -2,15 +2,20 @@
 
 /*
  * BLE central scanner — finds a Nordic Legacy DFU peer and returns its
- * address to the DFU state machine. Port of the nRF52 sibling's
- * ble_scanner::find_first() with the Bluefruit callback replaced by
- * Zephyr's bt_le_scan_start.
+ * address to the DFU state machine. Blocking: it owns the scan for its
+ * duration and returns the first advertisement that passes the name, RSSI
+ * and service-UUID filters.
  */
 
 #include <zephyr/kernel.h>
 #include <zephyr/bluetooth/addr.h>
 #include <stdbool.h>
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 #define BLE_SCANNER_NAME_MAX 24
 
@@ -46,3 +51,7 @@ int ble_scanner_find_first(struct ble_scanner_target *out,
 			   const char *name_filter,
 			   int8_t min_rssi,
 			   const bt_addr_le_t *prefer_mac);
+
+#ifdef __cplusplus
+}
+#endif

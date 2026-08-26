@@ -3,16 +3,20 @@
 /*
  * DFU-target configuration loaded from /lfs1/config.txt.
  *
- * Same schema + semantics as the nRF52 sibling project — see comments below
- * for per-field detail. The nRF54 side reads this the moment storage is
- * mounted and applies the values to the BLE scanner, dfu_legacy retry
- * loop, and tx-power on init. Runtime edits (upload a new config.txt via
+ * See the per-field comments below for what each key does. Read the moment
+ * storage is mounted and applied to the BLE scanner, the DFU retry loop, and
+ * tx-power on init. Runtime edits (upload a new config.txt via
  * SMP / fsx_stream) take effect at the *next* DFU sequence.
  */
 
 #include <zephyr/kernel.h>
 #include <stdbool.h>
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /* Canonical config path. Deliberately lowercase, and lowercase everywhere
  * that creates or updates it: LittleFS is case-sensitive, so a file uploaded
@@ -124,6 +128,30 @@ struct app_config {
 	 * 500 KB transfer. Raise this if a target keeps failing mid-stream.
 	 */
 	uint16_t pkt_gap_ms;
+
+	/* Pause inserted after the one packet per flash page that makes the
+	 * target erase, in milliseconds. 0 disables erase-aware pacing, and
+	 * then pkt_gap_ms alone has to be large enough for the worst packet
+	 * (measured floor 18 ms, ~12 KB/s).
+	 *
+	 * With it set, pkt_gap_ms only has to cover the target's flash *write*
+	 * rate for the other ~16 packets in the page, so it can be small. That
+	 * is where the throughput is: one expensive packet per 4 KB instead of
+	 * pricing every packet as if it were the expensive one.
+	 */
+	uint16_t erase_pause_ms;
+
+	/* Packets allowed into the target's buffer during a page erase before
+	 * waiting out the rest of it. 0 stops dead at the boundary.
+	 *
+	 * The erase pauses are the single biggest cost once the connection
+	 * interval is tuned — measured at 44% of a transfer, with the target's
+	 * 8-slot ring sitting empty throughout. Overlapping a few packets with
+	 * the erase reclaims most of that. Measured, 6 is too many: the ring is
+	 * still draining the previous erase, so the failure lands on the second
+	 * page and drifts. 2-3 is the usable range.
+	 */
+	uint8_t  erase_inflight;
 };
 
 /* Reset to compile-time defaults, then overlay whatever config.txt
@@ -137,3 +165,7 @@ bool app_config_load(void);
  * lifetime of the process; safe to keep pointers into it.
  */
 const struct app_config *app_config_current(void);
+
+#ifdef __cplusplus
+}
+#endif

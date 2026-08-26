@@ -9,7 +9,7 @@
 import { readFileSync } from "node:fs";
 import {
   CONFIG_SCHEMA, CONFIG_MAX_BYTES, CONFIG_PATH, FIELDS,
-  isConfigPath, canonicalUploadPath,
+  isConfigPath, canonicalUploadPath, parseMapping,
   parseConfig, serializeConfig, encodedSize, defaults, validateField, advisories,
 } from "../js/lib/config-file.js";
 
@@ -22,12 +22,12 @@ const t = (name, cond, extra = "") => {
 /* --- defaults must match updater/src/config.c apply_defaults() --- */
 const FIRMWARE_DEFAULTS = {
   ble_name: "OTA | DFU", ble_firmware_mapping: "",
-  prn: 1, high_mtu: true, retries: 5, min_rssi: -75,
+  prn: 32, high_mtu: true, retries: 5, min_rssi: -75,
   retry_cooldown: 5, wedge_cooldown: 60, tx_power: 6, scan_timeout: 0,
-  scan_debug: false, pkt_gap_ms: 5,
+  scan_debug: false, pkt_gap_ms: 4, erase_pause_ms: 100, erase_inflight: 0,
 };
 const d = defaults();
-t("schema has exactly the 11 firmware keys",
+t("schema has exactly the firmware keys",
   JSON.stringify(Object.keys(d).sort()) === JSON.stringify(Object.keys(FIRMWARE_DEFAULTS).sort()),
   Object.keys(d).join(","));
 for (const [k, v] of Object.entries(FIRMWARE_DEFAULTS)) {
@@ -85,20 +85,20 @@ const p = parseConfig([
   "high_mtu=yes",                   // parse_bool: first char
   "scan_debug=T",
   "no_equals_here",                 // skipped
-  "ble_firmware_mapping=foo*:bar*", // unknown → preserved
+  "key_from_a_newer_build=42",      // unknown → preserved verbatim
   "retries=999",                    // out of range → firmware ignores
 ].join("\n"));
 t("trims whitespace around key and value", p.values.prn === 1, String(p.values.prn));
 t("parse_bool accepts 'yes'", p.values.high_mtu === true);
 t("parse_bool accepts 'T'", p.values.scan_debug === true);
-t("preserves unknown keys", p.unknown.length === 1 && p.unknown[0] === "ble_firmware_mapping=foo*:bar*",
+t("preserves unknown keys", p.unknown.length === 1 && p.unknown[0] === "key_from_a_newer_build=42",
   JSON.stringify(p.unknown));
 t("out-of-range key reported as ignored", p.ignored.length === 1 && p.ignored[0].key === "retries",
   JSON.stringify(p.ignored));
 t("out-of-range key keeps firmware default",
   p.values.retries === FIRMWARE_DEFAULTS.retries, String(p.values.retries));
 t("unknown keys survive re-serialization",
-  serializeConfig(p.values, p.unknown).includes("ble_firmware_mapping=foo*:bar*"));
+  serializeConfig(p.values, p.unknown).includes("key_from_a_newer_build=42"));
 
 /* --- bool false must serialize as 0, not "" --- */
 t("bool false serializes as 0", serializeConfig({ ...d, high_mtu: false }, []).includes("high_mtu=0"));
@@ -138,10 +138,50 @@ t("ble_name truncated on parse",
   parseConfig("ble_name=" + "x".repeat(40)).values.ble_name.length === 23);
 
 /* --- advisories --- */
-t("prn=8 + gap=5 raises the measured-failure advisory",
-  advisories({ ...d, prn: 8, pkt_gap_ms: 5 }).some(s => /prn=1/.test(s)));
-t("prn=1 + gap=5 is clean", advisories({ ...d, prn: 1, pkt_gap_ms: 5 }).length === 0);
-t("prn=0 warns", advisories({ ...d, prn: 0, pkt_gap_ms: 40 }).some(s => /receipts/.test(s)));
+/* The defaults are the measured-good configuration and must not trip any
+ * advisory — an advisory that fires on a fresh device is just noise. */
+t("shipped defaults raise no advisories", advisories(d).length === 0,
+  JSON.stringify(advisories(d)));
+/* Calibrated on hardware. Uniform pacing (erase_pause_ms=0): gap=11 failed at
+ * 10 KB, gap=15 failed at 127 KB, gap=18 completed 511 KB at 11.8 KB/s.
+ * Erase-aware pacing splits the cost instead: one expensive packet per 4 KB. */
+const uniform = { ...d, erase_pause_ms: 0 };
+t("uniform pacing at 0 ms warns",
+  advisories({ ...uniform, pkt_gap_ms: 0 }).some(s => /NO_MEM/.test(s)));
+t("uniform pacing at 12 ms warns (it failed on hardware)",
+  advisories({ ...uniform, pkt_gap_ms: 12 }).some(s => /NO_MEM/.test(s)));
+t("uniform pacing at 15 ms warns (it failed at 25%)",
+  advisories({ ...uniform, pkt_gap_ms: 15 }).some(s => /NO_MEM/.test(s)));
+t("uniform pacing at 18 ms, the measured-good value, does not warn",
+  !advisories({ ...uniform, pkt_gap_ms: 18 }).some(s => /NO_MEM/.test(s)));
+/* gap=2 put packets on the wire every ~2.2-2.8 ms, at or below the target's
+ * own ~2.5 ms write rate, and was rejected at the first page boundary. */
+t("erase-aware pacing warns below the target's write rate",
+  advisories({ ...d, pkt_gap_ms: 2 }).some(s => /write/.test(s)));
+t("the shipped gap of 4 ms is clear of it",
+  advisories({ ...d, pkt_gap_ms: 4 }).length === 0);
+/* 6 was tried on hardware and failed every attempt, on the second page. */
+t("erase_inflight=6 warns (measured to fail)",
+  advisories({ ...d, erase_inflight: 6 }).some(s => /ring/.test(s)));
+t("erase_inflight=3 does not warn",
+  !advisories({ ...d, erase_inflight: 3 }).some(s => /ring/.test(s)));
+t("erase_inflight range matches apply_kv (0..8)",
+  !validateField(FIELDS.erase_inflight, 8) && !!validateField(FIELDS.erase_inflight, 9));
+t("too short an erase pause warns",
+  advisories({ ...d, erase_pause_ms: 40 }).some(s => /page erase/.test(s)));
+t("erase_pause_ms range matches apply_kv (0..1000)",
+  !validateField(FIELDS.erase_pause_ms, 1000) && !!validateField(FIELDS.erase_pause_ms, 1001));
+
+/* Uniform pacing without high_mtu: the accumulator coalesces ~12 packets per
+ * store, so each packet costs a twelfth of the ring and 5 ms is plenty. */
+t("uniform pacing tolerates a tighter gap with small packets",
+  !advisories({ ...uniform, high_mtu: false, pkt_gap_ms: 5 }).some(s => /NO_MEM/.test(s)));
+t("uniform pacing with small packets and no gap still warns",
+  advisories({ ...uniform, high_mtu: false, pkt_gap_ms: 0 }).some(s => /NO_MEM/.test(s)));
+t("uniform pacing at 5 ms with 244 B packets warns",
+  advisories({ ...uniform, pkt_gap_ms: 5 }).some(s => /NO_MEM/.test(s)));
+t("prn=1 warns it is the slow path", advisories({ ...d, prn: 1 }).some(s => /round-trip/.test(s)));
+t("prn=0 warns", advisories({ ...d, prn: 0 }).some(s => /receipts/.test(s)));
 
 /* --- canonical path is lowercase, matching APP_CONFIG_PATH in config.h ---
  *

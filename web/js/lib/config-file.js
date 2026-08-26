@@ -170,22 +170,27 @@ export const CONFIG_SCHEMA = [
     label: "prn",
     title: "Packet receipt cadence",
     type: "int",
-    def: 1,
+    def: 32,
     min: 0,
     max: 65535,
-    desc: `Firmware packets sent between packet-receipt notifications. This is
-           flow control, not a speed knob — raising it removes back-pressure
-           rather than adding tolerance. 0 disables receipts entirely (risky).`,
-    /* The single least obvious property of the whole protocol — see
-     * CLAUDE.md "Trap 2". Legacy DFU data packets carry no offset, so the
-     * bootloader appends blindly; a dropped packet corrupts the image from
-     * that point on while its byte counter keeps advancing.
+    desc: `Firmware packets between packet-receipt notifications. Each receipt
+           lets the updater compare the peer's byte count against its own and
+           abort early rather than discovering a divergence at VALIDATE. It is
+           not the flow control — pkt_gap_ms is — because the peer emits a
+           receipt as soon as a packet is buffered, not when flash catches up.
+           0 disables receipts entirely (the official app's default), leaving no
+           check until the image is validated.`,
+    /* Legacy DFU data packets carry no offset, so the bootloader appends
+     * blindly; a dropped packet corrupts the image from that point on while
+     * its byte counter keeps advancing. Only prn=1 can resume, but with
+     * high_mtu off the peer's accumulator makes loss rare enough that the
+     * throughput of a high cadence is the better trade.
      */
     note: (v) => {
       const n = Number(v);
-      if (n === 1) return "prn=1 — mid-image resume is available (measured: 0 loss in 2074 packets)";
       if (n === 0) return "prn=0 disables flow control entirely — no loss detection until VALIDATE fails";
-      return "any loss aborts the attempt and retries the whole image — resume only works at prn=1";
+      if (n === 1) return "prn=1 enables mid-image resume, but one receipt per packet is slow — prefer 300 unless a target is dropping packets";
+      return "any loss aborts the attempt and retries the whole image (resume only works at prn=1)";
     },
   },
   {
@@ -193,18 +198,66 @@ export const CONFIG_SCHEMA = [
     label: "pkt_gap_ms",
     title: "Inter-packet gap",
     type: "int",
-    def: 5,
+    def: 4,
     min: 0,
     max: 1000,
     unit: "ms",
-    desc: `Idle gap inserted between consecutive firmware packets. This is the
-           reliability lever. ATT Write Commands have no flow control, so a
-           back-to-back burst arrives faster than an SDK 11-era bootloader can
-           drain it: while committing to flash it has no free RX buffer and
-           silently discards whatever lands. Nothing surfaces at the link layer.
-           The peer needs roughly 35–50 ms between packets regardless of how
-           often it reports receipts. Raise this if a target keeps failing
-           mid-stream.`,
+    desc: `Gap after each ordinary firmware packet. With erase_pause_ms set,
+           this only has to cover the target's flash write rate (~2.5 ms per
+           244 B store), so it can be small. With erase_pause_ms at 0 it must
+           instead cover a whole page erase, and the measured floor is 18 ms.
+           Actual spacing runs ~2.7 ms above this value — that is the
+           write-completion latency, and it is why 15 ms measured 17.9 and
+           still failed.`,
+    note: (v) => {
+      const n = Number(v);
+      const actual = n + 2.7;
+      return `~${actual.toFixed(1)} ms per packet in practice`;
+    },
+  },
+  {
+    key: "erase_pause_ms",
+    label: "erase_pause_ms",
+    title: "Pause at each flash-page boundary",
+    type: "int",
+    def: 100,
+    min: 0,
+    max: 1000,
+    unit: "ms",
+    desc: `The target erases each 4 KB page lazily, on the first write that
+           touches it, and stalls for ~100 ms while it does — buffering only 8
+           packets meanwhile. This waits out that stall after the one packet per
+           page that triggers it, so the other ~16 can go at full speed. 0
+           disables it and paces every packet as if it were the expensive one,
+           which is correct but costs about half the throughput.`,
+    note: (v) => {
+      const n = Number(v);
+      if (n === 0) return "uniform pacing — pkt_gap_ms must then be at least 18";
+      if (n < 90) return `${n} ms may not cover the ~100 ms page erase`;
+      return "erase-aware pacing: one expensive packet per 4 KB, the rest cheap";
+    },
+  },
+  {
+    key: "erase_inflight",
+    label: "erase_inflight",
+    title: "Packets sent into a page erase",
+    type: "int",
+    def: 0,
+    min: 0,
+    max: 8,
+    desc: `How many packets to send during the erase before waiting out the
+           rest of it. 0 stops dead at the boundary, which is safe but wasteful:
+           the erase pauses measured 44% of a transfer with the target's 8-slot
+           buffer sitting empty. Raising this overlaps packets with the erase.
+           Measured, 6 fails every time: the ring is still draining the previous
+           erase when the next begins, so the overflow lands on the second page
+           and the failure point drifts. 2-3 is the usable range.`,
+    note: (v) => {
+      const n = Number(v);
+      if (n === 0) return "no overlap — the full erase pause is dead air";
+      if (n > 3) return `${n} is above the measured-safe range; 6 failed every attempt`;
+      return `overlaps ${n} packet(s) with each erase`;
+    },
   },
   {
     key: "high_mtu",
@@ -212,9 +265,15 @@ export const CONFIG_SCHEMA = [
     title: "Negotiate 247-byte MTU",
     type: "bool",
     def: true,
-    desc: `Request an ATT MTU of up to 247 B after connecting, instead of the
-           23 B default. Some older bootloaders don't honour MTU exchange — turn
-           this off if a target stalls immediately after connect.`,
+    desc: `Request an ATT MTU of up to 247 B instead of the 23 B default, making
+           each packet 244 B. Worth having: the peer buffers one packet per slot
+           during a page erase regardless of size, so large packets carry far
+           more data through the same 8 slots. Some older bootloaders don't
+           honour MTU exchange — turn this off if a target stalls right after
+           connect.`,
+    note: (v) => (v
+      ? "244 B/packet — 8 pending slots hold ~1952 B across a page erase"
+      : "20 B/packet — the peer's accumulator coalesces them to 240 B before flashing"),
   },
   {
     key: "tx_power",
@@ -322,11 +381,61 @@ export function advisories(values) {
   const prn = Number(values.prn);
   const gap = Number(values.pkt_gap_ms);
 
-  if (prn > 1 && gap < 35) {
-    out.push(`prn=${prn} with pkt_gap_ms=${gap}: above prn=1 there is no ` +
-             `mid-image resume, and the peer needs ~35–50 ms between packets. ` +
-             `Measured, prn=8 failed 3 of 5 attempts. Prefer prn=1, or raise ` +
-             `pkt_gap_ms to 35.`);
+  /* Two regimes, and the failure mode differs between them.
+   *
+   * The target erases each 4 KB page on first touch (~100 ms) and buffers only
+   * 8 packets meanwhile — 7 once the triggering packet takes its own slot.
+   * Either wait out that erase once per page, or price every packet as though
+   * it were the one that triggers it.
+   *
+   * Measured: uniform pacing failed at 11 ms and at 15 ms, completed at 18.
+   * Actual spacing runs ~2.7 ms above pkt_gap_ms (write-completion latency).
+   */
+  const UNIFORM_FLOOR_MS = 18;
+  const ERASE_MS = 100;
+  /* Traced on hardware: 2.78 ms/packet on the wire was rejected at the first
+   * page boundary, 3.49 ms completed the image. The steady rate has to stay
+   * clear of the target's own ~2.5 ms write rate, so the usable floor is 3.5. */
+  const WRITE_RATE_MS = 3.5;
+  const erasePause = Number(values.erase_pause_ms);
+
+  if (erasePause === 0) {
+    /* The 18 ms floor was measured at 244 B, where each packet is its own
+     * store. Without high_mtu the target's accumulator coalesces ~12 packets
+     * into one 240 B store, so each packet costs a twelfth of the ring. */
+    const packetsPerStore = values.high_mtu ? 1 : 12;
+    const floor = UNIFORM_FLOOR_MS / packetsPerStore;
+    if (gap < floor) {
+      out.push(`pkt_gap_ms=${gap} with erase_pause_ms=0 paces every packet ` +
+               `uniformly, and ${gap} ms is below the ${floor.toFixed(1)} ms ` +
+               `floor at ${values.high_mtu ? "244" : "20"} B/packet. Overflowing ` +
+               `the target's pending-write ring fails the attempt with NO_MEM, ` +
+               `or stalls the packet write outright. Setting erase_pause_ms ` +
+               `instead is roughly twice as fast.`);
+    }
+  } else {
+    if (erasePause < ERASE_MS * 0.9) {
+      out.push(`erase_pause_ms=${erasePause} may not cover the target's ` +
+               `~${ERASE_MS} ms page erase; the packets behind it would land ` +
+               `while the ring is still full.`);
+    }
+    if (Number(values.erase_inflight) > 3) {
+      out.push(`erase_inflight=${values.erase_inflight} is above the measured ` +
+               `safe range. The ring is still draining the previous erase when ` +
+               `the next one starts, so it holds fewer than its 8 slots suggest ` +
+               `— 6 failed every attempt, on the second page.`);
+    }
+    if (gap + 0.5 < WRITE_RATE_MS) {
+      out.push(`pkt_gap_ms=${gap} sends the cheap packets faster than the ` +
+               `target writes them (~${WRITE_RATE_MS} ms per 244 B store), so ` +
+               `the ring fills gradually across each page.`);
+    }
+  }
+
+  if (prn === 1) {
+    out.push(`prn=1 requests a receipt for every packet — it enables mid-image ` +
+             `resume but adds a round-trip per packet. Receipts are not what ` +
+             `protects the peer's buffer; pkt_gap_ms is.`);
   }
   if (prn === 0) {
     out.push(`prn=0 removes packet receipts altogether: a dropped packet is ` +

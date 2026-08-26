@@ -31,7 +31,7 @@ LOG_MODULE_REGISTER(firmware_zip, LOG_LEVEL_INF);
 /* Central Directory Header signature — we stop when we see this. */
 #define ZIP_CD_SIG   0x02014B50u
 
-/* Single open archive. Not re-entrant; matches the nRF52 sibling. */
+/* Single open archive. Not re-entrant: one DFU runs at a time. */
 static struct fs_file_t s_file;
 static bool             s_file_open;
 
@@ -263,8 +263,9 @@ int firmware_zip_open(const char *zip_path, struct firmware_bundle *out,
 		rc = -EINVAL;
 		goto fail;
 	}
-	/* SD+BL+App is a two-connection flow we don't implement (matches
-	 * nRF52 sibling's stance). Reject up front.
+	/* SD+BL+App is a two-connection flow we don't implement: the target
+	 * takes SoftDevice+Bootloader, reboots, and only then accepts the
+	 * application. Reject up front rather than failing halfway.
 	 */
 	if (type == (FW_TYPE_SOFTDEVICE | FW_TYPE_BOOTLOADER | FW_TYPE_APPLICATION)) {
 		if (err) snprintf(err, err_len, "softdevice_bootloader_application not supported");

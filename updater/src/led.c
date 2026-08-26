@@ -6,7 +6,7 @@
  *   led1 = red_led    (gpio1 pin 22)
  *   led2 = green_led  (gpio1 pin 24)
  *
- * Patterns mirror the nRF52 sibling project so the field UX is consistent:
+ * Patterns are chosen so the device's state is readable across a room:
  *   IDLE          BLUE slow blink (~1 Hz)
  *   SMP_ACTIVE    BLUE fast blink (~4 Hz)   — file upload in progress
  *   DFU_RUNNING   GREEN blink period shrinks 600 ms → 30 ms with progress

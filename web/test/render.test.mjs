@@ -71,10 +71,10 @@ const dlg = app.querySelector("#cfg-overlay");
 const dlgText = dlg ? dlg.textContent.replace(/\s+/g, " ") : "";
 
 t("config dialog opens",     !!dlg);
-t("one row per schema key",  dlg?.querySelectorAll(".cfg-row").length === 11);
+t("one row per schema key",  dlg?.querySelectorAll(".cfg-row").length === 14);
 t("sections rendered",       dlg?.querySelectorAll(".cfg-section").length >= 3);
-t("every row has a description", dlg?.querySelectorAll(".cfg-row .desc").length === 11);
-t("every row has a default chip", dlg?.querySelectorAll(".cfg-def").length === 11);
+t("every row has a description", dlg?.querySelectorAll(".cfg-row .desc").length === 14);
+t("every row has a default chip", dlg?.querySelectorAll(".cfg-def").length === 14);
 t("ble_name is a text input", dlg?.querySelector("#cfg-ble_name")?.type === "text");
 t("high_mtu is a checkbox",   dlg?.querySelector("#cfg-high_mtu")?.type === "checkbox");
 t("tx_power is a select",     dlg?.querySelector("#cfg-tx_power")?.tagName === "SELECT");

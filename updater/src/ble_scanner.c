@@ -10,7 +10,7 @@
  *    bt_data_parse and picking out NAME + SVC_UUID128. We do both in one
  *    pass so a single ad match reads all fields at once.
  *  - `s_ctx` is process-wide (only one scan at a time is meaningful), so
- *    find_first() is not re-entrant. That matches the nRF52 sibling.
+ *    find_first() is not re-entrant. One scan at a time is all we need.
  */
 
 #include "ble_scanner.h"
@@ -210,7 +210,7 @@ int ble_scanner_find_first(struct ble_scanner_target *out,
 
 	/* Active scan so we catch the scan response too (some devices put
 	 * the name only in the scan response). Interval 160 * 0.625 = 100 ms,
-	 * window 80 * 0.625 = 50 ms — same duty cycle the nRF52 sibling used.
+	 * window 80 * 0.625 = 50 ms, a 50% duty cycle.
 	 */
 	struct bt_le_scan_param params = {
 		.type     = BT_LE_SCAN_TYPE_ACTIVE,

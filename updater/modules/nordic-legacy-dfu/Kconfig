@@ -1,0 +1,58 @@
+# Nordic Legacy DFU client for Zephyr
+# SPDX-License-Identifier: BSD-3-Clause
+
+menuconfig NORDIC_LEGACY_DFU
+	bool "Nordic Legacy DFU client"
+	depends on BT_CENTRAL && BT_GATT_CLIENT
+	select CPP
+	help
+	  A GATT client implementation of Nordic's Legacy DFU protocol
+	  (nRF5 SDK 4.3 through 11), ported from the Android DFU Library.
+	  It streams a firmware image to a peer running the legacy DFU
+	  bootloader, and can trigger the buttonless jump on a peer that is
+	  still running its application.
+
+	  Scanning and connection management are the application's job: the
+	  client takes an already-connected bt_conn.
+
+if NORDIC_LEGACY_DFU
+
+config NORDIC_LEGACY_DFU_MAX_PACKET_SIZE
+	int "Maximum bytes per Packet characteristic write"
+	default 20
+	range 20 244
+	help
+	  Upper bound on the payload of each write to the DFU Packet
+	  characteristic. The client uses min(ATT_MTU - 3, this).
+
+	  20 is the safe default and matches every legacy bootloader: DFU
+	  before nRF5 SDK 14.1 only supports an ATT MTU of 23. Raise it only
+	  if the target is known to negotiate a larger MTU, and note that
+	  this value also sizes a static buffer in the client.
+
+config NORDIC_LEGACY_DFU_GATT_TIMEOUT_MS
+	int "Timeout for individual GATT operations, in milliseconds"
+	default 15000
+	help
+	  Applies to discovery, subscription, reads, and the completion of a
+	  single write. It does not apply to waiting for a DFU response
+	  notification, which is governed by Parameters::operation_timeout_ms
+	  and defaults to no timeout, as in the Android library.
+
+config NORDIC_LEGACY_DFU_TX_RETRY_COUNT
+	int "Retries when the host has no TX buffer for a packet write"
+	default 200
+	help
+	  Zephyr reports -ENOMEM when bt_gatt_write_without_response_cb()
+	  cannot get a buffer; Android's stack queues instead. The client
+	  retries this many times before giving up on the transfer.
+
+config NORDIC_LEGACY_DFU_TX_RETRY_DELAY_MS
+	int "Delay between TX buffer retries, in milliseconds"
+	default 5
+
+module = NORDIC_LEGACY_DFU
+module-str = nordic_dfu
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # NORDIC_LEGACY_DFU

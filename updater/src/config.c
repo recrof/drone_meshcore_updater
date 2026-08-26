@@ -1,7 +1,7 @@
 /*
  * config.txt parser — line-based `key=value` with `#`/`;` comments and
- * trimmed whitespace. Ported from the nRF52 sibling's config.cpp with
- * SdFat File replaced by Zephyr fs_read.
+ * trimmed whitespace. Reads the whole file in one go (it is capped at
+ * 1023 bytes) and walks it line by line.
  *
  * Design notes:
  *  - Defaults live in apply_defaults(). Unknown keys are ignored so the
@@ -40,12 +40,20 @@ static void apply_defaults(struct app_config *c)
 	 * expensive to undo.
 	 */
 	c->ble_firmware_mapping[0] = '\0';
-	/* prn=1 is the only setting with a working mid-image resume: one receipt
-	 * per packet means the peer can never hold a partially-received burst,
-	 * so its byte count is always a clean packet boundary. Measured 0 loss
-	 * in 2074 packets; at prn>1 any single drop costs a full retry.
+	/* PRN is not what keeps the peer alive — pkt_gap_ms is (see below).
+	 * Its job here is the integrity check: each receipt lets us compare
+	 * the peer's byte count against our own and abort early instead of
+	 * discovering a divergence at VALIDATE. The official app disables PRN
+	 * entirely; we deliberately don't.
+	 *
+	 * 32 packets ~= 7.8 KB between checks, costing one round-trip per
+	 * ~380 ms of streaming (a few percent). Raise it for a little more
+	 * speed, lower it to catch divergence sooner.
 	 */
-	c->prn            = 1;
+	c->prn            = 32;
+	/* ON. 244-byte packets are what the peer's pending-write buffer is
+	 * dimensioned for — see the pkt_gap_ms note below.
+	 */
 	c->high_mtu       = true;
 	c->retries        = 5;
 	/* -75 dBm rather than -90: a link weak enough to advertise is not
@@ -64,12 +72,31 @@ static void apply_defaults(struct app_config *c)
 	c->tx_power       = 6;
 	c->scan_timeout   = 0;
 	c->scan_debug     = false;
-	/* 5 ms ~= one packet every third connection event at a 15 ms
-	 * interval. Empirically enough to keep an SDK 11 bootloader's RX
-	 * buffers from overrunning while still leaving plenty of headroom
-	 * over the ~8 KB/s a PRN-throttled stream achieves anyway.
+	/* Erase-aware pacing, calibrated on hardware.
+	 *
+	 * The target erases each 4 KB page lazily on the first write that
+	 * touches it (~100 ms, buffering into an 8-slot ring), then writes each
+	 * 244 B store in ~2.5 ms. One packet per page is expensive; the other
+	 * ~16 are cheap. erase_pause_ms covers the erase, pkt_gap_ms covers the
+	 * write rate for the rest.
+	 *
+	 * pkt_gap_ms=4, not 2. Traced per-packet, gap=2 put packets on the wire
+	 * every ~2.2-2.8 ms — at or below the target's own write rate — so its
+	 * queue crept up across a page and the boundary packet, which needs a
+	 * ring slot, found none. That failed at the *first* page boundary every
+	 * time, and only on the attempt that happened to run fastest:
+	 *
+	 *   page-0 spacing 2.78 ms/packet -> rejected at 4392 B
+	 *   page-0 spacing 3.49 ms/packet -> completed the whole image
+	 *
+	 * 4 ms sits clear of that threshold. It costs ~22 ms per 4 KB, which
+	 * erase_inflight can win back.
 	 */
-	c->pkt_gap_ms     = 5;
+	c->pkt_gap_ms     = 4;
+	c->erase_pause_ms = 100;
+	/* 0 keeps the measured-good pacing. 6 overlaps packets with the erase
+	 * and should recover the throughput that pkt_gap_ms=4 costs. */
+	c->erase_inflight = 0;
 }
 
 /* ---- small string helpers --------------------------------------------- */
@@ -128,6 +155,10 @@ static void apply_kv(struct app_config *c, const char *key, const char *val)
 		c->scan_debug = parse_bool(val);
 	} else if (!strcmp(key, "pkt_gap_ms")) {
 		if (n >= 0 && n <= 1000) c->pkt_gap_ms = (uint16_t)n;
+	} else if (!strcmp(key, "erase_pause_ms")) {
+		if (n >= 0 && n <= 1000) c->erase_pause_ms = (uint16_t)n;
+	} else if (!strcmp(key, "erase_inflight")) {
+		if (n >= 0 && n <= 8) c->erase_inflight = (uint8_t)n;
 	} else {
 		LOG_DBG("ignoring unknown key '%s'", key);
 	}

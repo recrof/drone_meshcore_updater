@@ -20,6 +20,11 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+
 /* Longest glob pattern accepted in a single rule. */
 #define FIRMWARE_MAP_PAT_MAX 64
 
@@ -47,3 +52,7 @@ int firmware_map_resolve(const char *peer_name, const char *mapping,
  * Exposed for testing.
  */
 bool firmware_map_glob(const char *pat, const char *str);
+
+#ifdef __cplusplus
+}
+#endif

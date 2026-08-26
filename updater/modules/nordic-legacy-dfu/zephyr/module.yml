@@ -1,0 +1,4 @@
+name: nordic-legacy-dfu
+build:
+  cmake: .
+  kconfig: Kconfig
