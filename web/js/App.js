@@ -1,5 +1,5 @@
 import { onMounted } from "./vue.js";
-import { fsInfo, mtuInfo, log, bluetoothAvailable, configOpen } from "./store.js";
+import { fsInfo, mtuInfo, log, bluetoothAvailable, configOpen, flashOpen } from "./store.js";
 
 import AppHeader    from "./components/AppHeader.js";
 import ProgressBar  from "./components/ProgressBar.js";
@@ -8,12 +8,13 @@ import FileListing  from "./components/FileListing.js";
 import LogPane      from "./components/LogPane.js";
 import DropOverlay  from "./components/DropOverlay.js";
 import ConfigDialog from "./components/ConfigDialog.js";
+import FlashDialog  from "./components/FlashDialog.js";
 
 export default {
   name: "App",
   components: {
     AppHeader, ProgressBar, FileToolbar, FileListing,
-    LogPane, DropOverlay, ConfigDialog,
+    LogPane, DropOverlay, ConfigDialog, FlashDialog,
   },
   setup() {
     onMounted(() => {
@@ -25,7 +26,7 @@ export default {
       }
     });
 
-    return { configOpen, fsInfo, mtuInfo };
+    return { configOpen, flashOpen, fsInfo, mtuInfo };
   },
   template: /* html */ `
     <AppHeader />
@@ -39,5 +40,6 @@ export default {
     <LogPane />
     <DropOverlay />
     <ConfigDialog :open="configOpen" @close="configOpen = false" />
+    <FlashDialog :open="flashOpen" @close="flashOpen = false" />
   `,
 };

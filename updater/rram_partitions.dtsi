@@ -1,0 +1,61 @@
+/*
+ * RRAM partition table — corrected MCUboot slot geometry.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Third bug in Seeed's vendored board files (after the openocd RRAM commit
+ * and the LED polarity), and the same lesson: the table *looks* MCUboot-ready
+ * — boot_partition at 0, two image slots, a storage partition — but the slots
+ * are 449 KB, and 449 KB is not a multiple of the 4096-byte erase block.
+ * MCUboot's CMake refuses outright:
+ *
+ *   slot0_partition size (459776) is not divisible by erase block size (4096)
+ *
+ * That is the good failure. It means the layout had never been built with
+ * MCUboot and nobody had noticed, which fits: SB_CONFIG_BOOTLOADER_MCUBOOT
+ * was off, so the whole table was decorative.
+ *
+ * Rebuilt as 896 KB (0xE0000) slots — the largest 4096-multiple pair that
+ * fits between boot_partition and storage_partition:
+ *
+ *   0x000000  64K   boot_partition   (mcuboot)      unchanged
+ *   0x010000  896K  slot0_partition  (image-0)
+ *   0x0F0000  896K  slot1_partition  (image-1)
+ *   0x1D0000  4K    (unused, alignment slack)
+ *   0x1D1000  36K   storage_partition               unchanged
+ *   0x1DA000  140K  (unused tail of the 2036K RRAM)
+ *
+ * storage_partition deliberately does not move: CONFIG_SETTINGS=y with no
+ * explicit backend can land there, and relocating it would silently discard
+ * whatever a deployed device has stored. The application image is ~270 KB, so
+ * 896 KB is over 3x headroom either way.
+ *
+ * The two *_ns partitions are TF-M non-secure slots. This is not a TF-M
+ * build, and they occupy exactly the space the enlarged secure slots need, so
+ * they are deleted rather than resized.
+ *
+ * WHY THIS IS A SEPARATE FILE, not part of app.overlay: sysbuild builds
+ * MCUboot as its own Zephyr image with its own devicetree, and app.overlay
+ * applies only to the application image. MCUboot would keep seeing the board's
+ * 449 KB slots and keep refusing. Both images include this one fragment —
+ * app.overlay for the app, sysbuild/mcuboot.overlay for the bootloader — so
+ * the two can never disagree about where the slots are, which is the kind of
+ * disagreement that produces an image that flashes and does not boot.
+ */
+
+/delete-node/ &slot0_ns_partition;
+/delete-node/ &slot1_ns_partition;
+/delete-node/ &slot1_partition;
+
+&slot0_partition {
+	reg = <0x00010000 DT_SIZE_K(896)>;
+};
+
+&cpuapp_rram {
+	partitions {
+		slot1_partition: partition@f0000 {
+			label = "image-1";
+			reg = <0x000f0000 DT_SIZE_K(896)>;
+		};
+	};
+};

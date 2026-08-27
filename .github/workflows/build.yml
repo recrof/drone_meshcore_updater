@@ -7,7 +7,11 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - 'v*'
+      # Release tags are vX.XX (v0.10, v1.05). The pattern is deliberately a
+      # little looser than that — GitHub tag filters are globs, not regexes,
+      # and a filter too strict to match the tag you just pushed fails
+      # silently: no run, no error, nothing to notice.
+      - 'v[0-9]*.[0-9]*'
 
 jobs:
   build:
@@ -16,13 +20,45 @@ jobs:
     # per-run west init dance.
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.0.0
+      # Must track `revision:` in updater/west.yml — the toolchain image and
+      # the SDK it builds are versioned together. The step below fails the
+      # job if the two drift apart.
+      image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.4.0
     steps:
       - name: Checkout application
         uses: actions/checkout@v7
         # Default checkout goes to $GITHUB_WORKSPACE — that's the workspace
         # root layout the local dev flow uses too. `updater/` inside it is
         # the manifest project.
+
+      - name: Toolchain image matches the pinned SDK
+        run: |
+          MANIFEST=$(sed -n 's/^ *revision: *\(v[0-9.]*\) *$/\1/p' updater/west.yml)
+          IMAGE=v3.4.0
+          echo "west.yml pins NCS ${MANIFEST}; container is ${IMAGE}"
+          [ "$MANIFEST" = "$IMAGE" ] || {
+            echo "::error::sdk-nrf-toolchain:${IMAGE} does not match the NCS" \
+                 "revision ${MANIFEST} pinned in updater/west.yml." \
+                 "Bump the container image in this workflow."
+            exit 1
+          }
+
+      - name: Trust the checkout
+        # actions/checkout runs as a different user than the image's, so git
+        # refuses to operate on the tree ("dubious ownership") and west update
+        # dies on the first fetch.
+        run: git config --global --add safe.directory '*'
+
+      - name: Toolchain sanity
+        # The image puts the toolchain on PATH through BASH_ENV
+        # (/opt/non-interactive-setup.sh) rather than in the image's own PATH,
+        # which only works because Actions runs steps through non-interactive
+        # bash. Check it here so a shell change surfaces as "west: not found"
+        # on line one instead of a cmake error ten minutes into the build.
+        run: |
+          which west cmake ninja || { echo "::error::toolchain not on PATH — is BASH_ENV still sourced?"; echo "PATH=$PATH"; exit 1; }
+          west --version
+          cmake --version | head -1
 
       - name: Initialize west workspace
         run: west init -l updater
@@ -41,18 +77,44 @@ jobs:
           VER="${GITHUB_REF_NAME}"
           [[ "$GITHUB_REF" == refs/tags/* ]] || VER="dev-${GITHUB_SHA::7}"
           BASE="xiao_nrf54_updater-${VER}"
-          # Sysbuild nests the application domain: the images are under
-          # <build>/<app>/zephyr, not <build>/zephyr. The latter exists but
-          # only holds sysbuild's own Kconfig output, so copying from it fails.
+          # Sysbuild nests each image domain: the app is under
+          # <build>/updater/zephyr and the bootloader under
+          # <build>/mcuboot/zephyr. <build>/zephyr exists but holds only
+          # sysbuild's own Kconfig output, so copying from it fails.
           APP=updater/build/updater/zephyr
-          cp ${APP}/zephyr.hex out/${BASE}.hex
-          cp ${APP}/zephyr.bin out/${BASE}.bin
-          # MCUboot images only exist when sysbuild builds MCUboot, which needs
-          # SB_CONFIG_BOOTLOADER_MCUBOOT (a sysbuild.conf), not the app-level
-          # CONFIG_BOOTLOADER_MCUBOOT that prj.conf sets. Absent today.
-          cp ${APP}/app_update.bin      out/${BASE}-app_update.bin || true
-          cp ${APP}/dfu_application.zip out/${BASE}-dfu.zip        || true
+          BOOT=updater/build/mcuboot/zephyr
+
+          # The one file a normal user needs: MCUboot + the signed
+          # application, ready for any SWD probe. zephyr.hex on its own links
+          # at 0x10000 and will NOT boot without a bootloader under it, so it
+          # is deliberately not published as a flashable artifact.
+          python3 updater/tools/merge_hex.py "out/${BASE}-merged.hex" \
+            "${BOOT}/zephyr.hex" "${APP}/zephyr.signed.hex"
+
+          # OTA update of the updater itself, for nRF Connect Device Manager.
+          cp updater/build/dfu_application.zip out/${BASE}-dfu.zip
+          cp ${APP}/zephyr.signed.bin          out/${BASE}-app.signed.bin
+
+          # Unsigned, bootloader-relative — debugging only.
+          cp ${APP}/zephyr.elf out/${BASE}.elf
           ls -la out/
+
+      - name: Verify the merged image
+        # merge_hex.py refuses to overlap, so a layout regression (MCUboot
+        # linked into slot0, slots resized past storage) fails here rather
+        # than producing an image that flashes and does not boot.
+        run: |
+          python3 - <<'EOF'
+          import sys, glob
+          sys.path.insert(0, "updater/tools")
+          from merge_hex import parse
+          m = parse(glob.glob("out/*-merged.hex")[0])
+          lo, hi = min(m), max(m)
+          print(f"merged image: {len(m)} bytes, {lo:#010x}..{hi:#010x}")
+          assert lo == 0, f"image does not start at 0 (got {lo:#x}) — no reset vector"
+          assert 0x10000 in m, "nothing at slot0 (0x10000) — application missing"
+          assert hi < 0x1d0000, f"image runs into storage_partition ({hi:#x})"
+          EOF
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v7
@@ -62,7 +124,7 @@ jobs:
 
       - name: Create draft release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: ${{ github.ref_name }}
           draft: true

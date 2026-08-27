@@ -57,3 +57,9 @@ node_modules/
 *.elf
 *.uf2
 *.map
+
+# Staged by web/tools/stage-firmware.mjs for local testing, and by
+# .github/workflows/web.yml at deploy time. Never committed: the real
+# copy comes from a release, and a stale hex sitting next to the sources
+# is one anybody could flash by pressing "Flash newest".
+web/firmware/

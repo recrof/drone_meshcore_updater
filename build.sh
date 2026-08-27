@@ -8,6 +8,7 @@
 #   ./build.sh               # build for xiao_nrf54lm20a (default)
 #   ./build.sh -p            # clean rebuild (pristine)
 #   ./build.sh -b <board>    # build for a specific board
+#   ./build.sh merge         # rebuild updater/build/merged.hex only
 #   ./build.sh flash         # flash the last build
 #   ./build.sh menuconfig    # open Kconfig menuconfig
 
@@ -27,10 +28,29 @@ if [ ! -d ".west" ]; then
   exit 1
 fi
 
+# Sysbuild emits one image per domain and no combined file — `west flash`
+# walks domains.yaml instead. That is fine here and useless everywhere else,
+# so build a single merged.hex for release artifacts, for a browser-based
+# flasher, and for anyone with a plain SWD probe.
+#
+# Skipped silently when MCUboot is not in the build (SB_CONFIG_BOOTLOADER_MCUBOOT
+# off), because then zephyr.hex already is the whole image.
+merge_hex() {
+  local mcuboot="${BUILD_DIR}/mcuboot/zephyr/zephyr.hex"
+  local app="${BUILD_DIR}/updater/zephyr/zephyr.signed.hex"
+  [ -f "${mcuboot}" ] && [ -f "${app}" ] || return 0
+  python3 "${APP}/tools/merge_hex.py" "${BUILD_DIR}/merged.hex" "${mcuboot}" "${app}"
+}
+
 case "${1:-build}" in
   build)
     shift || true
     west build -b "${BOARD}" "${APP}" --build-dir "${BUILD_DIR}" "$@"
+    merge_hex
+    ;;
+
+  merge)
+    merge_hex
     ;;
   flash)
     # Flashing on the XIAO nRF54LM20A goes through the on-board SAMD11
@@ -81,5 +101,6 @@ case "${1:-build}" in
   *)
     # Pass-through for `-p`, `-t <target>`, etc.
     west build -b "${BOARD}" "${APP}" --build-dir "${BUILD_DIR}" "$@"
+    merge_hex
     ;;
 esac

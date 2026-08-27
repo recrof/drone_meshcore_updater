@@ -51,6 +51,49 @@ const stale = [...precache].filter(f => f !== "./" && !shipped.includes(f));
 t("no precached file has been deleted", stale.length === 0, stale.join(", "));
 
 t("the app shell itself is precached", precache.has("./") && precache.has("index.html"));
+
+/* The release firmware is staged by CI and does not exist in the repo, so it
+ * must NOT be in PRECACHE — cache.addAll is atomic, and one 404 there fails
+ * the install and takes the whole PWA down. It gets its own runtime cache. */
+t("staged firmware is not precached",
+  ![...precache].some(f => f.startsWith("firmware/")));
+t("firmware has a cache that survives activate",
+  /FIRMWARE_CACHE/.test(sw) && /key !== CACHE && key !== FIRMWARE_CACHE/.test(sw));
+t("firmware is network-first, unlike the shell",
+  /Firmware is network-first/.test(sw));
+
+/* --- the staged firmware manifest --------------------------------------
+ *
+ * manifest.json is generated, never committed, so there is no fixture to
+ * compare against — instead hold the producer and the consumer together:
+ * every key stage-firmware.mjs writes must be a key FlashDialog.js reads,
+ * and every key the dialog depends on must be one the tool emits.
+ */
+{
+  const { buildManifest, MANIFEST_KEYS } =
+    await import("../tools/stage-firmware.mjs");
+  const m = buildManifest(Buffer.from(":00000001FF\n"), { tag: "v1.23", file: "merged.hex" });
+
+  t("manifest declares the keys it writes",
+    MANIFEST_KEYS.every(k => k in m), Object.keys(m).join(", "));
+  t("manifest writes no undeclared keys",
+    Object.keys(m).every(k => MANIFEST_KEYS.includes(k)));
+  t("manifest carries a sha256 of the image",
+    /^[0-9a-f]{64}$/.test(m.sha256), m.sha256);
+  t("manifest byte count matches the image", m.bytes === 12, String(m.bytes));
+  t("manifest timestamp is ISO-8601 Z",
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(m.published), m.published);
+
+  const dialog = readFileSync(join(WEB, "js/components/FlashDialog.js"), "utf8");
+  /* `file` is dereferenced to build the URL and `sha256` gates the write, so
+   * those two are load-bearing rather than cosmetic. */
+  for (const key of ["file", "sha256", "tag", "bytes", "published"]) {
+    t(`FlashDialog reads manifest.${key}`,
+      new RegExp(`newest(\\.value)?\\.${key}\\b`).test(dialog));
+  }
+  t("the dialog fetches firmware/manifest.json",
+    /firmware\/`?\s*\}?\s*manifest\.json|MANIFEST_URL/.test(dialog));
+}
 t("build-only directories are not precached",
   ![...precache].some(f => /^(dist|test|tools)\//.test(f)));
 

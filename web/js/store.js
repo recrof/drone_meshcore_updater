@@ -33,6 +33,9 @@ export const busy       = ref(false);
 /* Lives here rather than in App so both the toolbar button and a click on
  * config.txt in the listing can open the editor without an event chain. */
 export const configOpen = ref(false);
+/* Same reasoning as configOpen: the flasher is reachable from the toolbar and
+ * (unlike everything else here) works with no device connected at all. */
+export const flashOpen = ref(false);
 
 export const progress = reactive({
   shown: false,
@@ -195,6 +198,7 @@ export async function flashZip(fullpath) {
 }
 
 export function openConfig() { configOpen.value = true; }
+export function openFlash() { flashOpen.value = true; }
 
 /* Reboot the updater itself (not the DFU target) via the standard mcumgr OS
  * group. The firmware already answers this: CONFIG_REBOOT=y registers the

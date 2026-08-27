@@ -79,3 +79,9 @@
 &green_led {
 	gpios = <&gpio1 24 GPIO_ACTIVE_LOW>;
 };
+
+/*
+ * Corrected MCUboot slot geometry. Shared with the bootloader image through
+ * sysbuild/mcuboot.overlay — see that file for why it is not inline here.
+ */
+#include "rram_partitions.dtsi"

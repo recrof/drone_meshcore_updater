@@ -1,0 +1,33 @@
+/*
+ * Devicetree overlay for the MCUboot image.
+ *
+ * Sysbuild picks this up automatically: it looks for
+ * <APP_DIR>/sysbuild/<image>.overlay (sysbuild_extensions.cmake, "Check for
+ * overlay named <ZBUILD_APPLICATION>.overlay").
+ *
+ * MCUboot is a separate Zephyr image with its own devicetree, so it does not
+ * see updater/app.overlay. Without this it keeps reading the board's original
+ * 449 KB slots and fails configuration with "slot0_partition size (459776) is
+ * not divisible by erase block size (4096)".
+ */
+#include "../rram_partitions.dtsi"
+
+/*
+ * Put MCUboot in the bootloader partition.
+ *
+ * The board .dts hardcodes `zephyr,code-partition = &slot0_partition` (line
+ * 17), and the MCUboot image inherits it, so the bootloader links at 0x10000
+ * — on top of the very slot it is supposed to load. Nothing warns: both
+ * images build, and merging them is what surfaces it as a 45 KB overlap at
+ * 0x00010000.
+ *
+ * The board's choice is defensible for a bootloader-less build, which is what
+ * it had always been until now. It just cannot survive contact with MCUboot,
+ * and only this image needs correcting — the application really does belong
+ * in slot0.
+ */
+/ {
+	chosen {
+		zephyr,code-partition = &boot_partition;
+	};
+};

@@ -18,12 +18,30 @@
  *    cache name, so activate() dropping every other cache is the whole
  *    upgrade path.
  *
- *  - Stale-while-revalidate: the cached copy answers immediately (that is the
- *    offline guarantee), and a background fetch refreshes it for next load.
- *    A reload after an update therefore lands on the new version.
+ *  - **The shell is served cache-only, and only a new worker replaces it.**
+ *    This used to be stale-while-revalidate, which was a bug: each file
+ *    revalidated on its own schedule, so one reload after a deploy could mix
+ *    generations. An app made of ES modules does not survive that. The
+ *    observed failure was a new FileToolbar.js (renders the Flash button)
+ *    against a cached older App.js (never mounts FlashDialog) — the click set
+ *    a ref nothing was listening to and produced no error anywhere. Anything
+ *    that changes together must be replaced together, which is the entire
+ *    reason the precache is versioned.
  */
 
-const CACHE = "xiao-nrf54-updater-v2";
+const CACHE = "xiao-nrf54-updater-v4";
+
+/*
+ * The release firmware staged by CI at firmware/. Kept in its own cache,
+ * outside the versioned shell: it changes on a release cadence rather than a
+ * deploy cadence, and re-downloading 900 KB of Intel HEX every time a CSS file
+ * moves would be silly. Survives activate() for the same reason.
+ *
+ * This is what makes "Flash newest" work with no network — which is the whole
+ * premise of the tool being a PWA.
+ */
+const FIRMWARE_CACHE = "xiao-nrf54-firmware";
+const FIRMWARE_PREFIX = new URL("firmware/", self.location.href).href;
 
 const PRECACHE = [
   "./",
@@ -40,8 +58,11 @@ const PRECACHE = [
   "js/store.js",
   "js/vue.js",
   "js/lib/cbor.js",
+  "js/lib/cmsis-dap.js",
   "js/lib/config-file.js",
   "js/lib/format.js",
+  "js/lib/intel-hex.js",
+  "js/lib/nrf54l-flash.js",
   "js/lib/pwa.js",
   "js/lib/smp-client.js",
   "js/components/AppHeader.js",
@@ -49,6 +70,7 @@ const PRECACHE = [
   "js/components/DropOverlay.js",
   "js/components/FileListing.js",
   "js/components/FileToolbar.js",
+  "js/components/FlashDialog.js",
   "js/components/Icon.js",
   "js/components/LogPane.js",
   "js/components/MappingEditor.js",
@@ -74,7 +96,7 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil((async () => {
     for (const key of await caches.keys()) {
-      if (key !== CACHE) await caches.delete(key);
+      if (key !== CACHE && key !== FIRMWARE_CACHE) await caches.delete(key);
     }
     await self.clients.claim();
   })());
@@ -84,6 +106,10 @@ self.addEventListener("message", (event) => {
   if (event.data === "skip-waiting") self.skipWaiting();
 });
 
+/* Absolute URLs of everything in PRECACHE, resolved once against the worker's
+ * own location so a sub-path deploy (GitHub Pages) matches too. */
+const SHELL = new Set(PRECACHE.map(p => new URL(p, self.location.href).href));
+
 self.addEventListener("fetch", (event) => {
   const req = event.request;
   if (req.method !== "GET") return;
@@ -91,25 +117,54 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
 
+  /* Any navigation in scope is the app shell — deep links and "?utm_..."
+   * variants must not miss the cache and take the page offline. */
+  /* Firmware is network-first: a newer release should be picked up as soon as
+   * there is a network to pick it up from, and the cached copy is the offline
+   * fallback rather than the preferred answer. Opposite of the shell, which
+   * must never mix versions. */
+  if (url.href.startsWith(FIRMWARE_PREFIX)) {
+    event.respondWith((async () => {
+      const cache = await caches.open(FIRMWARE_CACHE);
+      try {
+        const res = await fetch(req);
+        if (res && res.ok) {
+          await cache.put(url.href, res.clone());
+          return res;
+        }
+      } catch { /* offline — fall through */ }
+      const hit = await cache.match(url.href);
+      if (hit) return hit;
+      return new Response("no firmware cached", {
+        status: 504, statusText: "Offline",
+        headers: { "Content-Type": "text/plain" },
+      });
+    })());
+    return;
+  }
+
+  const isNavigation = req.mode === "navigate";
+  const key = isNavigation ? new URL("./", self.location.href).href : url.href;
+
+  if (!isNavigation && !SHELL.has(key)) {
+    /* Not part of the shell: let it go to the network untouched, and do not
+     * accumulate it in the versioned cache. */
+    return;
+  }
+
   event.respondWith((async () => {
     const cache = await caches.open(CACHE);
+    const hit = await cache.match(key);
+    if (hit) return hit;
 
-    /* A navigation to any in-scope URL is the app shell. Deep links and
-     * "?utm_..." variants must not miss the cache and take the page offline. */
-    const key = req.mode === "navigate" ? "./" : req;
-    const hit = await cache.match(key, { ignoreSearch: req.mode === "navigate" });
+    /* A shell file missing from the cache means the install did not complete.
+     * Fall back to the network rather than failing outright, but do not cache
+     * the result — mixing it with a different generation is the bug above. */
+    try {
+      const res = await fetch(req);
+      if (res && res.ok) return res;
+    } catch { /* offline */ }
 
-    const network = fetch(req).then((res) => {
-      if (res && res.ok && res.type === "basic") cache.put(key, res.clone());
-      return res;
-    }).catch(() => null);
-
-    if (hit) {
-      event.waitUntil(network);      // refresh in the background
-      return hit;
-    }
-    const res = await network;
-    if (res) return res;
     return new Response("offline and not cached", {
       status: 504, statusText: "Offline",
       headers: { "Content-Type": "text/plain" },

@@ -189,3 +189,57 @@
   font-variant-numeric: tabular-nums;
 }
 .map-size.err { color: var(--danger); }
+
+/* --- USB flasher ------------------------------------------------ */
+
+/* Shares .cfg-modal / .cfg-head / .cfg-body / .cfg-section with the config
+   editor — it is the same kind of screen and should not invent a second
+   visual language for it. */
+#flash-overlay {
+  position: fixed; inset: 0; z-index: 30;
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  backdrop-filter: blur(3px);
+  display: grid; place-items: center; padding: 24px;
+}
+
+.flash-step {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 0;
+}
+.flash-step .grow { flex: 1; }
+.flash-step .mono { font-family: var(--mono); font-size: 12px; }
+.flash-ok { color: var(--accent); font-size: 11px; }
+
+.flash-note { color: var(--muted); font-size: 12px; }
+.flash-note.warn { color: var(--warn); }
+.flash-note.err  { color: var(--danger); }
+
+/* <label class=btn> wrapping a hidden file input — base.css hides
+   input[type=file] globally, so the label is the whole control. */
+label.btn { display: inline-block; cursor: pointer; }
+label.btn.disabled { opacity: 0.4; cursor: not-allowed; }
+label.btn:hover:not(.disabled) { border-color: var(--accent); }
+
+.flash-progress { display: flex; align-items: center; gap: 10px; padding: 6px 0 2px; }
+.flash-progress .bar {
+  flex: 1; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden;
+}
+.flash-progress .fill {
+  height: 100%; background: var(--accent); transition: width 120ms linear;
+}
+.flash-progress .mono {
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+
+/* Its own log, not the app's: none of this goes over BLE, and interleaving
+   SWD chatter with SMP traffic would make both harder to read. */
+.flash-log {
+  margin: 12px 0 0; padding: 10px 12px; max-height: 26vh; overflow: auto;
+  border: 1px solid var(--line); border-radius: 4px; background: var(--card);
+  font-family: var(--mono); font-size: 11px; line-height: 1.55;
+  color: var(--muted); white-space: pre-wrap;
+}
+.flash-log .err  { color: var(--danger); }
+.flash-log .ok   { color: var(--accent); }
+.flash-log .warn { color: var(--warn); }

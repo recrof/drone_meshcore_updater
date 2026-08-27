@@ -1,6 +1,6 @@
-import { ref } from "../vue.js";
+import { ref, computed } from "../vue.js";
 import {
-  connected, refresh, uploadFiles, openConfig, autoFlash, reboot,
+  connected, refresh, uploadFiles, openConfig, autoFlash, reboot, openFlash,
 } from "../store.js";
 import Icon from "./Icon.js";
 
@@ -25,7 +25,18 @@ export default {
       e.target.value = "";
     };
 
-    return { connected, refresh, picker, onPick, openConfig, autoFlash, reboot };
+    /* Built here rather than inline in the template: the disconnected text
+     * contains an apostrophe, and an escaped quote inside a Vue expression
+     * attribute does not survive HTML attribute parsing — it compiles to
+     * "Unexpected identifier 's'" and takes the whole toolbar down with it. */
+    const flashTitle = computed(() => connected.value
+      ? "Disconnect first — flashing halts the CPU and drops the Bluetooth link"
+      : "Flash this updater's own firmware over USB");
+
+    return {
+      connected, refresh, picker, onPick, openConfig, autoFlash, reboot,
+      openFlash, flashTitle,
+    };
   },
   template: /* html */ `
     <div class="toolbar">
@@ -44,6 +55,17 @@ export default {
       <button class="icon-btn" :disabled="!connected" @click="reboot"
               title="Reboot the updater" aria-label="Reboot">
         <Icon name="restart_alt"/>
+      </button>
+      <!-- Enabled when nothing is connected — it runs over USB, and is what
+           you reach for when the device cannot be talked to over BLE at all.
+           Disabled *while* connected because flashing halts the CPU, which
+           takes the BLE stack down with it: the link would drop mid-operation
+           and the app would be left describing a device that no longer
+           exists. The title says so, since a disabled icon with no
+           explanation is a dead end. -->
+      <button class="icon-btn" :disabled="connected" @click="openFlash"
+              :title="flashTitle" aria-label="Flash updater">
+        <Icon name="memory"/>
       </button>
       <span class="grow"></span>
       <button :disabled="!connected" @click="autoFlash"

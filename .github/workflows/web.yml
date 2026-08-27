@@ -40,6 +40,14 @@ jobs:
       - name: PWA manifest / precache tests
         run: node web/test/pwa.test.mjs
 
+      # The half of the USB flasher that can be tested without a probe. The
+      # rest (CMSIS-DAP, SWD, RRAM) needs hardware.
+      - name: Intel HEX tests
+        run: node web/test/intel-hex.test.mjs
+
+      - name: CMSIS-DAP / SWD encoding tests
+        run: node web/test/cmsis-dap.test.mjs
+
       - name: Bundle single-file build
         run: node web/tools/build-single.mjs web/dist/updater.html
 
@@ -53,6 +61,7 @@ jobs:
         run: |
           npm install --no-save jsdom
           node web/test/render.test.mjs web/dist/updater.html
+          node web/test/flash-dialog.test.mjs web/dist/updater.html
 
       - name: Upload single-file build
         uses: actions/upload-artifact@v7
@@ -71,6 +80,38 @@ jobs:
           # broader than the directory it is served from.
           cp web/sw.js web/manifest.webmanifest _site/
           cp web/dist/updater.html _site/updater.html
+
+      # Publish the newest release's merged.hex next to the app, so "Flash
+      # newest" is one click and needs no GitHub round trip from the browser.
+      #
+      # Deliberately never fails the build. There is nothing to publish until
+      # a release exists, and build.yml creates releases as DRAFTS — a draft's
+      # assets are not downloadable, so the site correctly shows "no published
+      # build available" until someone publishes one.
+      - name: Stage newest firmware
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          mkdir -p _site/firmware
+          TAG=$(gh release list --limit 10 --json tagName,isDraft \
+                  --jq '[.[] | select(.isDraft | not)] | .[0].tagName // empty' 2>/dev/null || true)
+          if [ -z "${TAG}" ]; then
+            echo "::notice::no published release yet — 'Flash newest' will be unavailable"
+            exit 0
+          fi
+          if ! gh release download "${TAG}" --pattern '*-merged.hex' \
+                 --output _site/firmware/merged.hex --clobber; then
+            echo "::warning::release ${TAG} has no *-merged.hex asset"
+            rm -f _site/firmware/merged.hex
+            exit 0
+          fi
+          # Same script a developer runs locally, so the manifest schema has
+          # exactly one producer and cannot drift from its reader.
+          node web/tools/stage-firmware.mjs _site/firmware/merged.hex \
+            --out _site/firmware --tag "${TAG}"
+          ls -la _site/firmware/
 
       - uses: actions/upload-pages-artifact@v5
         if: github.event_name != 'pull_request'

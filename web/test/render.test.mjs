@@ -54,12 +54,18 @@ t("app mounted",                    app.children.length > 0);
 t("header rendered",                !!app.querySelector("header"));
 t("toolbar rendered",               !!app.querySelector(".toolbar"));
 t("Config button present",          !!app.querySelector('button[aria-label="Config"]'));
-t("toolbar actions are icon-only",  app.querySelectorAll(".toolbar .icon-btn svg.icon").length === 4);
+t("toolbar actions are icon-only",  app.querySelectorAll(".toolbar .icon-btn svg.icon").length === 5);
 t("listing table rendered",         !!app.querySelector("table thead th"));
 t("footer rendered",                !!app.querySelector("footer"));
 t("log pane rendered",              !!app.querySelector("#log"));
 t("drop overlay rendered",          !!app.querySelector("#drop-overlay"));
 t("config dialog closed initially", !app.querySelector("#cfg-overlay"));
+t("flash dialog closed initially",  !app.querySelector("#flash-overlay"));
+t("Flash-updater button present",   !!app.querySelector('button[aria-label="Flash updater"]'));
+/* Enabled with nothing connected — it runs over USB, which is the whole point
+   of it. It becomes disabled once a BLE link is up (flashing halts the CPU). */
+t("Flash-updater button enabled while disconnected",
+  app.querySelector('button[aria-label="Flash updater"]')?.disabled === false);
 t("no-bluetooth notice logged",     /does not support Web Bluetooth/.test(text));
 
 /* Open the dialog (the button is disabled until connected, so force it). */
@@ -165,5 +171,28 @@ if (errors.length) {
   console.log("\n--- console/window errors ---");
   for (const e of [...new Set(errors)]) console.log("  " + e.slice(0, 400));
 }
+/* --- USB flasher ------------------------------------------------------- */
+{
+  const btn = app.querySelector('button[aria-label="Flash updater"]');
+  btn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+  await new Promise(r => setTimeout(r, 400));
+  const dlg = app.querySelector("#flash-overlay");
+  const text = dlg ? dlg.textContent.replace(/\s+/g, " ") : "";
+
+  t("flash dialog opens", !!dlg);
+  /* jsdom has no navigator.usb, which is the same situation as Firefox or
+   * Safari — the dialog must say so instead of offering a dead button. */
+  t("no-WebUSB notice shown", /has no WebUSB/.test(text));
+  /* Filename guidance lives inside the WebUSB branch, which jsdom never
+     renders — flash-dialog.test.mjs stubs navigator.usb and asserts it there. */
+  t("no probe controls without WebUSB", !dlg?.querySelector(".flash-step"));
+
+  const close = [...dlg.querySelectorAll(".cfg-foot button")]
+    .find(b => /Close/.test(b.textContent));
+  close.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+  await new Promise(r => setTimeout(r, 200));
+  t("flash dialog closes", !app.querySelector("#flash-overlay"));
+}
+
 console.log(bad || errors.length ? "\nFAILED" : "\nall render tests passed");
 process.exit(bad || errors.length ? 1 : 0);
