@@ -16,7 +16,3 @@ export const timestamp = () =>
 /* Join a directory and a name without doubling slashes. */
 export const joinPath = (dir, name) =>
   `${dir.replace(/\/+$/, "")}/${name}`;
-
-/* Parent directory of a path, or "/" at the root. */
-export const parentPath = (p) =>
-  p.replace(/\/+$/, "").replace(/\/[^/]+$/, "") || "/";

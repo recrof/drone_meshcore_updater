@@ -8,7 +8,8 @@
 
 import { reactive, ref, computed } from "./vue.js";
 import { SmpClient } from "./lib/smp-client.js";
-import { fmtSize, fmtRate, timestamp, joinPath, parentPath } from "./lib/format.js";
+import { registerServiceWorker, applyUpdate } from "./lib/pwa.js";
+import { fmtSize, fmtRate, timestamp, joinPath } from "./lib/format.js";
 import {
   CONFIG_PATH, CONFIG_MAX_BYTES, isConfigPath, canonicalUploadPath,
   parseConfig, serializeConfig, encodedSize, defaults as configDefaults,
@@ -19,6 +20,9 @@ export const smp = new SmpClient();
 /* ---- state ------------------------------------------------------------ */
 export const connected  = ref(false);
 export const deviceName = ref("");
+/* Fixed: the folder controls were removed from the toolbar, so nothing
+ * changes this. Kept as a ref because refresh() and FileListing both read
+ * it, and because the firmware path could still become configurable. */
 export const path       = ref("/lfs1");
 export const entries    = ref([]);
 export const listError  = ref("");
@@ -138,12 +142,6 @@ export async function refresh() {
 
 export const currentPath = () => path.value.replace(/\/+$/, "") || "/lfs1";
 
-export function navigate(p) {
-  path.value = p || "/lfs1";
-  return refresh();
-}
-
-export function goUp() { return navigate(parentPath(currentPath())); }
 
 async function updateFsInfo(p) {
   try {
@@ -157,16 +155,6 @@ async function updateFsInfo(p) {
 }
 
 /* ---- file operations -------------------------------------------------- */
-export async function mkdir() {
-  const name = prompt("New folder name:");
-  if (!name) return;
-  const p = joinPath(currentPath(), name);
-  try {
-    await smp.fsxMkdir(p);
-    log(`mkdir ${p}`, "ok");
-    await refresh();
-  } catch (e) { log(`mkdir: ${e.message}`, "err"); }
-}
 
 export async function rename(fullpath) {
   const oldName = fullpath.split("/").pop();
@@ -208,12 +196,34 @@ export async function flashZip(fullpath) {
 
 export function openConfig() { configOpen.value = true; }
 
+/* Reboot the updater itself (not the DFU target) via the standard mcumgr OS
+ * group. The firmware already answers this: CONFIG_REBOOT=y registers the
+ * OS_MGMT_ID_RESET handler, and CONFIG_MCUMGR_GRP_OS_RESET_MS=250 makes it
+ * reply first and reset 250 ms later, so the response arrives before the link
+ * drops. Losing the link is the expected outcome, not an error. */
+export async function reboot() {
+  if (!confirm("Reboot the updater?\n\n" +
+               "The Bluetooth connection will drop and you will need to reconnect. " +
+               "Do not do this while a DFU is running.")) return;
+  try {
+    await smp.osReset();
+    log("reboot requested", "ok");
+  } catch (e) {
+    /* A device that resets before answering looks like a timeout here; say so
+     * rather than reporting a failure that probably did not happen. */
+    log(`reboot: ${e.message} (the device may have reset anyway)`, "warn");
+  }
+}
+
 /* What a click on a listing row should do. config.txt opens the editor
  * instead of downloading — reading the raw file is still available from the
  * editor's own file preview.
  */
 export function activateEntry(fullpath, isDir) {
-  if (isDir) return navigate(fullpath);
+  /* Directories are listed (so they can be renamed or deleted) but not
+   * entered. With the "up" control gone there would be no way back out, and
+   * nothing this device reads ever lives below the root. */
+  if (isDir) return;
   if (isConfigPath(fullpath)) return openConfig();
   return download(fullpath);
 }
@@ -327,3 +337,18 @@ export async function saveConfig(values, unknown) {
 
 /* ---- capability check ------------------------------------------------- */
 export const bluetoothAvailable = computed(() => "bluetooth" in navigator);
+
+/* ---- offline / PWA ---------------------------------------------------- */
+
+/* Set once a newer service worker is installed and waiting. The header shows
+ * a reload affordance rather than swapping the app out from under someone
+ * mid-transfer — this page can be driving a DFU. */
+export const updateReady = ref(false);
+export const reloadForUpdate = applyUpdate;
+
+export function initOffline() {
+  return registerServiceWorker({
+    onLog: log,
+    onUpdate: () => { updateReady.value = true; },
+  });
+}

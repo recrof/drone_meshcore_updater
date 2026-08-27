@@ -24,6 +24,7 @@
 #include <zephyr/bluetooth/hci.h>
 
 #include "nordic_dfu/legacy_dfu.hpp"
+#include "app.h"
 
 LOG_MODULE_REGISTER(dfu_client, LOG_LEVEL_INF);
 
@@ -145,6 +146,12 @@ public:
 			t0_ = k_uptime_get_32();
 			next_ = 10;
 		}
+		/* A retry re-enters Starting with the previous attempt's
+		 * percentage still latched, which would leave the LED blinking
+		 * at the old rate through the rescan. */
+		if (state == State::Starting) {
+			led_set_progress(0);
+		}
 		static const char *const names[] = {
 			"starting", "enabling-dfu-mode", "uploading",
 			"validating", "disconnecting", "completed", "aborted",
@@ -155,6 +162,10 @@ public:
 
 	void on_progress(uint8_t percent, uint32_t sent, uint32_t total) override
 	{
+		/* Every update, not one per 10%: this is what shortens the green
+		 * blink from 600 ms to 30 ms across the transfer. */
+		led_set_progress(percent);
+
 		/* One line per 10% — the transfer is minutes long and the log
 		 * backend writes to flash. */
 		if (percent >= next_ || percent == 100) {

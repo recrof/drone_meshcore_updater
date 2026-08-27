@@ -1,0 +1,17 @@
+{
+  "name": "XIAO nRF54 updater",
+  "short_name": "nRF54 updater",
+  "description": "Browse the updater's filesystem, edit config.txt, and trigger Legacy DFU over BLE.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0f1411",
+  "theme_color": "#2e9e6b",
+  "categories": ["utilities", "developer"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

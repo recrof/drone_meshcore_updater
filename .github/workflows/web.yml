@@ -37,8 +37,17 @@ jobs:
       - name: Schema tests (no dependencies)
         run: node web/test/config-file.test.mjs
 
+      - name: PWA manifest / precache tests
+        run: node web/test/pwa.test.mjs
+
       - name: Bundle single-file build
         run: node web/tools/build-single.mjs web/dist/updater.html
+
+      # Re-run now that dist/ exists: the single-file build has to have had
+      # its manifest and icon links stripped, or it registers a service
+      # worker for an sw.js that isn't next to it.
+      - name: PWA single-file checks
+        run: node web/test/pwa.test.mjs
 
       - name: Render tests
         run: |
@@ -57,7 +66,10 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           mkdir -p _site
-          cp -r web/index.html web/css web/js web/vendor _site/
+          cp -r web/index.html web/css web/js web/vendor web/icons _site/
+          # sw.js must sit at the site root: a worker's scope cannot be
+          # broader than the directory it is served from.
+          cp web/sw.js web/manifest.webmanifest _site/
           cp web/dist/updater.html _site/updater.html
 
       - uses: actions/upload-pages-artifact@v5

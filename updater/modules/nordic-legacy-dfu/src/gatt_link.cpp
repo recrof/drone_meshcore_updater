@@ -241,13 +241,6 @@ uint8_t GattLink::discover_chars_cb(bt_conn *conn, const bt_gatt_attr *attr,
 
 	if (bt_uuid_cmp(chrc->uuid, &kControlPointUuid.uuid) == 0) {
 		self->h_.control_point = chrc->value_handle;
-		/* Whether this supports WRITE_WITHOUT_RESP decides if the 30 s
-		 * ATT stalls after a buttonless jump and after Reset are fixable:
-		 * a Write Command leaves no request outstanding to time out. */
-		LOG_INF("control point props=0x%02x%s%s", chrc->properties,
-			(chrc->properties & BT_GATT_CHRC_WRITE) ? " write" : "",
-			(chrc->properties & BT_GATT_CHRC_WRITE_WITHOUT_RESP)
-				? " write-without-resp" : "");
 	} else if (bt_uuid_cmp(chrc->uuid, &kPacketUuid.uuid) == 0) {
 		self->h_.packet = chrc->value_handle;
 	} else if (bt_uuid_cmp(chrc->uuid, &kVersionUuid.uuid) == 0) {

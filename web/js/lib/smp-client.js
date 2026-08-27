@@ -44,6 +44,7 @@ export const GRP = {
  * recursive=false, which invokes fs_unlink() and works on plain files.
  */
 export const FS_ID  = { FILE: 0, STAT: 1 };
+export const OS_ID  = { ECHO: 0, RESET: 5 };
 export const FSX_ID = { LIST: 0, MKDIR: 1, RMDIR: 2, MOVE: 3, STATVFS: 4, TRIGGER_DFU: 5 };
 
 /* Chunk size for the stock-SMP upload fallback. */
@@ -328,6 +329,11 @@ export class SmpClient extends EventTarget {
   }
   fsxTriggerDfu(path) {
     return this.request(MGMT_OP.WRITE_REQ, GRP.FSX, FSX_ID.TRIGGER_DFU, { path });
+  }
+  /* Standard mcumgr OS group reset. Available whenever the firmware is built
+   * with CONFIG_REBOOT=y, which registers OS_MGMT_ID_RESET. */
+  osReset() {
+    return this.request(MGMT_OP.WRITE_REQ, GRP.OS, OS_ID.RESET, {});
   }
   fsUploadChunk(name, off, data, len /* total file len, only on off==0 */) {
     const req = { name, off, data };

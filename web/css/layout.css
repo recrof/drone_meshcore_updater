@@ -36,13 +36,19 @@ header.connected .dot {
   display: flex; gap: 6px; padding: 8px 14px;
   border-bottom: 1px solid var(--line); align-items: center; flex-wrap: wrap;
 }
-.toolbar .path {
-  flex: 1; font-family: var(--mono); font-size: 13px;
-  padding: 5px 10px; border: 1px solid var(--line); border-radius: 4px;
-  background: var(--bg); color: var(--fg); min-width: 200px;
-  outline: none;
+.toolbar .grow { flex: 1; }
+
+/* Icon-only actions. Square so the four of them read as one group, and sized
+ * past the 24 px the 20 px glyph needs so the hit target stays thumb-sized on
+ * a phone — this page is used one-handed next to a device. */
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; padding: 0;
 }
-.toolbar .path:focus { border-color: var(--accent); }
+.icon-btn .icon { display: block; }
+/* The glyph follows the button's text colour, including the disabled state,
+ * because `fill: currentColor` is set on the path. */
+.icon-btn:disabled .icon { opacity: 0.5; }
 
 /* --- listing table --------------------------------------------- */
 main { flex: 1; overflow: auto; }
@@ -105,9 +111,12 @@ footer {
   font-family: var(--mono); font-size: 11px; color: var(--muted);
   white-space: pre-wrap; line-height: 1.55;
 }
-#log .err { color: var(--danger); }
-#log .ok  { color: var(--accent); }
-#log .ts  { color: var(--muted); opacity: 0.6; margin-right: 6px; }
+#log .err  { color: var(--danger); }
+#log .ok   { color: var(--accent); }
+/* Something that probably worked but couldn't be confirmed — a reset that
+   drops the link before it can answer looks identical to a timeout. */
+#log .warn { color: var(--warn); }
+#log .ts   { color: var(--muted); opacity: 0.6; margin-right: 6px; }
 
 /* --- top-of-viewport progress bar (YouTube style) -------------- */
 #progress {
@@ -159,3 +168,10 @@ footer {
 }
 #drop-overlay.reject .frame { border-color: var(--danger); }
 #drop-overlay.reject .frame-sub { color: var(--danger); }
+
+/* Offer, not an interruption — a waiting service-worker update must never
+   pull the page out from under a transfer in progress. */
+header .update {
+  border-color: var(--warn); color: var(--warn); font-size: 12px;
+}
+header .update:hover { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }

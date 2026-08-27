@@ -4,9 +4,11 @@ import {
   CONFIG_SCHEMA, CONFIG_PATH, CONFIG_MAX_BYTES,
   validateField, advisories, serializeConfig, encodedSize, defaults,
 } from "../lib/config-file.js";
+import MappingEditor from "./MappingEditor.js";
 
 export default {
   name: "ConfigDialog",
+  components: { MappingEditor },
   props: { open: Boolean },
   emits: ["close"],
   setup(props, { emit }) {
@@ -19,6 +21,23 @@ export default {
     const saving   = ref(false);
     const error    = ref("");
     const showRaw  = ref(false);
+
+    /* Per-key help, collapsed by default.
+     *
+     * Every description here is load-bearing — the tuning keys are actively
+     * counter-intuitive and were each paid for with a hardware run. But
+     * fourteen paragraphs at once turn the dialog into a document, and the
+     * operator who already knows what pkt_gap_ms does has to scroll past all
+     * of it. So the text stays, one (i) away.
+     */
+    const helpFor = reactive({});
+    const helpOpen = (f) => !!helpFor[f.key];
+    const toggleHelp = (f) => { helpFor[f.key] = !helpFor[f.key]; };
+    const allHelp = computed(() => CONFIG_SCHEMA.every(f => helpFor[f.key]));
+    const toggleAllHelp = () => {
+      const on = !allHelp.value;
+      for (const f of CONFIG_SCHEMA) helpFor[f.key] = on;
+    };
 
     const apply = (src) => { for (const k of Object.keys(src)) values[k] = src[k]; };
 
@@ -84,6 +103,14 @@ export default {
 
     const fieldNote = (f) => (typeof f.note === "function" ? f.note(values[f.key]) : null);
 
+    /* An empty-string default resets to nothing, and "default " reads as a
+     * truncation. Say what the button does instead. */
+    const defLabel = (f) => {
+      if (f.type === "bool") return `default ${f.def ? "on" : "off"}`;
+      if (f.def === "") return "clear";
+      return `default ${f.def}`;
+    };
+
     async function save() {
       saving.value = true;
       error.value = "";
@@ -108,6 +135,7 @@ export default {
       values, unknown, ignored, exists, loading, saving, error, showRaw,
       errors, hasErrors, notes, text, size, overSize, dirty,
       isModified, isDefault, resetField, resetAll, optionsFor, fieldNote,
+      helpOpen, toggleHelp, allHelp, toggleAllHelp, defLabel,
       save, close, reload,
     };
   },
@@ -119,6 +147,10 @@ export default {
           <span class="title">CONFIGURATION</span>
           <span class="path">{{ CONFIG_PATH }}</span>
           <span class="grow"></span>
+          <button class="small" @click="toggleAllHelp"
+                  :title="allHelp ? 'Collapse every description' : 'Expand every description'">
+            {{ allHelp ? "Hide all help" : "Show all help" }}
+          </button>
           <button title="Close without saving" @click="close">✕</button>
         </div>
 
@@ -146,41 +178,65 @@ export default {
             <div class="cfg-section" v-if="f.section">{{ f.section }}</div>
 
             <div class="cfg-row"
-                 :class="{ invalid: errors[f.key], modified: isModified(f) }">
-              <label :for="'cfg-' + f.key">
-                {{ f.title }}
-                <span class="key">{{ f.label }}</span>
-              </label>
+                 :class="{ invalid: errors[f.key], modified: isModified(f),
+                           wide: !!f.editor, open: helpOpen(f) }">
+              <div class="cfg-name">
+                <!-- Custom editors are a group of inputs, not one labelable
+                     control, so they get an aria-label instead of a for=. -->
+                <label :for="f.editor ? null : 'cfg-' + f.key">
+                  {{ f.title }}
+                  <span class="key">{{ f.label }}</span>
+                </label>
+                <button class="cfg-info" @click="toggleHelp(f)"
+                        :aria-expanded="helpOpen(f) ? 'true' : 'false'"
+                        :aria-controls="'help-' + f.key"
+                        :title="(helpOpen(f) ? 'Hide' : 'Show') + ' what ' + f.label + ' does'">
+                  i
+                </button>
+              </div>
 
               <div class="ctl">
                 <button class="cfg-def" :disabled="isDefault(f)" @click="resetField(f)"
-                        :title="'Reset to the firmware default (' + f.def + ')'">
-                  default {{ f.type === "bool" ? (f.def ? "on" : "off") : f.def }}
+                        :title="'Reset to the firmware default (' + (f.def === '' ? 'empty' : f.def) + ')'">
+                  {{ defLabel(f) }}
                 </button>
 
-                <input v-if="f.type === 'text'" type="text" :id="'cfg-' + f.key"
-                       v-model="values[f.key]" :maxlength="f.maxLength"
-                       :placeholder="f.placeholder" spellcheck="false">
+                <template v-if="!f.editor">
+                  <input v-if="f.type === 'text'" type="text" :id="'cfg-' + f.key"
+                         v-model="values[f.key]" :maxlength="f.maxLength"
+                         :placeholder="f.placeholder" spellcheck="false">
 
-                <input v-else-if="f.type === 'int'" type="number" :id="'cfg-' + f.key"
-                       v-model.number="values[f.key]" :min="f.min" :max="f.max" step="1">
+                  <input v-else-if="f.type === 'int'" type="number" :id="'cfg-' + f.key"
+                         v-model.number="values[f.key]" :min="f.min" :max="f.max" step="1">
 
-                <input v-else-if="f.type === 'bool'" type="checkbox" :id="'cfg-' + f.key"
-                       v-model="values[f.key]">
+                  <input v-else-if="f.type === 'bool'" type="checkbox" :id="'cfg-' + f.key"
+                         v-model="values[f.key]">
 
-                <select v-else-if="f.type === 'select'" :id="'cfg-' + f.key"
-                        v-model.number="values[f.key]">
-                  <option v-for="o in optionsFor(f)" :key="o.value" :value="o.value">
-                    {{ o.label }}
-                  </option>
-                </select>
+                  <select v-else-if="f.type === 'select'" :id="'cfg-' + f.key"
+                          v-model.number="values[f.key]">
+                    <option v-for="o in optionsFor(f)" :key="o.value" :value="o.value">
+                      {{ o.label }}
+                    </option>
+                  </select>
 
-                <span class="unit" v-if="f.unit">{{ f.unit }}</span>
+                  <span class="unit" v-if="f.unit">{{ f.unit }}</span>
+                </template>
               </div>
 
-              <div class="desc">{{ f.desc.replace(/\\s+/g, " ").trim() }}</div>
+              <div class="cfg-wide" v-if="f.editor === 'mapping'">
+                <MappingEditor :id="'cfg-' + f.key" role="group" :aria-label="f.title"
+                               v-model="values[f.key]" :max-length="f.maxLength" />
+              </div>
+
+              <!-- Errors show unconditionally: a blocked save must say why
+                   without the operator having to go looking for it. Only the
+                   explanatory text hides. -->
               <div class="note err" v-if="errors[f.key]">{{ errors[f.key] }}</div>
-              <div class="note" v-else-if="fieldNote(f)">{{ fieldNote(f) }}</div>
+
+              <div class="cfg-help" :id="'help-' + f.key" v-show="helpOpen(f)">
+                <div class="desc">{{ f.desc.replace(/\\s+/g, " ").trim() }}</div>
+                <div class="note" v-if="fieldNote(f)">{{ fieldNote(f) }}</div>
+              </div>
             </div>
           </template>
 

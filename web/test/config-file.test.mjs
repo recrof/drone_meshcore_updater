@@ -9,7 +9,7 @@
 import { readFileSync } from "node:fs";
 import {
   CONFIG_SCHEMA, CONFIG_MAX_BYTES, CONFIG_PATH, FIELDS,
-  isConfigPath, canonicalUploadPath, parseMapping,
+  isConfigPath, canonicalUploadPath, parseMapping, serializeMapping,
   parseConfig, serializeConfig, encodedSize, defaults, validateField, advisories,
 } from "../js/lib/config-file.js";
 
@@ -254,7 +254,40 @@ t("ignores a similar name",
     m.rules[0].name === "a" && m.rules[0].file === "b:c.zip",
     JSON.stringify(m.rules[0]));
 }
+/* serializeMapping is the editor's half of the round trip: the UI works on
+ * rows and the file stores one packed string, so anything parseMapping
+ * accepts has to survive being written back out. */
+{
+  const src = "RAK:rak4631*.zip|XIAO:xiao_*.zip|4631_DFU:rak*.zip";
+  t("serialize(parse(x)) === x",
+    serializeMapping(parseMapping(src).rules) === src,
+    serializeMapping(parseMapping(src).rules));
+  t("normalises spacing away",
+    serializeMapping(parseMapping(" RAK : a.zip | XIAO : b.zip ").rules)
+      === "RAK:a.zip|XIAO:b.zip");
+  t("drops entirely blank rows",
+    serializeMapping([{ name: "", file: "" }, { name: "A", file: "a.zip" }]) === "A:a.zip");
+  t("keeps a half-filled row so validation can report it",
+    serializeMapping([{ name: "A", file: "" }]) === "A:");
+  t("empty list serializes to the empty default",
+    serializeMapping([]) === FIELDS.ble_firmware_mapping.def);
+  t("tolerates undefined", serializeMapping(undefined) === "");
+}
+
+/* A rule the firmware can't parse is discarded silently — the same failure
+ * mode as an out-of-range int, so the editor blocks it the same way. */
+t("half-filled rule rejected",
+  !!validateField(FIELDS.ble_firmware_mapping, "RAK:"));
+t("colon-less rule rejected",
+  !!validateField(FIELDS.ble_firmware_mapping, "RAK"));
+t("well-formed rules accepted",
+  !validateField(FIELDS.ble_firmware_mapping, "RAK:rak*.zip|XIAO:xiao*.zip"));
+t("empty mapping accepted (it is the default)",
+  !validateField(FIELDS.ble_firmware_mapping, ""));
+
 t("mapping field is a text input", FIELDS.ble_firmware_mapping.type === "text");
+t("mapping field asks for the rule editor",
+  FIELDS.ble_firmware_mapping.editor === "mapping");
 t("mapping default is empty (auto-flash refuses rather than guesses)",
   FIELDS.ble_firmware_mapping.def === "");
 t("mapping length cap matches APP_CONFIG_MAPPING_MAX-1",

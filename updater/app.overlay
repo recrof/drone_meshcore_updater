@@ -48,3 +48,34 @@
 		};
 	};
 };
+
+/*
+ * LED polarity fix.
+ *
+ * Seeed's vendored board files declare all three LEDs GPIO_ACTIVE_HIGH, and
+ * the matching pwmleds nodes PWM_POLARITY_NORMAL. Both are inverted: the XIAO
+ * RGB LED is common-anode, so the pin sinks and physical LOW is lit. Every
+ * other XIAO in the Zephyr tree agrees — xiao_ble and xiao_nrf54l15 both use
+ * GPIO_ACTIVE_LOW (and xiao_ble uses PWM_POLARITY_INVERTED). The same error
+ * made twice in one file reads as a copy-paste slip, not a hardware
+ * difference, and it is the second thing found wrong in these vendored files
+ * after the openocd RRAM commit bug.
+ *
+ * Symptom it caused: led.c writes are mutually exclusive, but inverted they
+ * came out as "red and blue solid, green flickering between them" during DFU,
+ * and DONE_OK rendered as magenta rather than solid green.
+ *
+ * Overridden here rather than in the board file so a board refresh cannot
+ * quietly undo it.
+ */
+&blue_led {
+	gpios = <&gpio1 23 GPIO_ACTIVE_LOW>;
+};
+
+&red_led {
+	gpios = <&gpio1 22 GPIO_ACTIVE_LOW>;
+};
+
+&green_led {
+	gpios = <&gpio1 24 GPIO_ACTIVE_LOW>;
+};

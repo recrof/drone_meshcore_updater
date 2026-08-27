@@ -22,7 +22,7 @@ export default {
         isZip: !isDir && /\.zip$/i.test(e.name),
         isCfg,
         full,
-        hint: isDir ? "Open folder"
+        hint: isDir ? "Folder"
             : isCfg ? "Edit configuration"
             : "Download",
       };

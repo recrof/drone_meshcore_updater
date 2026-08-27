@@ -32,6 +32,18 @@ const bundle = execFileSync(
 
 let html = readFileSync(join(WEB, "index.html"), "utf8");
 
+/* Drop everything that points at a sibling file. A single file has no
+ * siblings: the manifest, the icons and (through the manifest link, which is
+ * what js/lib/pwa.js tests for) the service worker would all 404. The build is
+ * already offline-capable by being one file, so nothing is lost. */
+const EXTERNAL_REFS = [
+  /[ \t]*<!--[^]*?js\/lib\/pwa\.js[^]*?-->\n?/,          // the comment explaining the link
+  /[ \t]*<link rel="manifest"[^>]*>\n?/,
+  /[ \t]*<link rel="icon"[^>]*>\n?/,
+  /[ \t]*<link rel="apple-touch-icon"[^>]*>\n?/,
+];
+for (const re of EXTERNAL_REFS) html = html.replace(re, "");
+
 /* Inline every stylesheet in document order, replacing the first <link> with
  * the combined <style> and dropping the rest. */
 const links = [...html.matchAll(/[ \t]*<link rel="stylesheet" href="([^"]+)">\n?/g)];

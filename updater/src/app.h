@@ -3,6 +3,11 @@
 #include <zephyr/kernel.h>
 #include <stdbool.h>
 
+/* dfu_client.cpp is C++; everything declared here is defined in C. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Shared app-level types + prototypes across the small src/ tree.
  * Deliberately no third-party headers here — this file gets included from
@@ -40,3 +45,7 @@ void arm_dfu_from_upload(const char *path);
  * flag atomically. Caller becomes owner of the path buffer contents.
  */
 const char *pending_dfu_zip(char *out, size_t out_len);
+
+#ifdef __cplusplus
+}
+#endif

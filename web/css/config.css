@@ -34,13 +34,19 @@
   margin: 14px 0 4px; max-width: 70ch;
 }
 
-/* One row per key: title + control on a line, description beneath. The
-   description column is the point of this screen — config.txt's keys are not
-   self-explanatory and the tuning ones are actively counter-intuitive. */
+/* One row per key: name + control on a line, everything explanatory folded
+   away behind the (i). config.txt's keys are not self-explanatory and the
+   tuning ones are actively counter-intuitive, so the text has to exist — but
+   fourteen paragraphs at once is a document, not a settings screen. */
 .cfg-row {
   display: grid; grid-template-columns: 1fr auto;
-  gap: 3px 16px; align-items: start;
-  padding: 12px 0; border-bottom: 1px solid var(--line);
+  gap: 4px 16px; align-items: center;
+  padding: 9px 0; border-bottom: 1px solid var(--line);
+}
+.cfg-row.open { padding-bottom: 12px; }
+
+.cfg-row .cfg-name {
+  grid-column: 1; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
 }
 .cfg-row label {
   font-size: 13px; font-weight: 500; cursor: pointer;
@@ -49,23 +55,46 @@
 .cfg-row label .key {
   font-family: var(--mono); font-size: 11px; color: var(--muted); font-weight: 400;
 }
-.cfg-row .desc {
-  grid-column: 1 / 2; color: var(--muted); font-size: 12px; line-height: 1.5;
-  max-width: 64ch;
+
+/* Disclosure affordance. Sized to read as a marginal note rather than an
+   action — it must not compete with the control it explains. */
+.cfg-info {
+  flex: none; width: 17px; height: 17px; padding: 0;
+  border-radius: 50%; border: 1px solid var(--line);
+  background: transparent; color: var(--muted);
+  font-family: var(--mono); font-size: 11px; font-style: italic; line-height: 1;
+  align-self: center;
 }
+.cfg-info:hover { border-color: var(--accent); color: var(--accent); }
+.cfg-row.open .cfg-info {
+  border-color: var(--accent); color: var(--accent-fg); background: var(--accent);
+}
+
 .cfg-row .ctl {
-  grid-row: 1 / 3; grid-column: 2 / 3; justify-self: end;
-  display: flex; align-items: center; gap: 8px; padding-top: 1px;
+  grid-column: 2; justify-self: end;
+  display: flex; align-items: center; gap: 8px;
 }
 .cfg-row .ctl .unit {
   font-family: var(--mono); font-size: 11px; color: var(--muted);
 }
+
+/* The folded-away half. */
+.cfg-help { grid-column: 1 / -1; padding-top: 2px; }
+.cfg-row .desc {
+  color: var(--muted); font-size: 12px; line-height: 1.5; max-width: 72ch;
+}
 .cfg-row .note {
   grid-column: 1 / -1; font-size: 12px; line-height: 1.5;
-  color: var(--muted); font-style: italic; max-width: 70ch;
+  color: var(--muted); font-style: italic; max-width: 72ch;
 }
+.cfg-help .note { margin-top: 4px; }
 .cfg-row .note.err { color: var(--danger); font-style: normal; font-family: var(--mono); font-size: 11px; }
 .cfg-row.invalid input, .cfg-row.invalid select { border-color: var(--danger); }
+
+/* Rows whose control is a whole editor rather than one input: the top line
+   carries only the name and the reset chip, the editor sits below it. */
+.cfg-row.wide { align-items: baseline; }
+.cfg-wide { grid-column: 1 / -1; padding-top: 6px; }
 
 .cfg-row input[type=text], .cfg-row input[type=number], .cfg-row select {
   font: inherit; font-family: var(--mono); font-size: 13px;
@@ -115,3 +144,48 @@
 
 .cfg-status { font-family: var(--mono); font-size: 11px; color: var(--muted); }
 .cfg-status.err { color: var(--danger); }
+
+/* --- ble_firmware_mapping rule editor --------------------------- */
+
+/* The packed "name:glob|name:glob" string is a wire format, not something to
+   type. Each rule gets a row that reads as the sentence it is: when the peer's
+   advertised name contains X, flash the file matching Y. */
+.map-editor {
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--card); padding: 8px 10px;
+}
+.map-empty {
+  margin: 2px 0 8px; color: var(--muted); font-size: 12px; line-height: 1.5;
+}
+.map-rule {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  padding: 4px 0;
+}
+.map-rule .lead, .map-rule .arrow {
+  color: var(--muted); font-size: 11px; white-space: nowrap;
+}
+.map-rule .arrow { font-family: var(--mono); }
+.map-rule input {
+  font: inherit; font-family: var(--mono); font-size: 12px;
+  padding: 4px 7px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--bg); color: var(--fg); outline: none;
+  min-width: 0; width: auto;      /* beat .cfg-row input[type=text]'s 28ch */
+}
+.map-rule input:focus { border-color: var(--accent); }
+.map-rule .map-name { flex: 1 1 9ch; }
+.map-rule .map-file { flex: 2 1 16ch; }
+.map-rule.incomplete input:placeholder-shown { border-color: var(--danger); }
+.map-rule .map-ops { display: flex; gap: 3px; margin-left: auto; }
+.map-rule .map-ops button { padding: 1px 6px; font-size: 11px; }
+
+.map-foot {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 6px; padding-top: 7px; border-top: 1px solid var(--line);
+}
+.map-foot .grow { flex: 1; }
+.map-hint { color: var(--muted); font-size: 11px; }
+.map-size {
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.map-size.err { color: var(--danger); }

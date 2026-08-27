@@ -83,6 +83,21 @@ export function parseMapping(value) {
   return { rules, bad };
 }
 
+/* Inverse of parseMapping. Rows that are entirely blank are dropped; a row
+ * with only one half filled is kept, so the editor's own validation is what
+ * reports it rather than the value quietly changing under the operator.
+ *
+ * No spaces around the separator: firmware_map.c trims, so they would parse,
+ * but the whole file has to fit 1023 bytes and this key is the longest one.
+ */
+export function serializeMapping(rules) {
+  return (rules ?? [])
+    .map(r => ({ name: String(r.name ?? "").trim(), file: String(r.file ?? "").trim() }))
+    .filter(r => r.name || r.file)
+    .map(r => `${r.name}:${r.file}`)
+    .join("|");
+}
+
 /* config.h: the nRF54L radio has fewer allowed TX levels than the nRF52840.
  * Anything not in this list is silently clipped by the SoftDevice.
  */
@@ -111,12 +126,22 @@ export const CONFIG_SCHEMA = [
     def: "",
     maxLength: MAPPING_MAX,
     placeholder: "RAK:rak4631*.zip | XIAO:xiao_*.zip",
+    /* Rendered by MappingEditor rather than as a raw string. The stored type
+     * is still plain text — this only tells the dialog which control to use. */
+    editor: "mapping",
     desc: `Lets one updater carry several bundles and pick per target. Rules are
            "name:fileglob", separated by "|" and tried in order; the first whose
            name part appears in the peer's advertised name wins, and its glob is
            resolved against /lfs1 (if several files match, the last by name wins,
            so v2 beats v1). Only used by Auto flash — flashing a specific zip from
            the list always sends exactly that zip.`,
+    check: (v) => {
+      const { bad } = parseMapping(v);
+      return bad.length
+        ? `incomplete rule(s): ${bad.join(", ")} — each needs both a name ` +
+          `fragment and a file pattern, or the firmware discards it silently`
+        : null;
+    },
     note: (v) => {
       const { rules, bad } = parseMapping(v);
       if (bad.length) return `unusable rule(s) ignored by the firmware: ${bad.join(", ")} — each needs "name:fileglob"`;
@@ -349,7 +374,10 @@ export function validateField(field, value) {
     if (len > field.maxLength) {
       return `too long — ${len} B, firmware truncates at ${field.maxLength}`;
     }
-    return null;
+    /* Structured text keys carry their own grammar. A rule the firmware
+     * cannot parse is discarded silently, which is the same failure mode as
+     * an out-of-range number, so it is blocked the same way. */
+    return field.check ? field.check(value) : null;
   }
   if (field.type === "bool") return null;
 

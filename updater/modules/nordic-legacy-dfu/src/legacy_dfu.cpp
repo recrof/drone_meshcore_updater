@@ -797,7 +797,6 @@ Failure Session::upload_firmware()
 	 * outstanding. */
 	int64_t  erase_deadline_ticks = 0;
 	uint32_t sent_into_erase = 0;
-	uint32_t packet_index = 0;
 
 	while (bytes_sent_ < image_size_) {
 		uint32_t want = image_size_ - bytes_sent_;
@@ -844,19 +843,6 @@ Failure Session::upload_firmware()
 		/* Deadlines are measured from the moment this write landed: an
 		 * erase only starts once the target actually has the packet. */
 		int64_t now_ticks = k_uptime_ticks();
-		/* The early pages are where every observed failure happens, and
-		 * the model says they should not. Log enough of the start to see
-		 * which packet triggered which erase and where the target's
-		 * error actually lands. */
-		if (packet_index < 40) {
-			uint32_t off = bytes_sent_;
-			LOG_INF("pkt %u off=%u page=%u%s", packet_index, off,
-				params_.erase_page_size
-					? (off + static_cast<uint32_t>(n) - 1) /
-						params_.erase_page_size : 0u,
-				triggers_erase ? "  <- erase" : "");
-		}
-		packet_index++;
 		if (triggers_erase && params_.erase_pause_us > 0) {
 			erase_deadline_ticks =
 				now_ticks + k_us_to_ticks_ceil64(params_.erase_pause_us);
