@@ -19,6 +19,17 @@ jobs:
     # cross-compiler + all Python deps pre-installed, so we skip the
     # per-run west init dance.
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        # REQUIRED, and not merely tidy. The toolchain image puts west, cmake
+        # and the cross-compiler on PATH through BASH_ENV
+        # (/opt/non-interactive-setup.sh) rather than in the image's own PATH
+        # — and only bash reads BASH_ENV. Actions defaults *container* steps
+        # to `sh -e {0}`, so the first real run got
+        #   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        # and no toolchain at all. The staging step is bash-only as well
+        # ([[ ]] and ${GITHUB_SHA::7}), so it would have failed next.
+        shell: bash
     container:
       # Must track `revision:` in updater/west.yml — the toolchain image and
       # the SDK it builds are versioned together. The step below fails the
@@ -49,16 +60,39 @@ jobs:
         # dies on the first fetch.
         run: git config --global --add safe.directory '*'
 
-      - name: Toolchain sanity
-        # The image puts the toolchain on PATH through BASH_ENV
-        # (/opt/non-interactive-setup.sh) rather than in the image's own PATH,
-        # which only works because Actions runs steps through non-interactive
-        # bash. Check it here so a shell change surfaces as "west: not found"
-        # on line one instead of a cmake error ten minutes into the build.
+      - name: Put the toolchain on PATH
         run: |
-          which west cmake ninja || { echo "::error::toolchain not on PATH — is BASH_ENV still sourced?"; echo "PATH=$PATH"; exit 1; }
+          # Belt and braces. `shell: bash` on the job should make BASH_ENV
+          # fire on its own; if it ever does not, run the image's own setup
+          # rather than guessing install paths.
+          if ! command -v west >/dev/null 2>&1; then
+            if [ -n "${BASH_ENV:-}" ] && [ -f "${BASH_ENV}" ]; then
+              echo "BASH_ENV did not fire; sourcing ${BASH_ENV} explicitly"
+              . "${BASH_ENV}"
+            fi
+          fi
+
+          missing=""
+          for tool in west cmake ninja python3; do
+            command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::toolchain not on PATH — missing:$missing"
+            echo "BASH_ENV=${BASH_ENV:-unset}"
+            echo "PATH=$PATH"
+            ls -la /opt 2>/dev/null || true
+            exit 1
+          fi
+
+          # Persist for every later step, so nothing downstream depends on
+          # which shell Actions picks or on BASH_ENV firing again.
+          echo "PATH=$PATH" >> "$GITHUB_ENV"
+
+          # No pipes here on purpose: `shell: bash` implies -o pipefail, and
+          # `cmd | head -1` can fail the step on SIGPIPE.
           west --version
-          cmake --version | head -1
+          cmake --version
+          python3 --version
 
       - name: Initialize west workspace
         run: west init -l updater
