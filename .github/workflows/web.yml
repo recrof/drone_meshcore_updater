@@ -65,6 +65,10 @@ jobs:
       - name: CMSIS-DAP / SWD encoding tests
         run: node web/test/cmsis-dap.test.mjs
 
+      # Cross-checks the log file naming against updater/prj.conf.
+      - name: Log file tests
+        run: node web/test/log-file.test.mjs
+
       - name: Bundle single-file build
         run: node web/tools/build-single.mjs web/dist/updater.html
 
@@ -109,21 +113,48 @@ jobs:
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
+          # Set only on a release event. Use it rather than "newest published"
+          # so that publishing an older draft stages *that* release: gh sorts
+          # by creation date, so the newest-published query would quietly
+          # deploy a different build than the one just published.
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -u
           mkdir -p _site/firmware
-          TAG=$(gh release list --limit 10 --json tagName,isDraft \
-                  --jq '[.[] | select(.isDraft | not)] | .[0].tagName // empty' 2>/dev/null || true)
+
+          TAG="${RELEASE_TAG:-}"
+          if [ -z "${TAG}" ]; then
+            TAG=$(gh release list --limit 10 --json tagName,isDraft \
+                    --jq '[.[] | select(.isDraft | not)] | .[0].tagName // empty' 2>/dev/null || true)
+          fi
           if [ -z "${TAG}" ]; then
             echo "::notice::no published release yet — 'Flash newest' will be unavailable"
             exit 0
           fi
-          if ! gh release download "${TAG}" --pattern '*-merged.hex' \
+          echo "staging firmware from ${TAG}"
+
+          # Retry briefly. With build.yml's default (draft: true) the assets
+          # are always present by the time a human can publish, so this never
+          # loops. It matters if anyone sets draft: false: the release is then
+          # created already-published, which fires this workflow *before*
+          # softprops has finished uploading, and the asset appears seconds
+          # later.
+          ok=""
+          for attempt in 1 2 3 4 5; do
+            if gh release download "${TAG}" --pattern '*-merged.hex' \
                  --output _site/firmware/merged.hex --clobber; then
-            echo "::warning::release ${TAG} has no *-merged.hex asset"
+              ok=yes
+              break
+            fi
+            echo "attempt ${attempt}: no *-merged.hex on ${TAG} yet, waiting…"
+            sleep 10
+          done
+          if [ -z "${ok}" ]; then
+            echo "::warning::release ${TAG} has no *-merged.hex asset — 'Flash newest' will be unavailable"
             rm -f _site/firmware/merged.hex
             exit 0
           fi
+
           # Same script a developer runs locally, so the manifest schema has
           # exactly one producer and cannot drift from its reader.
           node web/tools/stage-firmware.mjs _site/firmware/merged.hex \

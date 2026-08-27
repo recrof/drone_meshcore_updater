@@ -63,13 +63,13 @@ static void apply_defaults(struct app_config *c)
 	 */
 	c->min_rssi       = -75;
 	c->retry_cooldown = 5;
-	c->wedge_cooldown = 60;
+	c->wedge_cooldown = 10;
 	/* Must be one of the levels the nRF54L actually implements (see the
 	 * list in config.h) — anything else is silently clipped by the
 	 * SoftDevice, so a "default" that isn't on the list is a default the
 	 * radio never runs at.
 	 */
-	c->tx_power       = 6;
+	c->tx_power       = 8;
 	c->scan_timeout   = 0;
 	c->scan_debug     = false;
 	/* Erase-aware pacing, calibrated on hardware.

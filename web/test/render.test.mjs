@@ -54,13 +54,36 @@ t("app mounted",                    app.children.length > 0);
 t("header rendered",                !!app.querySelector("header"));
 t("toolbar rendered",               !!app.querySelector(".toolbar"));
 t("Config button present",          !!app.querySelector('button[aria-label="Config"]'));
-t("toolbar actions are icon-only",  app.querySelectorAll(".toolbar .icon-btn svg.icon").length === 5);
+/* Every toolbar action carries an icon AND a readable label. Counting icons
+   alone let a stale bundle pass once — assert the text too. */
+{
+  const btns = [...app.querySelectorAll(".toolbar button")];
+  t("every toolbar action has an icon",
+    btns.length > 0 && btns.every(b => b.querySelector("svg.icon")));
+  t("every toolbar action has a visible label",
+    btns.every(b => b.querySelector(".label")?.textContent.trim()),
+    btns.map(b => b.textContent.trim()).join(" | "));
+  t("every toolbar action has an aria-label",
+    btns.every(b => b.getAttribute("aria-label")));
+
+  /* Flash updater is first and, on a cold open, the only thing you can press
+     — that is the whole point of its position. */
+  t("Flash updater is the first action",
+    btns[0]?.getAttribute("aria-label") === "Flash updater",
+    btns[0]?.getAttribute("aria-label"));
+  t("it is the only action enabled while disconnected",
+    btns.filter(b => !b.disabled).length === 1 &&
+    btns.find(b => !b.disabled)?.getAttribute("aria-label") === "Flash updater",
+    btns.filter(b => !b.disabled).map(b => b.textContent.trim()).join(", "));
+}
+t("Device-log button present",      !!app.querySelector('button[aria-label="Device log"]'));
 t("listing table rendered",         !!app.querySelector("table thead th"));
 t("footer rendered",                !!app.querySelector("footer"));
 t("log pane rendered",              !!app.querySelector("#log"));
 t("drop overlay rendered",          !!app.querySelector("#drop-overlay"));
 t("config dialog closed initially", !app.querySelector("#cfg-overlay"));
 t("flash dialog closed initially",  !app.querySelector("#flash-overlay"));
+t("log viewer closed initially",    !app.querySelector("#log-overlay"));
 t("Flash-updater button present",   !!app.querySelector('button[aria-label="Flash updater"]'));
 /* Enabled with nothing connected — it runs over USB, which is the whole point
    of it. It becomes disabled once a BLE link is up (flashing halts the CPU). */
@@ -192,6 +215,29 @@ if (errors.length) {
   close.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
   await new Promise(r => setTimeout(r, 200));
   t("flash dialog closes", !app.querySelector("#flash-overlay"));
+}
+
+/* --- device log viewer -------------------------------------------------- */
+{
+  const btn = app.querySelector('button[aria-label="Device log"]');
+  btn.disabled = false;                     // gated on a connection
+  btn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+  await new Promise(r => setTimeout(r, 400));
+
+  const v = app.querySelector("#log-overlay");
+  const vt = v ? v.textContent.replace(/\s+/g, " ") : "";
+  t("log viewer opens", !!v);
+  /* Nothing is connected, so there are no entries and therefore no log files.
+     It must say so rather than showing a blank pane. */
+  t("empty state explains where logs come from", /LOG\.0000/.test(vt), vt.slice(0, 160));
+  t("has a level filter", !!v?.querySelector('select[aria-label="Minimum level"]'));
+  t("has a text filter",  !!v?.querySelector('input[aria-label="Filter text"]'));
+  t("has a log pane",     !!v?.querySelector(".logv-body"));
+
+  const close = [...v.querySelectorAll(".cfg-foot button")].find(b => /Close/.test(b.textContent));
+  close.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+  await new Promise(r => setTimeout(r, 200));
+  t("log viewer closes", !app.querySelector("#log-overlay"));
 }
 
 console.log(bad || errors.length ? "\nFAILED" : "\nall render tests passed");

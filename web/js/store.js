@@ -14,6 +14,7 @@ import {
   CONFIG_PATH, CONFIG_MAX_BYTES, isConfigPath, canonicalUploadPath,
   parseConfig, serializeConfig, encodedSize, defaults as configDefaults,
 } from "./lib/config-file.js";
+import { isLogPath } from "./lib/log-file.js";
 
 export const smp = new SmpClient();
 
@@ -36,6 +37,8 @@ export const configOpen = ref(false);
 /* Same reasoning as configOpen: the flasher is reachable from the toolbar and
  * (unlike everything else here) works with no device connected at all. */
 export const flashOpen = ref(false);
+export const logViewOpen = ref(false);
+export const logViewPath = ref("");
 
 export const progress = reactive({
   shown: false,
@@ -200,6 +203,12 @@ export async function flashZip(fullpath) {
 export function openConfig() { configOpen.value = true; }
 export function openFlash() { flashOpen.value = true; }
 
+/* Opening with no path shows the newest log file. */
+export function openLogView(path = "") {
+  logViewPath.value = path;
+  logViewOpen.value = true;
+}
+
 /* Reboot the updater itself (not the DFU target) via the standard mcumgr OS
  * group. The firmware already answers this: CONFIG_REBOOT=y registers the
  * OS_MGMT_ID_RESET handler, and CONFIG_MCUMGR_GRP_OS_RESET_MS=250 makes it
@@ -229,6 +238,10 @@ export function activateEntry(fullpath, isDir) {
    * nothing this device reads ever lives below the root. */
   if (isDir) return;
   if (isConfigPath(fullpath)) return openConfig();
+  /* Log files open in the viewer. Downloading a 32 KB blob to read it in a
+   * text editor is the thing the viewer exists to avoid; Save is still there
+   * inside it. */
+  if (isLogPath(fullpath)) return openLogView(fullpath);
   return download(fullpath);
 }
 

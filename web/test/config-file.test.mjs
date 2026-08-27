@@ -23,7 +23,7 @@ const t = (name, cond, extra = "") => {
 const FIRMWARE_DEFAULTS = {
   ble_name: "OTA | DFU", ble_firmware_mapping: "",
   prn: 32, high_mtu: true, retries: 5, min_rssi: -75,
-  retry_cooldown: 5, wedge_cooldown: 60, tx_power: 6, scan_timeout: 0,
+  retry_cooldown: 5, wedge_cooldown: 10, tx_power: 8, scan_timeout: 0,
   scan_debug: false, pkt_gap_ms: 4, erase_pause_ms: 100, erase_inflight: 0,
 };
 const d = defaults();

@@ -1,6 +1,7 @@
 import { ref, computed } from "../vue.js";
 import {
   connected, refresh, uploadFiles, openConfig, autoFlash, reboot, openFlash,
+  openLogView,
 } from "../store.js";
 import Icon from "./Icon.js";
 
@@ -9,10 +10,14 @@ import Icon from "./Icon.js";
  * this device cares about lives directly in /lfs1, so the navigation was
  * clutter that could only ever take you somewhere with nothing in it.
  *
- * The three utility actions are icon-only; each keeps a title and an
- * aria-label, because an icon with neither is unusable with a screen reader
- * and unguessable without one. "Auto flash" stays a text button on purpose —
- * it is the destructive primary action and deserves to be spelled out.
+ * Every action carries an icon *and* a label. Icon-only was compact and
+ * unreadable: five unlabelled glyphs is a memory test, and on a phone they
+ * were also too small to hit reliably.
+ *
+ * "Flash updater" comes first on purpose. It is the only action that works
+ * with nothing connected, so on a cold open — no device paired, everything
+ * else greyed out — it is the one enabled control and the obvious place to
+ * start.
  */
 export default {
   name: "FileToolbar",
@@ -35,42 +40,48 @@ export default {
 
     return {
       connected, refresh, picker, onPick, openConfig, autoFlash, reboot,
-      openFlash, flashTitle,
+      openFlash, openLogView, flashTitle,
     };
   },
   template: /* html */ `
     <div class="toolbar">
+      <!-- First, and enabled when nothing is connected: it runs over USB and
+           is where a new user starts. Disabled *while* connected because
+           flashing halts the CPU and drops the Bluetooth link. -->
+      <button class="icon-btn" :disabled="connected" @click="openFlash"
+              :title="flashTitle" aria-label="Flash updater">
+        <Icon name="memory"/><span class="label">Flash updater</span>
+      </button>
+
+      <span class="tb-sep" aria-hidden="true"></span>
+
       <button class="icon-btn" :disabled="!connected" @click="refresh"
               title="Refresh the file list" aria-label="Refresh">
-        <Icon name="refresh"/>
+        <Icon name="refresh"/><span class="label">Refresh</span>
       </button>
       <button class="icon-btn" :disabled="!connected" @click="picker.click()"
               title="Upload files to the device" aria-label="Upload">
-        <Icon name="upload"/>
+        <Icon name="upload"/><span class="label">Upload</span>
       </button>
       <button class="icon-btn" :disabled="!connected" @click="openConfig"
               title="Edit config.txt" aria-label="Config">
-        <Icon name="settings"/>
+        <Icon name="settings"/><span class="label">Config</span>
+      </button>
+      <button class="icon-btn" :disabled="!connected" @click="openLogView()"
+              title="View the device log" aria-label="Device log">
+        <Icon name="description"/><span class="label">Log</span>
       </button>
       <button class="icon-btn" :disabled="!connected" @click="reboot"
               title="Reboot the updater" aria-label="Reboot">
-        <Icon name="restart_alt"/>
+        <Icon name="restart_alt"/><span class="label">Reboot</span>
       </button>
-      <!-- Enabled when nothing is connected — it runs over USB, and is what
-           you reach for when the device cannot be talked to over BLE at all.
-           Disabled *while* connected because flashing halts the CPU, which
-           takes the BLE stack down with it: the link would drop mid-operation
-           and the app would be left describing a device that no longer
-           exists. The title says so, since a disabled icon with no
-           explanation is a dead end. -->
-      <button class="icon-btn" :disabled="connected" @click="openFlash"
-              :title="flashTitle" aria-label="Flash updater">
-        <Icon name="memory"/>
-      </button>
+
       <span class="grow"></span>
-      <button :disabled="!connected" @click="autoFlash"
-              title="Scan for a target and flash the bundle ble_firmware_mapping selects">
-        Auto flash
+
+      <button class="icon-btn primary" :disabled="!connected" @click="autoFlash"
+              title="Scan for a target and flash the bundle ble_firmware_mapping selects"
+              aria-label="Auto flash">
+        <Icon name="bolt"/><span class="label">Auto flash</span>
       </button>
       <input type="file" ref="picker" multiple @change="onPick">
     </div>

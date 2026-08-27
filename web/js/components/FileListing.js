@@ -5,6 +5,7 @@ import {
 } from "../store.js";
 import { fmtSize, joinPath } from "../lib/format.js";
 import { isConfigPath } from "../lib/config-file.js";
+import { isLogPath } from "../lib/log-file.js";
 
 export default {
   name: "FileListing",
@@ -13,6 +14,7 @@ export default {
       const full = joinPath(path.value, e.name);
       const isDir = e.type === 1;
       const isCfg = !isDir && isConfigPath(full);
+      const isLog = !isDir && isLogPath(full);
       return {
         ...e,
         isDir,
@@ -21,9 +23,11 @@ export default {
          */
         isZip: !isDir && /\.zip$/i.test(e.name),
         isCfg,
+        isLog,
         full,
         hint: isDir ? "Folder"
             : isCfg ? "Edit configuration"
+            : isLog ? "View log"
             : "Download",
       };
     }));
@@ -50,7 +54,8 @@ export default {
             <td colspan="3" class="empty">{{ empty }}</td>
           </tr>
           <tr v-else v-for="row in rows" :key="row.name">
-            <td class="name" :class="[row.isDir ? 'dir' : 'file', { cfg: row.isCfg }]"
+            <td class="name" :class="[row.isDir ? 'dir' : 'file',
+                                      { cfg: row.isCfg, log: row.isLog }]"
                 :title="row.hint" @click="activate(row)">
               {{ row.name }}
             </td>

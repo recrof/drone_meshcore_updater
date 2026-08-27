@@ -305,7 +305,7 @@ export const CONFIG_SCHEMA = [
     label: "tx_power",
     title: "Transmit power",
     type: "select",
-    def: 6,
+    def: 8,
     options: TX_POWER_LEVELS.map(v => ({ value: v, label: `${v > 0 ? "+" : ""}${v} dBm` })),
     desc: `Radio TX power. The nRF54L only implements the levels listed here;
            any other value is silently clipped by the SoftDevice.`,
@@ -342,14 +342,17 @@ export const CONFIG_SCHEMA = [
     label: "wedge_cooldown",
     title: "Cooldown after a post-connect failure",
     type: "int",
-    def: 60,
+    def: 10,
     min: 0,
     max: 600,
     unit: "s",
-    desc: `Longer pause used after a response timeout, protocol error, or
-           mid-stream link drop. Stock SDK 11-era Adafruit bootloaders that wedge
-           mid-DFU only unstick when their internal inactivity watchdog fires,
-           usually 60–120 s.`,
+    desc: `Pause after a response timeout, protocol error, or mid-stream link
+           drop. A target that has genuinely wedged only unsticks when its own
+           inactivity watchdog fires — 60–120 s on stock SDK 11-era Adafruit
+           bootloaders — so raise this if failures repeat immediately. The
+           default is short because most post-connect failures here are not
+           wedges: the peer reboots and re-advertises within seconds, and
+           waiting a minute for it wastes most of a retry budget.`,
   },
 ];
 

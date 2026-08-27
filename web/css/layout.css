@@ -4,7 +4,7 @@
 header {
   display: flex; align-items: center; gap: 10px;
   padding: 10px 14px; border-bottom: 1px solid var(--line);
-  background: var(--card);
+  background: var(--card); flex-wrap: wrap;
 }
 header .title {
   font-size: 12px; font-weight: 600; letter-spacing: 0.12em;
@@ -38,17 +38,33 @@ header.connected .dot {
 }
 .toolbar .grow { flex: 1; }
 
-/* Icon-only actions. Square so the four of them read as one group, and sized
- * past the 24 px the 20 px glyph needs so the hit target stays thumb-sized on
- * a phone — this page is used one-handed next to a device. */
+/* Icon + label. Icon-only was compact and unreadable — five unlabelled glyphs
+ * is a memory test, and the 32px squares were below a usable tap target. */
 .icon-btn {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 32px; height: 32px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
 }
-.icon-btn .icon { display: block; }
+.icon-btn .icon { display: block; flex: none; }
+.icon-btn .label { white-space: nowrap; }
 /* The glyph follows the button's text colour, including the disabled state,
  * because `fill: currentColor` is set on the path. */
 .icon-btn:disabled .icon { opacity: 0.5; }
+
+/* Separates the one action that works offline (Flash updater) from the ones
+ * that need a connection. Purely visual — the disabled states already carry
+ * the meaning. */
+.tb-sep {
+  width: 1px; align-self: stretch; margin: 2px 4px;
+  background: var(--line); flex: none;
+}
+
+/* On a narrow screen the toolbar becomes a two-row grid of equal buttons
+ * rather than a ragged wrap: predictable target positions matter more than
+ * compactness when you are tapping one-handed. */
+@media (max-width: 640px) {
+  .toolbar { gap: 8px; padding: 10px 12px; }
+  .toolbar .icon-btn { flex: 1 1 calc(50% - 8px); justify-content: flex-start; }
+  .toolbar .grow, .toolbar .tb-sep { display: none; }
+}
 
 /* --- listing table --------------------------------------------- */
 main { flex: 1; overflow: auto; }
@@ -62,7 +78,7 @@ thead th {
   position: sticky; top: 0; z-index: 1;
 }
 tbody td {
-  padding: 7px 14px;
+  padding: 9px 14px;
   border-bottom: 1px solid var(--line);
   vertical-align: middle;
 }
@@ -85,13 +101,33 @@ tbody td.name.dir::after  { content: "/"; color: var(--muted); }
 /* The live config.txt opens the editor rather than downloading, so it gets its
    own stripe — same language as the dir stripe, different meaning. */
 tbody td.name.cfg::before { background: var(--warn); }
+/* Log files open the viewer. Same idea again: a stripe means "this row does
+   something other than download". */
+tbody td.name.log::before { background: var(--muted); }
 
 td.size, td.actions {
   color: var(--muted); font-variant-numeric: tabular-nums;
   font-family: var(--mono); font-size: 12px;
 }
 td.actions { text-align: right; white-space: nowrap; }
-td.actions button { padding: 2px 8px; font-size: 12px; margin-left: 4px; }
+td.actions button { margin-left: 5px; }
+
+/* A phone cannot show name + size + three actions on one line without making
+   all of them unhittable. Drop the size column, let the row breathe, and give
+   the actions a line of their own. */
+@media (max-width: 640px) {
+  table { font-size: 14px; }
+  thead th:nth-child(2), tbody td.size { display: none; }
+  tbody td { padding: 10px 12px; }
+  tbody td.name { padding-left: 22px; }
+  tbody tr { display: grid; grid-template-columns: 1fr; }
+  tbody td.actions {
+    text-align: left; padding-top: 0; padding-bottom: 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  tbody td.name { border-bottom: none; }
+  td.actions button { margin: 0 6px 0 0; }
+}
 
 .empty {
   text-align: center; padding: 60px 20px; color: var(--muted);
@@ -106,7 +142,8 @@ footer {
   font-family: var(--mono);
 }
 #log {
-  max-height: 18vh; overflow: auto; padding: 8px 14px; margin: 0;
+  max-height: 18vh;
+  overscroll-behavior: contain; overflow: auto; padding: 8px 14px; margin: 0;
   border-top: 1px solid var(--line); background: var(--bg);
   font-family: var(--mono); font-size: 11px; color: var(--muted);
   white-space: pre-wrap; line-height: 1.55;

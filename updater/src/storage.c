@@ -36,8 +36,8 @@ static const char kDefaultConfig[] =
 	"retries=5\n"
 	"min_rssi=-75\n"
 	"retry_cooldown=5\n"
-	"wedge_cooldown=60\n"
-	"tx_power=6\n"
+	"wedge_cooldown=10\n"
+	"tx_power=8\n"
 	"scan_timeout=0\n"
 	"scan_debug=0\n";
 

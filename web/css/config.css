@@ -243,3 +243,99 @@ label.btn:hover:not(.disabled) { border-color: var(--accent); }
 .flash-log .err  { color: var(--danger); }
 .flash-log .ok   { color: var(--accent); }
 .flash-log .warn { color: var(--warn); }
+
+/* --- device log viewer ------------------------------------------ */
+
+#log-overlay {
+  position: fixed; inset: 0; z-index: 30;
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  backdrop-filter: blur(3px);
+  display: grid; place-items: center; padding: 24px;
+}
+/* Wider and taller than the config modal — a log is read by scanning, and a
+   narrow column turns every line into two. */
+#log-overlay .cfg-modal { width: min(1000px, 100%); height: min(800px, 100%); }
+
+.logv-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 16px; border-bottom: 1px solid var(--line);
+  background: var(--card); flex: none;
+}
+.logv-bar .grow { flex: 1; }
+.logv-bar select, .logv-bar input {
+  font: inherit; font-family: var(--mono); font-size: 12px;
+  padding: 3px 7px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--bg); color: var(--fg); outline: none;
+}
+.logv-bar select:focus, .logv-bar input:focus { border-color: var(--accent); }
+.logv-find { flex: 0 1 22ch; min-width: 10ch; }
+
+.logv-status {
+  padding: 6px 16px; border-bottom: 1px solid var(--line);
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  background: var(--bg); flex: none;
+}
+.logv-status .err  { color: var(--danger); }
+.logv-status .warn { color: var(--warn); }
+
+.logv-body {
+  flex: 1; margin: 0; padding: 10px 16px; overflow: auto;
+  background: var(--bg); color: var(--muted);
+  font-family: var(--mono); font-size: 11px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word;
+}
+/* Timestamp and module are context, not content — dim them so the message
+   itself is what the eye lands on. */
+.logv-body .ts  { opacity: 0.45; margin-right: 8px; }
+.logv-body .mod { opacity: 0.7; margin-right: 8px; }
+.logv-body .lvl {
+  display: inline-block; min-width: 3ch; margin-right: 8px;
+  text-transform: uppercase; font-size: 10px; opacity: 0.9;
+}
+.logv-line.lv-err  { color: var(--danger); }
+.logv-line.lv-wrn  { color: var(--warn); }
+.logv-line.lv-inf  { color: var(--fg); }
+.logv-line.lv-dbg  { opacity: 0.75; }
+/* Unparsed output — a fault dump, a raw printk, a truncated tail. Usually the
+   line you opened the log to find. */
+.logv-line.lv-raw  { color: var(--fg); opacity: 0.9; }
+
+/* --- touch / small screens -------------------------------------- */
+
+/* A modal centred with 24px of padding wastes a third of a phone screen and
+   pushes the footer buttons under the browser chrome. Go full-bleed instead. */
+@media (max-width: 640px) {
+  #cfg-overlay, #flash-overlay, #log-overlay { padding: 0; }
+  #cfg-overlay .cfg-modal,
+  #flash-overlay .cfg-modal,
+  #log-overlay .cfg-modal {
+    width: 100%; height: 100%; max-height: 100%; border-radius: 0; border: none;
+  }
+  .cfg-head, .cfg-foot { padding: 10px 12px; }
+  .cfg-body { padding: 4px 12px 20px; }
+
+  /* Label above control rather than beside it — 28ch of monospace input does
+     not share a line with a title on a 360px screen. */
+  .cfg-row { grid-template-columns: 1fr; gap: 8px; padding: 12px 0; }
+  .cfg-row .ctl { grid-column: 1; justify-self: start; flex-wrap: wrap; }
+  .cfg-row input[type=text] { width: 100%; max-width: none; }
+  .cfg-row input[type=number] { width: 8ch; }
+  .cfg-row input[type=checkbox] { width: 22px; height: 22px; }
+
+  .map-rule { gap: 6px; }
+  .map-rule .map-name, .map-rule .map-file { flex: 1 1 100%; }
+  .map-rule .map-ops { margin-left: 0; }
+
+  .flash-step { gap: 8px; }
+  .logv-bar { padding: 8px 12px; }
+  .logv-find { flex: 1 1 100%; }
+  .logv-body { font-size: 12px; padding: 10px 12px; }
+}
+
+/* Selects and text inputs must not be under the 16px that makes iOS Safari
+   zoom the page on focus — the zoom does not undo itself and leaves the user
+   scrolled sideways. */
+@media (pointer: coarse) {
+  .cfg-row input, .cfg-row select,
+  .map-rule input, .logv-bar input, .logv-bar select { font-size: 16px; }
+}
