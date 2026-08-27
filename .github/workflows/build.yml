@@ -3,6 +3,15 @@ name: Build & Release
 permissions:
   contents: write
 
+# One firmware build at a time, keyed on the ref. Publishing a release from
+# the UI creates the tag, which fires this workflow's `push: tags` as well as
+# the release event — so a tag can be built twice, seconds apart, and the
+# second sat queued behind the first. Newer wins; there is no value in
+# finishing a build whose successor is already running.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   workflow_dispatch:
   push:

@@ -8,6 +8,13 @@ name: Web client
 # (Settings -> Pages). Without it, deploy-pages fails with a bare 404:
 # "Failed to create deployment ... Ensure GitHub Pages has been enabled".
 
+# Deploys are tied to releases; pushes only run the tests.
+#
+# Both used to deploy, so committing and then publishing a release fired two
+# runs seconds apart that built the same site. `concurrency: pages` collapsed
+# them, but the second one was still redundant work and made the run list hard
+# to read. Tests still guard every push to main — losing that to remove a
+# duplicate deploy would be a bad trade.
 on:
   push:
     branches: [main]
@@ -91,9 +98,9 @@ jobs:
           path: web/dist/updater.html
 
       # Only stage/upload the Pages artifact when we are actually going to
-      # deploy. On a PR it would be built and thrown away.
+      # deploy. On a push or a PR it would be built and thrown away.
       - name: Stage site
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         run: |
           mkdir -p _site
           cp -r web/index.html web/css web/js web/vendor web/icons _site/
@@ -110,7 +117,7 @@ jobs:
       # assets are not downloadable, so the site correctly shows "no published
       # build available" until someone publishes one.
       - name: Stage newest firmware
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
           # Set only on a release event. Use it rather than "newest published"
@@ -162,15 +169,16 @@ jobs:
           ls -la _site/firmware/
 
       - uses: actions/upload-pages-artifact@v5
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         with:
           path: _site
 
   deploy:
     needs: test
     # Not gated on github.ref: a release event's ref is the tag, which would
-    # skip the deploy that the release exists to trigger.
-    if: github.event_name != 'pull_request'
+    # skip the deploy that the release exists to trigger. workflow_dispatch is
+    # the manual escape hatch for redeploying without cutting a release.
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
