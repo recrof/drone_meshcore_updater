@@ -14,6 +14,16 @@ on:
     paths: ['web/**', '.github/workflows/web.yml']
   pull_request:
     paths: ['web/**', '.github/workflows/web.yml']
+  # Publishing a release re-deploys the site so "Flash newest" picks up the
+  # new firmware. Without this the staged firmware/ only ever changed when
+  # something under web/ did, which is unrelated and mostly never.
+  #
+  # `published` is the one that matters: build.yml creates releases as drafts,
+  # and this fires when a draft is published (and when a release is created
+  # already-published). `created` would fire for drafts, whose assets are not
+  # downloadable, so it would stage nothing.
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -29,7 +39,14 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # On a release event github.ref is the tag, and the site should not be
+      # rebuilt from whatever web/ looked like at that tag — the app tracks
+      # main, only the *firmware asset* comes from the release.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'release'
+                   && github.event.repository.default_branch
+                   || github.ref }}
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
@@ -120,7 +137,9 @@ jobs:
 
   deploy:
     needs: test
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    # Not gated on github.ref: a release event's ref is the tag, which would
+    # skip the deploy that the release exists to trigger.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
