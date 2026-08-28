@@ -13,7 +13,11 @@ export default {
   },
   template: /* html */ `
     <header :class="{ connected }">
-      <span class="title">FSX FILE MANAGER</span>
+      <!-- Named for what the tool is now. "FSX file manager" was accurate
+           when browsing /lfs1 was the whole app; flashing targets, updating
+           itself over USB and BLE, and reading the device log all arrived
+           afterwards, and file management is the smallest of them. -->
+      <span class="title">UPDATE MANAGER</span>
       <span class="device">
         <span class="dot"></span>{{ connected ? deviceName : "not connected" }}
       </span>

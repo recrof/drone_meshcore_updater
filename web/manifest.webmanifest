@@ -1,7 +1,7 @@
 {
   "name": "XIAO nRF54 updater",
   "short_name": "nRF54 updater",
-  "description": "Browse the updater's filesystem, edit config.txt, and trigger Legacy DFU over BLE.",
+  "description": "Flash nRF52 / nRF54 targets over Bluetooth from a XIAO nRF54, with a config editor, log viewer and file manager.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

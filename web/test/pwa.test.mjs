@@ -157,6 +157,17 @@ t("theme-color matches the manifest", meta === manifest.theme_color,
   `${meta} vs ${manifest.theme_color}`);
 t("index.html links the manifest", /<link rel="manifest" href="manifest\.webmanifest">/.test(index));
 
+/* The description is written twice — once as a meta tag for a link preview,
+ * once in the manifest for the install prompt. Two copies of one sentence
+ * drift, and the half that goes stale is whichever one you are not looking
+ * at. Same reasoning as the theme-color check above. */
+{
+  const desc = index.match(/<meta name="description" content="([^"]+)">/)?.[1];
+  t("index.html declares a description", !!desc);
+  t("description matches the manifest", desc === manifest.description,
+    `${desc} vs ${manifest.description}`);
+}
+
 /* --- the single-file build must not reference siblings ----------------- */
 let single = null;
 try { single = readFileSync(join(WEB, "dist", "updater.html"), "utf8"); } catch { /* optional */ }
