@@ -16,11 +16,19 @@ on:
   workflow_dispatch:
   push:
     tags:
-      # Release tags are vX.XX (v0.10, v1.05). The pattern is deliberately a
-      # little looser than that — GitHub tag filters are globs, not regexes,
-      # and a filter too strict to match the tag you just pushed fails
-      # silently: no run, no error, nothing to notice.
+      # Release tags are vX.XX (v1.0, v1.02). Note that a tag filter too
+      # strict to match what you pushed produces no run and no error, so keep
+      # it loose about digit counts.
       - 'v[0-9]*.[0-9]*'
+
+  # **This trigger is why v1.1 did not build.** `push` fires on a git push;
+  # creating a tag through the Releases web UI creates the ref through the
+  # API, which fires `create`, not `push`. v1.0 was a `git push --tags` and
+  # built; v1.1 was made in the UI and the firmware workflow never saw it,
+  # while publishing still fired the web deploy — which then went looking for
+  # assets that were never built.
+  release:
+    types: [published]
 
 jobs:
   build:
@@ -179,10 +187,14 @@ jobs:
           name: firmware
           path: out/*
 
-      - name: Create draft release
+      - name: Attach artifacts to the release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v3
         with:
           name: ${{ github.ref_name }}
-          draft: true
+          # A tag push creates the release as a draft, so a bad build can be
+          # discarded before anyone flashes it. When the run was triggered BY
+          # a release, that release already exists and is published — forcing
+          # draft here would un-publish it.
+          draft: ${{ github.event_name != 'release' }}
           files: out/*

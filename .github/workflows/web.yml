@@ -21,16 +21,20 @@ on:
     paths: ['web/**', '.github/workflows/web.yml']
   pull_request:
     paths: ['web/**', '.github/workflows/web.yml']
-  # Publishing a release re-deploys the site so "Flash newest" picks up the
-  # new firmware. Without this the staged firmware/ only ever changed when
-  # something under web/ did, which is unrelated and mostly never.
+  # Deploy after the firmware build finishes, not when the release is
+  # published. Two reasons, both learned the hard way:
   #
-  # `published` is the one that matters: build.yml creates releases as drafts,
-  # and this fires when a draft is published (and when a release is created
-  # already-published). `created` would fire for drafts, whose assets are not
-  # downloadable, so it would stage nothing.
-  release:
-    types: [published]
+  #  1. **Ordering.** Publishing fires this and build.yml at the same instant,
+  #     so the staging step went looking for release assets that were still
+  #     minutes from existing.
+  #  2. **The github-pages environment rejects tag refs.** Its default
+  #     protection rule allows only the default branch, and a release event's
+  #     ref is refs/tags/vX — "Tag v1.1 is not allowed to deploy to
+  #     github-pages due to environment protection rules". A `workflow_run`
+  #     event runs in the *default branch* context, which the rule permits.
+  workflow_run:
+    workflows: ["Build & Release"]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -46,14 +50,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      # On a release event github.ref is the tag, and the site should not be
-      # rebuilt from whatever web/ looked like at that tag — the app tracks
-      # main, only the *firmware asset* comes from the release.
+      # workflow_run and workflow_dispatch both give a branch ref, so plain
+      # checkout is correct: the app always tracks the default branch, and
+      # only the *firmware asset* comes from the release.
       - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event_name == 'release'
-                   && github.event.repository.default_branch
-                   || github.ref }}
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
@@ -110,7 +110,7 @@ jobs:
       # Only stage/upload the Pages artifact when we are actually going to
       # deploy. On a push or a PR it would be built and thrown away.
       - name: Stage site
-        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        if: (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') || github.event_name == 'workflow_dispatch'
         run: |
           mkdir -p _site
           cp -r web/index.html web/css web/js web/vendor web/icons _site/
@@ -127,14 +127,13 @@ jobs:
       # assets are not downloadable, so the site correctly shows "no published
       # build available" until someone publishes one.
       - name: Stage newest firmware
-        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        if: (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
-          # Set only on a release event. Use it rather than "newest published"
-          # so that publishing an older draft stages *that* release: gh sorts
-          # by creation date, so the newest-published query would quietly
-          # deploy a different build than the one just published.
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          # Empty now that the deploy follows the build rather than the
+          # release event; the "newest published release" query below is the
+          # only path. Kept as a hook for a future direct-release trigger.
+          RELEASE_TAG: ""
         run: |
           set -u
           mkdir -p _site/firmware
@@ -188,16 +187,15 @@ jobs:
           ls -la _site/firmware/
 
       - uses: actions/upload-pages-artifact@v5
-        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        if: (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') || github.event_name == 'workflow_dispatch'
         with:
           path: _site
 
   deploy:
     needs: test
-    # Not gated on github.ref: a release event's ref is the tag, which would
-    # skip the deploy that the release exists to trigger. workflow_dispatch is
-    # the manual escape hatch for redeploying without cutting a release.
-    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    # Only after a successful firmware build, or by hand. Never on a push:
+    # pushes run the tests and stop.
+    if: (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
