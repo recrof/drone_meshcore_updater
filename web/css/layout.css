@@ -66,6 +66,88 @@ header.connected .dot {
   .toolbar .grow, .toolbar .tb-sep { display: none; }
 }
 
+/* --- DFU banner ------------------------------------------------
+ *
+ * Sits between the toolbar and the listing, and is the only thing on screen
+ * that reports work happening on the *target* rather than on this device.
+ * Loud on purpose: a transfer runs for half a minute or more with no other
+ * visible sign, and the failure it exists to prevent is someone assuming a
+ * silent app means a broken device.
+ */
+.dfu-banner {
+  padding: 10px 14px; border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+  display: flex; flex-direction: column; gap: 7px;
+  font-size: 13px;
+}
+.dfu-banner.ok   { background: color-mix(in srgb, var(--accent) 12%, var(--bg)); }
+.dfu-banner.fail { background: color-mix(in srgb, var(--danger) 12%, var(--bg)); }
+
+.dfu-row { display: flex; align-items: center; gap: 10px; }
+.dfu-row .grow { flex: 1; }
+.dfu-state { font-weight: 600; }
+.dfu-subject, .dfu-detail, .dfu-result {
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+}
+.dfu-result { color: var(--fg); }
+.dfu-banner.fail .dfu-result { color: var(--danger); }
+.dfu-pct { font-family: var(--mono); font-size: 11px; color: var(--fg); }
+
+/* The same pulsing dot the header uses for "connected", reused here for
+ * "working" — one visual vocabulary for liveness. */
+.dfu-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--accent);
+}
+.dfu-banner.run .dfu-dot { animation: dfu-pulse 1.2s ease-in-out infinite; }
+.dfu-banner.fail .dfu-dot { background: var(--danger); }
+@keyframes dfu-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.25; }
+}
+
+.dfu-bar {
+  height: 4px; border-radius: 2px; overflow: hidden;
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+}
+.dfu-bar .fill {
+  height: 100%; background: var(--accent);
+  transition: width 200ms linear;
+}
+.dfu-banner.fail .dfu-bar .fill { background: var(--danger); }
+/* Every step other than the upload has no percentage to show. A bar parked
+ * at 0% through a six-second scan reads as stuck, so it sweeps instead. */
+.dfu-bar.indeterminate .fill {
+  width: 35% !important; animation: indet 1.4s linear infinite;
+}
+
+.dfu-watch { font-size: 12px; padding: 4px 10px; }
+.dfu-dismiss {
+  background: none; border: 0; color: var(--muted);
+  font-size: 18px; line-height: 1; padding: 0 4px; cursor: pointer;
+}
+.dfu-dismiss:hover { color: var(--fg); }
+
+/* A control worth looking at right now. Used on the toolbar's Log button
+ * while a DFU is running — the banner can be dismissed, this cannot. */
+.icon-btn.attention:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dfu-banner.run .dfu-dot { animation: none; }
+  .dfu-bar.indeterminate .fill { animation: none; width: 100% !important; }
+}
+
+@media (max-width: 640px) {
+  /* The label is the first thing to go: the icon plus the banner it sits in
+   * already say what the button opens. */
+  .dfu-watch .label { display: none; }
+  .dfu-subject { display: none; }
+}
+
 /* --- listing table --------------------------------------------- */
 main { flex: 1; overflow: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }

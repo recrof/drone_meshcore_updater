@@ -24,6 +24,7 @@
 #include <zephyr/bluetooth/hci.h>
 
 #include "nordic_dfu/legacy_dfu.hpp"
+#include "dfu_status.h"
 #include "app.h"
 
 LOG_MODULE_REGISTER(dfu_client, LOG_LEVEL_INF);
@@ -158,6 +159,19 @@ public:
 		};
 		unsigned i = static_cast<unsigned>(state);
 		LOG_INF("state: %s", i < ARRAY_SIZE(names) ? names[i] : "?");
+
+		/* Mirror the live steps to the GATT status record. Completed and
+		 * Aborted are deliberately not mirrored: only the runner knows
+		 * whether a finished attempt ends the run or is followed by a
+		 * rescan, and it owns the terminal state. */
+		static const dfu_status_state to_status[] = {
+			DFU_STATUS_STARTING, DFU_STATUS_ENABLING,
+			DFU_STATUS_UPLOADING, DFU_STATUS_VALIDATING,
+			DFU_STATUS_DISCONNECTING,
+		};
+		if (i < ARRAY_SIZE(to_status)) {
+			dfu_status_set_state(to_status[i]);
+		}
 	}
 
 	void on_progress(uint8_t percent, uint32_t sent, uint32_t total) override
@@ -165,6 +179,9 @@ public:
 		/* Every update, not one per 10%: this is what shortens the green
 		 * blink from 600 ms to 30 ms across the transfer. */
 		led_set_progress(percent);
+		/* Also every update: dfu_status throttles its own notifications,
+		 * so the caller does not have to guess at a sensible rate. */
+		dfu_status_progress(percent, sent, total);
 
 		/* One line per 10% — the transfer is minutes long and the log
 		 * backend writes to flash. */
@@ -285,6 +302,8 @@ extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *targe
 	 * for the address already exists. Measured: one whole retry burned on
 	 * "bt_conn_le_create rc=-22" immediately after a failed attempt. Wait it
 	 * out rather than counting it as a failure. */
+	dfu_status_set_state(DFU_STATUS_CONNECTING);
+
 	int rc = -EINVAL;
 	for (int attempt = 0; attempt < 12; attempt++) {
 		k_sem_reset(&s_link.sem);

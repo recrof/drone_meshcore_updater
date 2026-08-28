@@ -44,8 +44,13 @@ not boot; the client refuses it and says so.
   **Config** first.
 
 Either way the updater scans, connects, triggers the target's bootloader,
-streams the image, validates and activates it. Watch the LED (green = running,
-solid = done) or open **Log**.
+streams the image, validates and activates it.
+
+A progress banner appears while it runs, showing the current step, the target
+it found, percentage and transfer rate, and which attempt it is on. It stays
+put whether the browser was watching from the start or connected halfway
+through, and **Watch log** on it opens the device log streaming live. The LED
+says the same thing at a glance: green blinking = running, solid = done.
 
 ### 4. When something goes wrong
 

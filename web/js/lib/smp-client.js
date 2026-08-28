@@ -6,6 +6,7 @@
  *   "log"          detail { msg, cls }   — human-readable progress/errors
  *   "disconnected"                       — GATT link dropped
  *   "stream"       detail { available }  — fsx_stream discovery result
+ *   "dfustatus"    detail { status }     — live DFU progress from the device
  *
  * Protocol layers, innermost first:
  *   ATT Write Command  →  SMP frame (8-B header + CBOR)  →  mgmt group/cmd
@@ -14,6 +15,9 @@
  */
 
 import * as CBOR from "./cbor.js";
+import {
+  DFU_STATUS_SERVICE, DFU_STATUS_CHAR, parseDfuStatus,
+} from "./dfu-status.js";
 
 export const SMP_SERVICE = "8d53dc1d-1db7-4cd3-868b-8a527460aa84";
 export const SMP_CHAR    = "da2e7828-fbce-4e01-ae9e-261174997c48";
@@ -30,6 +34,10 @@ export const STREAM_DATA_CHAR = "da2e782a-fbce-4e01-ae9e-261174997c48";
  * on older firmware without breaking discovery of the others. */
 export const LOG_SERVICE = "8d53dc1f-1db7-4cd3-868b-8a527460aa84";
 export const LOG_CHAR    = "da2e782b-fbce-4e01-ae9e-261174997c48";
+
+/* Live DFU progress — src/dfu_status.h. Re-exported so callers have one
+ * import for the transport; the layout and labels live in dfu-status.js. */
+export { DFU_STATUS_SERVICE, DFU_STATUS_CHAR };
 
 export const STREAM_OP = {
   START: 0x01, FINISH: 0x02, ABORT: 0x03,
@@ -147,6 +155,10 @@ export class SmpClient extends EventTarget {
     this.logChar = null;           // live log stream, while subscribed
     this._logSink = null;
     this._onLogValue = null;
+
+    this.dfuStatusChar = null;     // live DFU progress, subscribed on connect
+    this._onDfuStatusValue = null;
+    this._dfuStatusWarned = false;
     this.streamAckResolver = null;
 
     /* Serializes the writeValueWithoutResponse fragment stream when
@@ -171,7 +183,8 @@ export class SmpClient extends EventTarget {
   async connect() {
     this.device = await navigator.bluetooth.requestDevice({
       filters: [{ services: [SMP_SERVICE] }],
-      optionalServices: [SMP_SERVICE, STREAM_SERVICE, LOG_SERVICE],
+      optionalServices: [SMP_SERVICE, STREAM_SERVICE, LOG_SERVICE,
+                         DFU_STATUS_SERVICE],
     });
     this.device.addEventListener("gattserverdisconnected", () => {
       this.log("disconnected", "err");
@@ -183,6 +196,8 @@ export class SmpClient extends EventTarget {
        * disconnect anyway. */
       this.logChar = null;
       this._logSink = null;
+      this.dfuStatusChar = null;
+      this._onDfuStatusValue = null;
       this.dispatchEvent(new CustomEvent("disconnected"));
     });
 
@@ -216,6 +231,12 @@ export class SmpClient extends EventTarget {
     this.dispatchEvent(new CustomEvent("stream", {
       detail: { available: this.hasStream() },
     }));
+
+    /* Subscribed for the whole session, unlike the log stream. It costs one
+     * notification per step and answers the question a connected browser
+     * otherwise cannot: is this device in the middle of a DFU right now? */
+    this._dfuStatusWarned = false;
+    await this.startDfuStatus();
 
     return this.device.name || "(unnamed)";
   }
@@ -473,6 +494,66 @@ export class SmpClient extends EventTarget {
     try { await c.stopNotifications(); } catch { /* link already gone */ }
     if (this._onLogValue) c.removeEventListener("characteristicvaluechanged", this._onLogValue);
     this._onLogValue = null;
+  }
+
+  /* --- live DFU status -------------------------------------------------
+   *
+   * Unlike the log stream, this is subscribed for the whole session: it is
+   * cheap (one small notification per step, throttled by the firmware) and
+   * it is the only thing that tells a connected browser whether the device
+   * is mid-transfer. Absent on firmware predating src/dfu_status.c, which is
+   * not an error — the UI simply shows nothing.
+   */
+  async startDfuStatus() {
+    if (this.dfuStatusChar) return true;
+    if (!this.gatt?.connected) throw new Error("not connected");
+    try {
+      const svc = await this.gatt.getPrimaryService(DFU_STATUS_SERVICE);
+      this.dfuStatusChar = await svc.getCharacteristic(DFU_STATUS_CHAR);
+    } catch {
+      this.dfuStatusChar = null;
+      return false;
+    }
+    this._onDfuStatusValue = (e) => this._emitDfuStatus(e.target.value);
+    this.dfuStatusChar.addEventListener("characteristicvaluechanged",
+      this._onDfuStatusValue);
+    await this.dfuStatusChar.startNotifications();
+
+    /* Read once. A DFU can sit in one state for most of a minute, so a
+     * browser that connects mid-transfer would otherwise show nothing at all
+     * until the step changed. This is why the characteristic is readable. */
+    try {
+      this._emitDfuStatus(await this.dfuStatusChar.readValue());
+    } catch { /* notifications will fill it in */ }
+    return true;
+  }
+
+  async stopDfuStatus() {
+    const c = this.dfuStatusChar;
+    if (!c) return;
+    this.dfuStatusChar = null;
+    try { await c.stopNotifications(); } catch { /* link already gone */ }
+    if (this._onDfuStatusValue) {
+      c.removeEventListener("characteristicvaluechanged", this._onDfuStatusValue);
+    }
+    this._onDfuStatusValue = null;
+  }
+
+  _emitDfuStatus(dv) {
+    const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+    let status;
+    try {
+      status = parseDfuStatus(bytes);
+    } catch (e) {
+      /* Once per connection. A version mismatch would otherwise repeat the
+       * same message for every notification of a whole transfer. */
+      if (!this._dfuStatusWarned) {
+        this._dfuStatusWarned = true;
+        this.log(e.message, "err");
+      }
+      return;
+    }
+    this.dispatchEvent(new CustomEvent("dfustatus", { detail: { status } }));
   }
 
   /* Standard mcumgr OS group reset. Available whenever the firmware is built

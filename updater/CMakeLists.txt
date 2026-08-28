@@ -28,6 +28,7 @@ target_sources(app PRIVATE
   src/firmware_map.c
   src/dfu_client.cpp
   src/dfu_runner.c
+  src/dfu_status.c
 )
 
 target_include_directories(app PRIVATE src)

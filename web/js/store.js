@@ -15,6 +15,7 @@ import {
   parseConfig, serializeConfig, encodedSize, defaults as configDefaults,
 } from "./lib/config-file.js";
 import { isLogPath } from "./lib/log-file.js";
+import { idleStatus, STATE as DFU_STATE } from "./lib/dfu-status.js";
 
 export const smp = new SmpClient();
 
@@ -39,6 +40,22 @@ export const configOpen = ref(false);
 export const flashOpen = ref(false);
 export const logViewOpen = ref(false);
 export const logViewPath = ref("");
+/* Open the viewer already streaming rather than reading a file. Set by the
+ * DFU banner: during a live transfer the interesting lines are the ones the
+ * flash backend has not flushed yet, so reading LOG.NNNN shows everything
+ * except what you opened it for. */
+export const logViewLive = ref(false);
+
+/* Live DFU progress, pushed by the device (src/dfu_status.c). Always a full
+ * record — idleStatus() has the same shape as a parsed one — so nothing that
+ * renders it has to null-check. */
+export const dfuStatus = ref(idleStatus());
+/* True while the device is actually working. DONE and FAILED are sticky, so
+ * this is not "state !== IDLE". */
+export const dfuActive = computed(() => dfuStatus.value.active);
+/* Bytes/s, derived here rather than on the device: the firmware would have to
+ * carry a second clock to report it, and the client already sees every sample. */
+export const dfuRate = ref(0);
 
 export const progress = reactive({
   shown: false,
@@ -61,7 +78,51 @@ smp.addEventListener("disconnected", () => {
   listError.value = "Disconnected.";
   fsInfo.value = "—";
   mtuInfo.value = "—";
+  dfuStatus.value = idleStatus();
+  dfuRate.value = 0;
 });
+/* Smoothing factor for the transfer-rate estimate. Samples arrive a few times
+ * a second and an unsmoothed rate flickers by several KB/s between them,
+ * which reads as instability rather than as measurement noise. */
+const RATE_ALPHA = 0.3;
+
+smp.addEventListener("dfustatus", (e) => {
+  const next = e.detail.status;
+  const prev = dfuStatus.value;
+
+  /* Between two UPLOADING samples only, and against the device's own elapsed
+   * clock. Both halves matter: the clock is monotonic and free of whatever
+   * the notification spent queued behind the DFU stream, and measuring from
+   * the previous *step* would divide the bytes by the scan and handshake time
+   * as well — measured, that understated a real 17.9 KB/s as 15.6. */
+  const uploading = next.state === DFU_STATE.UPLOADING &&
+                    prev.state === DFU_STATE.UPLOADING;
+  const dBytes = next.sent - prev.sent;
+  const dMs = next.elapsedMs - prev.elapsedMs;
+  if (uploading && next.attempt === prev.attempt && dBytes > 0 && dMs > 0) {
+    const sample = (dBytes * 1000) / dMs;
+    dfuRate.value = dfuRate.value
+      ? dfuRate.value + RATE_ALPHA * (sample - dfuRate.value)
+      : sample;
+  } else if (!next.active || next.attempt !== prev.attempt) {
+    /* A new attempt restarts the image from zero (Legacy DFU cannot resume —
+     * Trap 2), so carrying the old rate forward would be a fiction. */
+    dfuRate.value = 0;
+  }
+
+  /* Two log lines per run, not one per step: the step is on screen in the
+   * banner, and the page log is where the user's own actions are recorded. */
+  if (next.active && !prev.active) {
+    log(`DFU started on the device${next.file ? ` — ${next.file}` : ""}`);
+  }
+  if (next.terminal && !prev.terminal) {
+    log(`DFU ${next.ok ? "succeeded" : "failed"}: ${next.resultLabel}`,
+        next.ok ? "ok" : "err");
+  }
+
+  dfuStatus.value = next;
+});
+
 smp.addEventListener("stream", (e) => {
   mtuInfo.value = e.detail.available ? "fsx_stream: fast upload" : "fsx_stream: absent";
 });
@@ -190,11 +251,11 @@ export async function remove(fullpath, isDir) {
 export async function flashZip(fullpath) {
   if (!confirm(`Flash "${fullpath.split("/").pop()}" to the DFU target?\n\n` +
                `The updater will scan for a matching BLE peer, connect, and start ` +
-               `the Legacy DFU sequence. Watch the LED (green = running) or the ` +
-               `serial console for progress.`)) return;
+               `the Legacy DFU sequence. Progress appears here as it happens; ` +
+               `the device log has the detail.`)) return;
   try {
     await smp.fsxTriggerDfu(fullpath);
-    log(`DFU triggered: ${fullpath} — see LED / serial for progress`, "ok");
+    log(`DFU triggered: ${fullpath}`, "ok");
   } catch (e) {
     log(`DFU trigger: ${e.message}`, "err");
   }
@@ -203,9 +264,11 @@ export async function flashZip(fullpath) {
 export function openConfig() { configOpen.value = true; }
 export function openFlash() { flashOpen.value = true; }
 
-/* Opening with no path shows the newest log file. */
-export function openLogView(path = "") {
+/* Opening with no path shows the newest log file; `live` opens the stream
+ * instead of any file at all. */
+export function openLogView(path = "", live = false) {
   logViewPath.value = path;
+  logViewLive.value = live;
   logViewOpen.value = true;
 }
 
@@ -215,9 +278,13 @@ export function openLogView(path = "") {
  * reply first and reset 250 ms later, so the response arrives before the link
  * drops. Losing the link is the expected outcome, not an error. */
 export async function reboot() {
+  /* The banner knows whether a transfer is running, so the warning can name
+   * the actual situation instead of leaving the operator to remember. */
+  const mid = dfuActive.value ? "\n\nA DFU IS RUNNING — rebooting now abandons it " +
+    "and leaves the target part-flashed." : "";
   if (!confirm("Reboot the updater?\n\n" +
                "The Bluetooth connection will drop and you will need to reconnect. " +
-               "Do not do this while a DFU is running.")) return;
+               "Do not do this while a DFU is running." + mid)) return;
   try {
     await smp.osReset();
     log("reboot requested", "ok");
@@ -255,7 +322,7 @@ export async function autoFlash() {
                `The updater will scan for a BLE peer, match its advertised name ` +
                `against the rules in ble_firmware_mapping, and flash whichever ` +
                `bundle those rules select. Set the rules under Config… first.\n\n` +
-               `Watch the LED (green = running) or the serial console for progress.`)) return;
+               `Progress appears here as it happens; the device log has the detail.`)) return;
   try {
     await smp.fsxTriggerDfu("");
     log("auto-flash triggered — bundle chosen by ble_firmware_mapping", "ok");

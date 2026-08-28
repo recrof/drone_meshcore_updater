@@ -21,6 +21,7 @@
 #include "firmware_zip.h"
 #include "firmware_map.h"
 #include "dfu_client.h"
+#include "dfu_status.h"
 #include "app.h"
 
 LOG_MODULE_REGISTER(dfu_runner, LOG_LEVEL_INF);
@@ -54,6 +55,19 @@ static void run_thread(void *a, void *b, void *c)
 	const struct app_config *cfg = app_config_current();
 	LOG_INF("DFU runner: cfg ble_name='%s' min_rssi=%d retries=%u",
 		cfg->ble_name, cfg->min_rssi, cfg->retries);
+
+	/* Publish over GATT from here on. A browser watching this device has no
+	 * other way to tell a running transfer from a wedged one — the log
+	 * stream carries the detail, but only while someone is subscribed to it,
+	 * and it is far too much to read at a glance. */
+	dfu_status_begin(cfg->retries);
+	dfu_status_bundle(s_path);
+
+	/* Whatever ends the run, reported to the client. Overwritten by each
+	 * attempt so an exhausted retry budget reports *why* the last attempt
+	 * failed rather than the tautology that there were no attempts left. */
+	enum dfu_status_result status_result = DFU_STATUS_RESULT_RETRIES_EXHAUSTED;
+
 	struct firmware_bundle bundle;
 	char err[96];
 	int  rc;
@@ -68,6 +82,7 @@ static void run_thread(void *a, void *b, void *c)
 		if (!cfg->ble_firmware_mapping[0]) {
 			LOG_ERR("auto-flash requested but ble_firmware_mapping "
 				"is empty — nothing to choose from");
+			status_result = DFU_STATUS_RESULT_BAD_BUNDLE;
 			goto fail;
 		}
 		LOG_INF("DFU runner: auto-flash, mapping='%s'",
@@ -76,6 +91,7 @@ static void run_thread(void *a, void *b, void *c)
 		rc = firmware_zip_open(s_path, &bundle, err, sizeof(err));
 		if (rc < 0) {
 			LOG_ERR("zip parse failed: %s (rc=%d)", err, rc);
+			status_result = DFU_STATUS_RESULT_BAD_BUNDLE;
 			goto fail;
 		}
 		bundle_open = true;
@@ -103,18 +119,24 @@ static void run_thread(void *a, void *b, void *c)
 				cfg->pkt_gap_ms, cfg->min_rssi);
 		}
 
+		dfu_status_attempt(attempt + 1);
+		dfu_status_set_state(DFU_STATUS_SCANNING);
+
 		struct ble_scanner_target target;
 		rc = ble_scanner_find_first(&target,
 					     (uint32_t)cfg->scan_timeout * 1000,
 					     cfg->ble_name, cfg->min_rssi, NULL);
 		if (rc == -ETIMEDOUT) {
 			LOG_ERR("scan timed out (no target)");
+			status_result = DFU_STATUS_RESULT_NO_TARGET;
 			goto fail;
 		}
 		if (rc < 0) {
 			LOG_ERR("scan rc=%d", rc);
+			status_result = DFU_STATUS_RESULT_SCAN_ERROR;
 			goto fail;
 		}
+		dfu_status_target(target.name);
 
 		/* Resolve the bundle once, from the first peer we find, and
 		 * keep it for the rest of the run. Re-resolving per attempt
@@ -132,13 +154,16 @@ static void run_thread(void *a, void *b, void *c)
 						  err, sizeof(err));
 			if (rc < 0) {
 				LOG_ERR("auto-flash: %s (rc=%d)", err, rc);
+				status_result = DFU_STATUS_RESULT_BAD_BUNDLE;
 				goto fail;
 			}
 			rc = firmware_zip_open(picked, &bundle, err, sizeof(err));
 			if (rc < 0) {
 				LOG_ERR("zip parse failed: %s (rc=%d)", err, rc);
+				status_result = DFU_STATUS_RESULT_BAD_BUNDLE;
 				goto fail;
 			}
+			dfu_status_bundle(picked);
 			bundle_open = true;
 		}
 
@@ -147,6 +172,7 @@ static void run_thread(void *a, void *b, void *c)
 		case DFU_OK:
 			LOG_INF("DFU runner: SUCCESS");
 			led_set_state(LED_STATE_DONE_OK);
+			dfu_status_finish(DFU_STATUS_RESULT_OK);
 			goto done;
 		case DFU_BUTTONLESS_TRIGGERED:
 			LOG_INF("DFU runner: buttonless triggered, rescanning");
@@ -154,16 +180,20 @@ static void run_thread(void *a, void *b, void *c)
 			continue;    /* doesn't consume a retry */
 		case DFU_CONNECT_FAILED:
 			LOG_WRN("DFU runner: connect failed — short cooldown");
+			status_result = dfu_status_from_dfu_result((int)r);
 			attempt++;
 			if (attempt < cfg->retries && cfg->retry_cooldown) {
+				dfu_status_set_state(DFU_STATUS_COOLDOWN);
 				k_sleep(K_SECONDS(cfg->retry_cooldown));
 			}
 			break;
 		default:
 			LOG_WRN("DFU runner: attempt %u/%u result=%d — wedge cooldown",
 				attempt + 1, cfg->retries, (int)r);
+			status_result = dfu_status_from_dfu_result((int)r);
 			attempt++;
 			if (attempt < cfg->retries && cfg->wedge_cooldown) {
+				dfu_status_set_state(DFU_STATUS_COOLDOWN);
 				k_sleep(K_SECONDS(cfg->wedge_cooldown));
 			}
 			break;
@@ -173,6 +203,7 @@ static void run_thread(void *a, void *b, void *c)
 
 fail:
 	led_set_state(LED_STATE_DONE_FAIL);
+	dfu_status_finish(status_result);
 done:
 	/* One close for every exit path — auto mode can bail before a bundle
 	 * was ever opened, so it has to be conditional.

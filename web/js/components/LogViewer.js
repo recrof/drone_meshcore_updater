@@ -19,7 +19,10 @@ import {
  */
 export default {
   name: "LogViewer",
-  props: { open: Boolean, path: String },
+  /* `startLive` opens straight into the stream instead of reading a file.
+   * Named apart from the internal `live` ref so the template cannot resolve
+   * one when it means the other. */
+  props: { open: Boolean, path: String, startLive: Boolean },
   emits: ["close"],
   setup(props, { emit }) {
     const lines = ref([]);
@@ -92,7 +95,12 @@ export default {
       }
     }
 
-    watch(() => props.open, (isOpen) => { if (!isOpen && live.value) toggleLive(); });
+    watch(() => props.open, (isOpen) => {
+      if (!isOpen && live.value) toggleLive();
+      /* Opened from the DFU banner: the transfer is happening now, and the
+       * file on flash is missing exactly the lines being asked for. */
+      if (isOpen && props.startLive && !live.value) toggleLive();
+    });
     onUnmounted(() => { if (live.value) smp.stopLogStream(); });
 
     /* Every log file on the device, oldest first. The backend numbers them in
@@ -105,7 +113,10 @@ export default {
 
     const current = ref("");
     watch(() => [props.open, props.path], ([isOpen, p]) => {
-      if (!isOpen || live.value) return;
+      /* props.startLive, not just live.value: toggleLive() is async and this
+       * watcher can run before it has flipped the ref, which would load a
+       * file underneath the stream that is about to start. */
+      if (!isOpen || live.value || props.startLive) return;
       current.value = p && isLogPath(p) ? p : (files.value[files.value.length - 1] || "");
       if (current.value) load(current.value);
     }, { immediate: true });

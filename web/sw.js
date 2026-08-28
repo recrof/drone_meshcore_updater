@@ -29,7 +29,7 @@
  *    reason the precache is versioned.
  */
 
-const CACHE = "xiao-nrf54-updater-v7";
+const CACHE = "xiao-nrf54-updater-v8";
 
 /*
  * The release firmware staged by CI at firmware/. Kept in its own cache,
@@ -60,6 +60,7 @@ const PRECACHE = [
   "js/lib/cbor.js",
   "js/lib/cmsis-dap.js",
   "js/lib/config-file.js",
+  "js/lib/dfu-status.js",
   "js/lib/format.js",
   "js/lib/intel-hex.js",
   "js/lib/log-file.js",
@@ -70,6 +71,7 @@ const PRECACHE = [
   "js/components/AppHeader.js",
   "js/components/BleUpdate.js",
   "js/components/ConfigDialog.js",
+  "js/components/DfuStatus.js",
   "js/components/DropOverlay.js",
   "js/components/FileListing.js",
   "js/components/FileToolbar.js",

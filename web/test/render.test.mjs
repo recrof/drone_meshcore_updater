@@ -88,6 +88,31 @@ t("Config button present",          !!app.querySelector('button[aria-label="Conf
     !!updateBtn && !/:disabled/.test(updateBtn), updateBtn.replace(/\s+/g, " ").slice(0, 110));
 }
 t("Device-log button present",      !!app.querySelector('button[aria-label="Device log"]'));
+
+/* --- the DFU banner ---------------------------------------------------- *
+ *
+ * It renders nothing here, which is correct: no device, so no run. What this
+ * checks is that App actually *mounts* it — a component imported and never
+ * placed is the exact shape of bug that took the flash button down once, and
+ * it produces no error anywhere. Its behaviour when there is something to
+ * report is dfu-banner.test.mjs; that needs a driven store, which this
+ * whole-app mount has no way to reach.
+ */
+t("no DFU banner while nothing is running", !app.querySelector(".dfu-banner"));
+{
+  const appSrc = readFileSync(join(WEB, "js/App.js"), "utf8");
+  t("App mounts DfuStatus", /<DfuStatus\s*\/>/.test(appSrc));
+  t("DfuStatus is registered", /components: \{[^}]*DfuStatus/s.test(appSrc));
+
+  /* The Log button is the fallback route once the banner has been dismissed,
+   * so it has to be marked while a run is going and open the live view. */
+  const tbSrc = readFileSync(join(WEB, "js/components/FileToolbar.js"), "utf8");
+  const logBtn = tbSrc.match(/<button[^>]*aria-label="Device log"[^>]*>/s)?.[0] ?? "";
+  t("Log button exists in source", !!logBtn);
+  t("Log button is marked while a DFU runs", /attention: dfuActive/.test(logBtn), logBtn);
+  t("Log button opens the live view during a run",
+    /openLogView\('', dfuActive\)/.test(logBtn), logBtn);
+}
 t("listing table rendered",         !!app.querySelector("table thead th"));
 t("footer rendered",                !!app.querySelector("footer"));
 t("log pane rendered",              !!app.querySelector("#log"));

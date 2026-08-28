@@ -1,7 +1,7 @@
 import { ref, computed } from "../vue.js";
 import {
   connected, refresh, uploadFiles, openConfig, autoFlash, reboot, openFlash,
-  openLogView,
+  openLogView, dfuActive,
 } from "../store.js";
 import Icon from "./Icon.js";
 
@@ -38,9 +38,16 @@ export default {
       ? "Update this updater's own firmware over Bluetooth"
       : "Update this updater's own firmware over USB, or connect for Bluetooth");
 
+    /* While a DFU is running the log is where the detail is, so the button
+     * says so and is marked. The banner above it carries the same affordance;
+     * this one is for after the banner has been dismissed. */
+    const logTitle = computed(() => dfuActive.value
+      ? "A DFU is running — open the device log to watch it"
+      : "View the device log");
+
     return {
       connected, refresh, picker, onPick, openConfig, autoFlash, reboot,
-      openFlash, openLogView, flashTitle,
+      openFlash, openLogView, flashTitle, dfuActive, logTitle,
     };
   },
   template: /* html */ `
@@ -70,8 +77,9 @@ export default {
               title="Edit config.txt" aria-label="Config">
         <Icon name="settings"/><span class="label">Config</span>
       </button>
-      <button class="icon-btn" :disabled="!connected" @click="openLogView()"
-              title="View the device log" aria-label="Device log">
+      <button class="icon-btn" :class="{ attention: dfuActive }"
+              :disabled="!connected" @click="openLogView('', dfuActive)"
+              :title="logTitle" aria-label="Device log">
         <Icon name="description"/><span class="label">Log</span>
       </button>
       <button class="icon-btn" :disabled="!connected" @click="reboot"
