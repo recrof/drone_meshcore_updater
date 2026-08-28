@@ -103,6 +103,20 @@ jobs:
           cmake --version
           python3 --version
 
+      # Set the firmware version from the tag before building, so the value
+      # baked into the MCUboot image header — shown by the web client and
+      # logged at boot — always matches the release, with nothing to remember.
+      #
+      # The trade, chosen deliberately: the released artifact is not what
+      # building this tag locally produces, because the VERSION committed to
+      # git still says whatever it said. The image reports its true version in
+      # its own header either way, so a device can always be identified.
+      - name: Set the firmware version from the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          python3 updater/tools/set_version.py "${GITHUB_REF_NAME}"
+          cat updater/VERSION
+
       - name: Initialize west workspace
         run: west init -l updater
 

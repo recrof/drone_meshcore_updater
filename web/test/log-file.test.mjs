@@ -14,6 +14,7 @@ import { dirname, resolve, join } from "node:path";
 import {
   LOG_DIR, LOG_PREFIX, isLogPath, logIndex, logName,
   parseLogLine, parseLog, filterLog, levelCounts, LEVELS,
+  createLineAssembler,
 } from "../js/lib/log-file.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -128,6 +129,61 @@ for (const lvl of LEVELS) {
   const withRaw = parseLog(text + "ZEPHYR FATAL ERROR\n");
   t("level filter keeps unparsed lines",
     filterLog(withRaw, { minLevel: "err" }).some(l => l.msg === "ZEPHYR FATAL ERROR"));
+}
+
+/* --- notification reassembly -------------------------------------------
+ *
+ * log_stream.c drains its ring into notifications sized to the ATT payload,
+ * with no regard for line boundaries — so a notification routinely ends
+ * mid-line. Getting this wrong shows half a line and then a line that starts
+ * in the middle, which looks like corrupted firmware output rather than a
+ * client bug.
+ */
+{
+  const asm = createLineAssembler();
+  t("a whole line in one chunk",
+    asm.push("hello\n").join("|") === "hello");
+  t("nothing emitted for a partial line", asm.push("wor").length === 0);
+  t("the partial is held", asm.pending() === "wor");
+  t("the rest completes it", asm.push("ld\n").join("|") === "world");
+  t("buffer is empty again", asm.pending() === "");
+
+  t("several lines in one chunk",
+    asm.push("a\nb\nc\n").join("|") === "a|b|c");
+  t("trailing partial after several lines",
+    asm.push("d\ne\nf").join("|") === "d|e");
+  t("f is still pending", asm.pending() === "f");
+  t("flush emits the tail", asm.flush().join("|") === "f");
+  t("flush empties the buffer", asm.pending() === "" && asm.flush().length === 0);
+}
+{
+  /* A line split at every possible offset must reassemble identically. */
+  const src = "[00:00:01.000,000] <inf> dfu: 40% (204800/511472)\n" +
+              "[00:00:01.500,000] <wrn> dfu: 6 TX-buffer retries\n";
+  for (let cut = 1; cut < src.length; cut++) {
+    const asm = createLineAssembler();
+    const got = [...asm.push(src.slice(0, cut)), ...asm.push(src.slice(cut))];
+    if (got.join("\n") !== src.trimEnd()) {
+      t(`reassembles across a split at ${cut}`, false, JSON.stringify(got));
+      break;
+    }
+    if (cut === src.length - 1) t("reassembles across every possible split", true);
+  }
+}
+{
+  /* An empty line is a line — blank separators appear in Zephyr output and
+   * dropping them would silently reflow the log. */
+  const asm = createLineAssembler();
+  t("blank lines survive", asm.push("a\n\nb\n").join("|") === "a||b");
+}
+{
+  /* Byte-level splitting means a multi-byte character can straddle two
+   * notifications. The client decodes with fatal:false, so the halves arrive
+   * as replacement characters rather than throwing — assert we still frame
+   * the lines correctly around them. */
+  const asm = createLineAssembler();
+  t("framing survives a replacement character",
+    asm.push("ok \uFFFD").length === 0 && asm.push("\uFFFD done\n").join("|") === "ok \uFFFD\uFFFD done");
 }
 
 console.log(bad ? `\n${bad} FAILURES` : "\nall log-file tests passed");

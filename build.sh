@@ -8,7 +8,8 @@
 #   ./build.sh               # build for xiao_nrf54lm20a (default)
 #   ./build.sh -p            # clean rebuild (pristine)
 #   ./build.sh -b <board>    # build for a specific board
-#   ./build.sh merge         # rebuild updater/build/merged.hex only
+#   ./build.sh merge         # rebuild merged.hex (+ restage web/firmware/)
+#   ./build.sh bump          # bump VERSION_TWEAK + rebuild (for OTA testing)
 #   ./build.sh flash         # flash the last build
 #   ./build.sh menuconfig    # open Kconfig menuconfig
 
@@ -40,6 +41,29 @@ merge_hex() {
   local app="${BUILD_DIR}/updater/zephyr/zephyr.signed.hex"
   [ -f "${mcuboot}" ] && [ -f "${app}" ] || return 0
   python3 "${APP}/tools/merge_hex.py" "${BUILD_DIR}/merged.hex" "${mcuboot}" "${app}"
+  restage
+}
+
+# Keep web/firmware/ in step with the build.
+#
+# Staging once is opting in to local testing through the web client; from then
+# on, a build that did not refresh it serves *yesterday's* firmware from a UI
+# that says it is the newest — with a version number to match, because the
+# manifest is generated from the stale artifact too. That cost a full
+# debugging round: an image staged six minutes before a feature was written
+# was uploaded, and the missing feature looked like a bug in the feature.
+#
+# Only ever refreshes a directory that already exists, so it cannot surprise
+# anyone who is not using it.
+restage() {
+  local dir="web/firmware"
+  [ -d "${dir}" ] || return 0
+  command -v node >/dev/null 2>&1 || {
+    echo "warning: ${dir} exists but node is missing — it is now STALE" >&2
+    return 0
+  }
+  node web/tools/stage-firmware.mjs "${BUILD_DIR}/merged.hex" \
+    --dfu "${BUILD_DIR}/dfu_application.zip" --out "${dir}"
 }
 
 case "${1:-build}" in
@@ -50,6 +74,23 @@ case "${1:-build}" in
     ;;
 
   merge)
+    merge_hex
+    ;;
+
+  bump)
+    # Increment VERSION_TWEAK and rebuild.
+    #
+    # This exists for testing over-the-air updates. img_mgmt identifies images
+    # by hash, so uploading the image already running is refused
+    # (IMG_MGMT_ERR_IMAGE_SETTING_TEST_TO_ACTIVE_DENIED) — you need two
+    # genuinely different builds, and the version is in the signed header, so
+    # bumping it is enough to make one.
+    V="${APP}/VERSION"
+    old=$(sed -n 's/^VERSION_TWEAK = \([0-9]*\).*/\1/p' "${V}")
+    new=$(( old + 1 ))
+    sed -i.bak "s/^VERSION_TWEAK = ${old}/VERSION_TWEAK = ${new}/" "${V}" && rm -f "${V}.bak"
+    echo "VERSION_TWEAK ${old} -> ${new}"
+    west build -b "${BOARD}" "${APP}" --build-dir "${BUILD_DIR}"
     merge_hex
     ;;
   flash)

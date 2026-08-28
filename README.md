@@ -186,6 +186,37 @@ of a probe, stage it where the client looks:
 node web/tools/stage-firmware.mjs   # -> web/firmware/{merged.hex,manifest.json}
 ```
 
+### Testing an over-the-air update
+
+`updater/VERSION` sets the version imgtool stamps into the MCUboot image
+header, and `./build.sh bump` increments its `VERSION_TWEAK` and rebuilds.
+
+You need that because **uploading the image already running is refused**:
+mcumgr identifies images by hash, so two byte-identical builds share one, the
+lookup resolves to the running slot, and marking that slot "test" is denied.
+Two genuinely different builds are the only way to exercise the path.
+
+```bash
+./build.sh                          # 1.0.0+0 — flash this over USB
+./build.sh bump                     # 1.0.0+1 — a different image
+```
+
+Once `web/firmware/` exists, every build refreshes it, so the web client always
+offers what you last built. Create it the first time with:
+
+```bash
+node web/tools/stage-firmware.mjs
+```
+
+The running version is logged at boot and shown in the web client's slot
+table, and the version on offer is shown next to both update buttons — so the
+two builds are told apart at a glance, before anything is transferred.
+
+An updated image is confirmed automatically once it proves it can still be
+reached over Bluetooth, so there is nothing to remember after an update. If
+the new firmware cannot bring Bluetooth up, it is never confirmed and MCUboot
+restores the previous version at the next reset.
+
 Or invoke west directly:
 
 ```bash
@@ -218,6 +249,33 @@ file a bug about.
 ## Config knobs
 
 The `config.txt` file on `/lfs1/` holds the scan filter, the retry policy, and the transfer tuning. It is reloaded on every retry attempt, so edits apply mid-run. Every key is documented in the web client's Config dialog, which is generated from the same schema the firmware parses; `web/js/lib/config-file.js` is the single list. On first boot the file is seeded with sensible defaults if absent.
+
+### Cutting a release
+
+**The tag is the version.** CI writes `updater/VERSION` from it before
+building, so the value baked into the MCUboot image header — shown by the web
+client and logged at boot — always matches the release. Nothing to keep in
+sync by hand.
+
+```bash
+git tag v1.2 && git push --follow-tags
+# then publish the draft release GitHub Actions creates
+#   -> that fires web.yml, which stages the firmware for "Flash newest"
+#      and "Update over Bluetooth"
+```
+
+Tags are `vMAJOR.MINOR` or `vMAJOR.MINOR.PATCH`; a missing patch component
+means `.0`. `VERSION_TWEAK` is set to 0 for releases, so `v1.2` ships exactly
+`1.2.0`.
+
+The `updater/VERSION` committed to git is therefore only the *development*
+version — what your local builds report. `./build.sh bump` increments it, which
+is how you make two local builds distinguishable for testing an update.
+
+One consequence of doing it this way: a release artifact is not byte-identical
+to what building that tag locally produces, since the committed VERSION differs.
+The image reports its true version in its own header, so a device can always be
+identified regardless.
 
 ## TODO
 

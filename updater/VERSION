@@ -1,0 +1,15 @@
+# Application version. Zephyr reads this and feeds it to imgtool through
+# CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION's default ($(APP_VERSION_TWEAK_STRING)),
+# so it lands in the MCUboot image header and shows up in the web client's
+# slot table.
+#
+# It is not cosmetic. img_mgmt identifies images by hash, and two builds that
+# differ only in unrelated whitespace can still collide conceptually for a
+# human staring at "v0.0.0 · running / v0.0.0" wondering which is which.
+# Bumping VERSION_TWEAK is the cheapest way to make two local builds tell
+# themselves apart when testing an over-the-air update.
+VERSION_MAJOR = 1
+VERSION_MINOR = 0
+PATCHLEVEL = 0
+VERSION_TWEAK = 0
+EXTRAVERSION =

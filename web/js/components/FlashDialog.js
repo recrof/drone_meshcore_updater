@@ -4,6 +4,7 @@ import { Nrf54lFlasher, EXPECTED_DPIDR } from "../lib/nrf54l-flash.js";
 import { parseIntelHex, totalBytes, lowAddress, highAddress } from "../lib/intel-hex.js";
 import { fmtSize } from "../lib/format.js";
 import { connected } from "../store.js";
+import BleUpdate from "./BleUpdate.js";
 
 /* Staged by CI from the newest published release — see web.yml. Relative, so
  * it works under a GitHub Pages sub-path and from a local checkout alike. */
@@ -28,6 +29,7 @@ const hex8 = (n) => (n >>> 0).toString(16).padStart(8, "0");
  */
 export default {
   name: "FlashDialog",
+  components: { BleUpdate },
   props: { open: Boolean },
   emits: ["close"],
   setup(props, { emit }) {
@@ -249,24 +251,36 @@ export default {
   },
   template: /* html */ `
     <div id="flash-overlay" v-if="open" @click.self="close">
-      <div class="cfg-modal" role="dialog" aria-modal="true" aria-label="Flash updater firmware">
+      <div class="cfg-modal" role="dialog" aria-modal="true" aria-label="Update updater firmware">
 
         <div class="cfg-head">
-          <span class="title">FLASH UPDATER</span>
-          <span class="path">over USB · CMSIS-DAP</span>
+          <span class="title">UPDATE UPDATER</span>
+          <span class="path">Bluetooth or USB</span>
           <span class="grow"></span>
           <button :disabled="!!busy" title="Close" @click="close">✕</button>
         </div>
 
         <div class="cfg-body">
           <p class="cfg-lede">
-            Programs this XIAO's own firmware through the on-board debug probe —
-            nothing to install. This is not the DFU target; it is the updater itself.
+            Updates this XIAO's own firmware. This is not the DFU target; it is the
+            updater itself. Two routes, and exactly one is usable at a time:
+            Bluetooth needs a connection, USB needs there not to be one.
+          </p>
+
+          <div class="cfg-section">Over Bluetooth</div>
+          <BleUpdate />
+
+          <div class="cfg-section">Over USB</div>
+          <p class="cfg-lede">
+            Programs through the on-board debug probe — nothing to install. This is
+            also the way back if a Bluetooth update ever leaves the device unable
+            to advertise.
           </p>
 
           <div class="cfg-banner err" v-if="connected">
-            Still connected over Bluetooth. Flashing halts the CPU, which takes the
-            Bluetooth link down with it — disconnect before writing.
+            Still connected over Bluetooth. Flashing over USB halts the CPU, which
+            takes the Bluetooth link down with it — disconnect first, or use the
+            Bluetooth route above.
           </div>
 
           <div class="cfg-banner err" v-if="!webUsbAvailable">
@@ -275,7 +289,7 @@ export default {
           </div>
 
           <template v-else>
-            <div class="cfg-section">1 · Probe</div>
+            <div class="cfg-section-sub">Probe</div>
             <div class="flash-step">
               <button v-if="!attached" class="primary" :disabled="!!busy" @click="connect">
                 {{ busy === "connecting" ? "Connecting…" : "Connect probe" }}
@@ -300,7 +314,7 @@ export default {
               </button>
             </div>
 
-            <div class="cfg-section">2 · Write</div>
+            <div class="cfg-section-sub">Write</div>
 
             <!-- Each button is the whole operation: fetch or pick, check, halt,
                  write, verify, reset. -->
@@ -309,9 +323,11 @@ export default {
                 {{ busy === "flashing" ? "Flashing…" : "Flash newest" }}
               </button>
               <span class="flash-note" v-if="newest">
-                {{ newest.tag || "latest" }}<template v-if="newest.bytes">
-                  · {{ fmtSize(newest.bytes) }}</template><template v-if="newest.published">
-                  · {{ newest.published.slice(0, 10) }}</template>
+                <strong v-if="newest.version">v{{ newest.version }}</strong><template
+                  v-if="newest.version && newest.tag"> · </template><template
+                  v-if="newest.tag">{{ newest.tag }}</template><template
+                  v-if="newest.bytes"> · {{ fmtSize(newest.bytes) }}</template><template
+                  v-if="newest.published"> · {{ newest.published.slice(0, 10) }}</template>
               </span>
               <span class="flash-note warn" v-else>
                 no published build available{{ newestError ? " (" + newestError + ")" : "" }}

@@ -76,6 +76,16 @@ jobs:
       - name: Log file tests
         run: node web/test/log-file.test.mjs
 
+      # Catches mistyped this.x() in the hardware-driving modules, which jsdom
+      # cannot execute and whose error paths only run against a real device.
+      - name: Self-call check
+        run: node web/test/self-calls.test.mjs
+
+      # Header layout + DFU zip, cross-checked against the real build when one
+      # is present.
+      - name: MCUboot image tests
+        run: node web/test/mcuboot-image.test.mjs
+
       - name: Bundle single-file build
         run: node web/tools/build-single.mjs web/dist/updater.html
 
@@ -164,7 +174,16 @@ jobs:
 
           # Same script a developer runs locally, so the manifest schema has
           # exactly one producer and cannot drift from its reader.
+          # The OTA image for "Update over Bluetooth". Optional: a release
+          # predating MCUboot has no such asset, and the USB route still works.
+          if ! gh release download "${TAG}" --pattern '*-dfu.zip' \
+                 --output _site/firmware/dfu_application.zip --clobber; then
+            echo "::notice::${TAG} has no *-dfu.zip — Bluetooth updates unavailable"
+            rm -f _site/firmware/dfu_application.zip
+          fi
+
           node web/tools/stage-firmware.mjs _site/firmware/merged.hex \
+            --dfu _site/firmware/dfu_application.zip \
             --out _site/firmware --tag "${TAG}"
           ls -la _site/firmware/
 

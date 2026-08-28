@@ -66,15 +66,26 @@ t("Config button present",          !!app.querySelector('button[aria-label="Conf
   t("every toolbar action has an aria-label",
     btns.every(b => b.getAttribute("aria-label")));
 
-  /* Flash updater is first and, on a cold open, the only thing you can press
+  /* Update updater is first and, on a cold open, the only thing you can press
      — that is the whole point of its position. */
-  t("Flash updater is the first action",
-    btns[0]?.getAttribute("aria-label") === "Flash updater",
+  t("Update updater is the first action",
+    btns[0]?.getAttribute("aria-label") === "Update updater",
     btns[0]?.getAttribute("aria-label"));
   t("it is the only action enabled while disconnected",
     btns.filter(b => !b.disabled).length === 1 &&
-    btns.find(b => !b.disabled)?.getAttribute("aria-label") === "Flash updater",
+    btns.find(b => !b.disabled)?.getAttribute("aria-label") === "Update updater",
     btns.filter(b => !b.disabled).map(b => b.textContent.trim()).join(", "));
+
+  /* And it must never be disabled at all. Checked against the source rather
+     than the DOM because the bundle renders disconnected, which is exactly
+     the state where the bug hides: the button was once disabled *while
+     connected*, which is the only state the Bluetooth update route works in —
+     so the whole OTA path became unreachable and nothing rendered wrong. */
+  const toolbarSrc = readFileSync(join(WEB, "js/components/FileToolbar.js"), "utf8");
+  const updateBtn = toolbarSrc.match(/<button[^>]*aria-label="Update updater"[^>]*>/s)?.[0] ?? "";
+  t("Update updater button exists in source", !!updateBtn);
+  t("Update updater is never disabled",
+    !!updateBtn && !/:disabled/.test(updateBtn), updateBtn.replace(/\s+/g, " ").slice(0, 110));
 }
 t("Device-log button present",      !!app.querySelector('button[aria-label="Device log"]'));
 t("listing table rendered",         !!app.querySelector("table thead th"));
@@ -84,11 +95,12 @@ t("drop overlay rendered",          !!app.querySelector("#drop-overlay"));
 t("config dialog closed initially", !app.querySelector("#cfg-overlay"));
 t("flash dialog closed initially",  !app.querySelector("#flash-overlay"));
 t("log viewer closed initially",    !app.querySelector("#log-overlay"));
-t("Flash-updater button present",   !!app.querySelector('button[aria-label="Flash updater"]'));
-/* Enabled with nothing connected — it runs over USB, which is the whole point
-   of it. It becomes disabled once a BLE link is up (flashing halts the CPU). */
-t("Flash-updater button enabled while disconnected",
-  app.querySelector('button[aria-label="Flash updater"]')?.disabled === false);
+t("Update-updater button present",  !!app.querySelector('button[aria-label="Update updater"]'));
+/* Enabled always: USB when nothing is connected, Bluetooth when something is.
+   It is the only route to the OTA update, so disabling it while connected —
+   as it briefly was — makes that route unreachable. */
+t("Update updater is enabled while disconnected",
+  app.querySelector('button[aria-label="Update updater"]')?.disabled === false);
 t("no-bluetooth notice logged",     /does not support Web Bluetooth/.test(text));
 
 /* Open the dialog (the button is disabled until connected, so force it). */
@@ -196,7 +208,7 @@ if (errors.length) {
 }
 /* --- USB flasher ------------------------------------------------------- */
 {
-  const btn = app.querySelector('button[aria-label="Flash updater"]');
+  const btn = app.querySelector('button[aria-label="Update updater"]');
   btn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
   await new Promise(r => setTimeout(r, 400));
   const dlg = app.querySelector("#flash-overlay");
@@ -233,6 +245,14 @@ if (errors.length) {
   t("has a level filter", !!v?.querySelector('select[aria-label="Minimum level"]'));
   t("has a text filter",  !!v?.querySelector('input[aria-label="Filter text"]'));
   t("has a log pane",     !!v?.querySelector(".logv-body"));
+  /* Live streaming is opt-in: the firmware backend only runs while something
+     is subscribed, and it shares three TX buffers with the DFU stream. */
+  const liveBtn = v?.querySelector('button[aria-label="Live"]');
+  t("offers a live-stream toggle", !!liveBtn);
+  t("live is off until asked for", /Go live/.test(liveBtn?.textContent ?? ""),
+    liveBtn?.textContent.trim());
+  t("live has a status indicator", !!v?.querySelector(".live-dot"));
+  t("follow control hidden until live", !v?.querySelector(".logv-follow"));
 
   const close = [...v.querySelectorAll(".cfg-foot button")].find(b => /Close/.test(b.textContent));
   close.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));

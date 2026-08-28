@@ -26,6 +26,11 @@ export const STREAM_SERVICE   = "8d53dc1e-1db7-4cd3-868b-8a527460aa84";
 export const STREAM_CTRL_CHAR = "da2e7829-fbce-4e01-ae9e-261174997c48";
 export const STREAM_DATA_CHAR = "da2e782a-fbce-4e01-ae9e-261174997c48";
 
+/* Live log streaming — src/log_stream.c. Separate service so it can be absent
+ * on older firmware without breaking discovery of the others. */
+export const LOG_SERVICE = "8d53dc1f-1db7-4cd3-868b-8a527460aa84";
+export const LOG_CHAR    = "da2e782b-fbce-4e01-ae9e-261174997c48";
+
 export const STREAM_OP = {
   START: 0x01, FINISH: 0x02, ABORT: 0x03,
   READY: 0x81, DONE: 0x82, ACK: 0x83, ERROR: 0x8F,
@@ -44,11 +49,84 @@ export const GRP = {
  * recursive=false, which invokes fs_unlink() and works on plain files.
  */
 export const FS_ID  = { FILE: 0, STAT: 1 };
+/* img_mgmt (group 1). STATE reads the slot table and writes test/confirm
+ * flags; UPLOAD streams an image into the spare slot. */
+export const IMG_ID = { STATE: 0, UPLOAD: 1, ERASE: 5 };
+
+/* mcumgr's generic result codes (mgmt_defines.h, enum mcumgr_err_t). "rc=1"
+ * on its own is unactionable, and this layer is where a user meets it. */
+const MGMT_ERR = [
+  "ok", "unknown error", "out of memory", "invalid argument", "timeout",
+  "not found", "bad state", "response too large", "not supported",
+  "corrupt", "busy", "access denied", "protocol version too old",
+  "protocol version too new",
+];
+
+/* Group-specific codes, sent alongside rc in an `err` map. Far more precise
+ * than the generic rc, and mcumgr sends both — reading only rc throws the
+ * useful half away. img_mgmt.h, enum img_mgmt_err_code_t. */
+const GRP_ERR = {
+  /* enum img_mgmt_err_code_t, img_mgmt.h — index is the enum value. Order
+   * matters and is asserted against the header by mcuboot-image.test.mjs. */
+  [1 /* IMG */]: [
+    "ok",
+    "unknown error",
+    "flash config query failed",
+    "no image in that slot",
+    "image has no TLVs",
+    "invalid TLV",
+    "image has multiple hash TLVs",
+    "invalid TLV size",
+    "image has no hash TLV",
+    "no free slot",
+    "flash area open failed",
+    "flash area read failed",
+    "flash write failed",
+    "flash erase failed",
+    "invalid slot",
+    "out of memory",
+    "flash context already set",
+    "flash context not set",
+    "flash area device is null",
+    "invalid page offset",
+    "invalid offset",
+    "invalid length",
+    "invalid image header",
+    "invalid image header magic — is this a signed image?",
+    "invalid hash",
+    "invalid flash address",
+    "could not read the image version",
+    "the running version is newer",
+    "an image is already pending",
+    "invalid image vector table",
+    "image too large for the slot",
+    "image data overran the declared length",
+    "confirmation denied",
+    "cannot mark the running slot for test — the uploaded image is identical " +
+      "to the one already running, so there is nothing to swap",
+    "active slot not known",
+  ],
+};
+
+/* Human-readable text for an SMP failure. `body.err` is `{ group, rc }`. */
+export function describeSmpError(group, cmd, body) {
+  const rc = body?.rc;
+  const g = body?.err?.group;
+  const grc = body?.err?.rc;
+  const specific = (g !== undefined && GRP_ERR[g]?.[grc]) || null;
+  const generic = MGMT_ERR[rc] ?? `rc=${rc}`;
+  const detail = specific ? `${specific} (${generic})` : generic;
+  return `${detail} [group ${group}, cmd ${cmd}]`;
+}
 export const OS_ID  = { ECHO: 0, RESET: 5 };
 export const FSX_ID = { LIST: 0, MKDIR: 1, RMDIR: 2, MOVE: 3, STATVFS: 4, TRIGGER_DFU: 5 };
 
 /* Chunk size for the stock-SMP upload fallback. */
 const SMP_UPLOAD_CHUNK = 800;
+
+/* SMP protocol version to declare in the header. See the note where the
+ * header is built — version 1 is what preserves group-specific error codes. */
+const SMP_VERSION = 1;
 
 export class SmpClient extends EventTarget {
   constructor() {
@@ -65,6 +143,10 @@ export class SmpClient extends EventTarget {
     this.streamMaxWrite = 20;
     this.streamPending = null;     // resolver awaiting next CTRL notification
     this.streamAckedBytes = 0;
+
+    this.logChar = null;           // live log stream, while subscribed
+    this._logSink = null;
+    this._onLogValue = null;
     this.streamAckResolver = null;
 
     /* Serializes the writeValueWithoutResponse fragment stream when
@@ -89,17 +171,23 @@ export class SmpClient extends EventTarget {
   async connect() {
     this.device = await navigator.bluetooth.requestDevice({
       filters: [{ services: [SMP_SERVICE] }],
-      optionalServices: [SMP_SERVICE, STREAM_SERVICE],
+      optionalServices: [SMP_SERVICE, STREAM_SERVICE, LOG_SERVICE],
     });
     this.device.addEventListener("gattserverdisconnected", () => {
       this.log("disconnected", "err");
       this.char = null;
       this.streamCtrl = null;
       this.streamData = null;
+      /* Drop the handle without calling stopNotifications — the link is gone
+       * and the call would only throw. The firmware disables its backend on
+       * disconnect anyway. */
+      this.logChar = null;
+      this._logSink = null;
       this.dispatchEvent(new CustomEvent("disconnected"));
     });
 
     const gatt = await this.device.gatt.connect();
+    this.gatt = gatt;
     const svc = await gatt.getPrimaryService(SMP_SERVICE);
     this.char = await svc.getCharacteristic(SMP_CHAR);
     await this.char.startNotifications();
@@ -234,8 +322,9 @@ export class SmpClient extends EventTarget {
     try {
       const body = CBOR.decode(payload);
       if (body && typeof body === "object" && "rc" in body && body.rc !== 0) {
-        const err = new Error(`SMP rc=${body.rc} (group ${hdr.group}, cmd ${hdr.cmd})`);
+        const err = new Error(describeSmpError(hdr.group, hdr.cmd, body));
         err.rc = body.rc;
+        err.groupRc = body.err?.rc;
         p.reject(err);
       } else {
         p.resolve(body ?? {});
@@ -251,7 +340,21 @@ export class SmpClient extends EventTarget {
     const seq = (this.seq++) & 0xff;
 
     const hdr = new Uint8Array(8);
-    hdr[0] = op & 0x07;
+    /*
+     * Byte 0 is [res:3][version:2][op:3]. Declaring **version 1** is what
+     * makes group-specific errors readable.
+     *
+     * With CONFIG_MCUMGR_SMP_SUPPORT_ORIGINAL_PROTOCOL=y the device writes
+     * `err: {group, rc}` and then, if the client spoke version 0, rewrites it
+     * to a bare legacy `rc` on the way out — collapsing every img_mgmt reason
+     * into rc=1, "unknown error". Sending version 1 keeps the detail, turning
+     * "unknown error" into "setting test to active denied".
+     *
+     * Safe against older firmware: a device that does not understand version 1
+     * answers MGMT_ERR_UNSUPPORTED_TOO_NEW, which is a clear message rather
+     * than a wrong one.
+     */
+    hdr[0] = (op & 0x07) | (SMP_VERSION << 3);
     hdr[1] = 0;
     hdr[2] = (cbor.length >> 8) & 0xff;
     hdr[3] = cbor.length & 0xff;
@@ -330,11 +433,133 @@ export class SmpClient extends EventTarget {
   fsxTriggerDfu(path) {
     return this.request(MGMT_OP.WRITE_REQ, GRP.FSX, FSX_ID.TRIGGER_DFU, { path });
   }
+  /* --- live log stream ------------------------------------------------
+   *
+   * Subscribing is what switches the firmware backend on; it emits nothing
+   * while nobody is listening. Notifications carry raw text, split at
+   * whatever boundary fits an ATT payload — NOT at line boundaries — so the
+   * caller has to reassemble. Doing that here keeps every consumer from
+   * getting it subtly wrong.
+   */
+  async startLogStream(onText) {
+    if (this.logChar) return true;
+    if (!this.gatt?.connected) throw new Error("not connected");
+    try {
+      const svc = await this.gatt.getPrimaryService(LOG_SERVICE);
+      this.logChar = await svc.getCharacteristic(LOG_CHAR);
+    } catch {
+      /* Firmware predating log_stream.c. Not an error — the viewer offers to
+       * re-read the file instead. */
+      this.logChar = null;
+      return false;
+    }
+    this._logSink = onText;
+    this._onLogValue = (e) => {
+      const text = new TextDecoder("utf-8", { fatal: false })
+        .decode(e.target.value.buffer ?? e.target.value);
+      this._logSink?.(text);
+    };
+    this.logChar.addEventListener("characteristicvaluechanged", this._onLogValue);
+    await this.logChar.startNotifications();
+    this.log("live log stream started", "ok");
+    return true;
+  }
+
+  async stopLogStream() {
+    const c = this.logChar;
+    if (!c) return;
+    this.logChar = null;
+    this._logSink = null;
+    try { await c.stopNotifications(); } catch { /* link already gone */ }
+    if (this._onLogValue) c.removeEventListener("characteristicvaluechanged", this._onLogValue);
+    this._onLogValue = null;
+  }
+
   /* Standard mcumgr OS group reset. Available whenever the firmware is built
    * with CONFIG_REBOOT=y, which registers OS_MGMT_ID_RESET. */
   osReset() {
     return this.request(MGMT_OP.WRITE_REQ, GRP.OS, OS_ID.RESET, {});
   }
+  /* --- img_mgmt: updating this device's own firmware -------------------
+   *
+   * MCUboot does not do BLE DFU — it is a bootloader that swaps slots at
+   * reset. The over-the-air half is this group riding the same SMP transport
+   * everything else here uses.
+   *
+   * The sequence, and why it is four steps rather than one:
+   *
+   *   1. imgUpload()      streams the signed image into the spare slot
+   *   2. imgSetPending()  marks it "test": MCUboot swaps it in on next boot
+   *   3. osReset()        reboot into it
+   *   4. imgConfirm()     make it permanent
+   *
+   * Step 4 is the safety net and must stay a separate, deliberate act. An
+   * image that boots but never gets confirmed is **reverted** by MCUboot on
+   * the following reset, so an update that comes up broken enough to lose
+   * Bluetooth undoes itself. Confirming during step 2 would throw that away.
+   */
+  imgState() {
+    return this.request(MGMT_OP.READ_REQ, GRP.IMG, IMG_ID.STATE, {});
+  }
+
+  /* `hash` is the image's SHA-256 as reported by imgState(). Omitting it
+   * confirms the currently running image, which is how step 4 works after a
+   * reboot has already made the new image active. */
+  imgSetState(hash, confirm) {
+    const req = { confirm: !!confirm };
+    if (hash) req.hash = hash;
+    return this.request(MGMT_OP.WRITE_REQ, GRP.IMG, IMG_ID.STATE, req);
+  }
+  imgSetPending(hash) { return this.imgSetState(hash, false); }
+  imgConfirm(hash = null) { return this.imgSetState(hash, true); }
+  imgErase(slot = 1) {
+    return this.request(MGMT_OP.WRITE_REQ, GRP.IMG, IMG_ID.ERASE, { slot });
+  }
+
+  imgUploadChunk(off, data, total, sha) {
+    const req = { image: 0, off, data };
+    if (off === 0) {
+      req.len = total;
+      /* Lets the target detect a resumed or mismatched upload itself rather
+       * than trusting our offset bookkeeping. */
+      if (sha) req.sha = sha;
+    }
+    return this.request(MGMT_OP.WRITE_REQ, GRP.IMG, IMG_ID.UPLOAD, req);
+  }
+
+  /**
+   * Stream a signed image into the spare slot.
+   *
+   * Always plain SMP, never fsx_stream: that service writes to the
+   * filesystem, and this has to land in a flash partition through the
+   * device's own image manager. Roughly 10 KB/s, so ~30 s for a 280 KB image.
+   *
+   * The target dictates progress — it replies with the offset it wants next,
+   * which is how a rejected or re-sent chunk self-corrects.
+   */
+  async imgUpload(bytes, onProgress = null) {
+    const sha = await sha256(bytes);
+    let off = 0;
+    let stalls = 0;
+    while (off < bytes.length) {
+      const slice = bytes.subarray(off, Math.min(off + SMP_UPLOAD_CHUNK, bytes.length));
+      const r = await this.imgUploadChunk(off, slice, bytes.length, off === 0 ? sha : null);
+      const next = typeof r.off === "number" ? r.off : off + slice.length;
+      /* A target that keeps asking for the same offset will otherwise spin
+       * here forever, looking like a very slow upload. */
+      if (next <= off) {
+        if (++stalls > 3) {
+          throw new Error(`upload stuck at offset ${off} — the target keeps asking for the same chunk`);
+        }
+      } else {
+        stalls = 0;
+      }
+      off = next;
+      if (onProgress) onProgress(off / bytes.length);
+    }
+    return off;
+  }
+
   fsUploadChunk(name, off, data, len /* total file len, only on off==0 */) {
     const req = { name, off, data };
     if (off === 0) req.len = len;
@@ -477,4 +702,11 @@ export class SmpClient extends EventTarget {
     }
     return off;
   }
+}
+
+/* SHA-256 as a Uint8Array. Web Crypto needs a secure context, which Web
+ * Bluetooth already requires, so this is always available here. */
+async function sha256(bytes) {
+  const d = await crypto.subtle.digest("SHA-256", bytes);
+  return new Uint8Array(d);
 }

@@ -14,10 +14,10 @@ import Icon from "./Icon.js";
  * unreadable: five unlabelled glyphs is a memory test, and on a phone they
  * were also too small to hit reliably.
  *
- * "Flash updater" comes first on purpose. It is the only action that works
- * with nothing connected, so on a cold open — no device paired, everything
- * else greyed out — it is the one enabled control and the obvious place to
- * start.
+ * "Update updater" comes first on purpose, and is never disabled. On a cold
+ * open — no device paired, everything else greyed out — it is the one enabled
+ * control and the obvious place to start; and once connected it is the only
+ * route to the Bluetooth update, which needs that connection.
  */
 export default {
   name: "FileToolbar",
@@ -35,8 +35,8 @@ export default {
      * attribute does not survive HTML attribute parsing — it compiles to
      * "Unexpected identifier 's'" and takes the whole toolbar down with it. */
     const flashTitle = computed(() => connected.value
-      ? "Disconnect first — flashing halts the CPU and drops the Bluetooth link"
-      : "Flash this updater's own firmware over USB");
+      ? "Update this updater's own firmware over Bluetooth"
+      : "Update this updater's own firmware over USB, or connect for Bluetooth");
 
     return {
       connected, refresh, picker, onPick, openConfig, autoFlash, reboot,
@@ -45,12 +45,15 @@ export default {
   },
   template: /* html */ `
     <div class="toolbar">
-      <!-- First, and enabled when nothing is connected: it runs over USB and
-           is where a new user starts. Disabled *while* connected because
-           flashing halts the CPU and drops the Bluetooth link. -->
-      <button class="icon-btn" :disabled="connected" @click="openFlash"
-              :title="flashTitle" aria-label="Flash updater">
-        <Icon name="memory"/><span class="label">Flash updater</span>
+      <!-- First, and NEVER disabled. It is the only enabled control on a cold
+           open, which is where a new user starts; and it is the only way to
+           reach the Bluetooth update route, which requires a connection. It
+           was briefly disabled while connected — from when the dialog was USB
+           only — which made OTA unreachable. The dialog decides which of its
+           two routes is usable, not this button. -->
+      <button class="icon-btn" @click="openFlash"
+              :title="flashTitle" aria-label="Update updater">
+        <Icon name="memory"/><span class="label">Update updater</span>
       </button>
 
       <span class="tb-sep" aria-hidden="true"></span>

@@ -79,3 +79,43 @@ export function levelCounts(lines) {
   for (const l of lines) out[l.level || "other"]++;
   return out;
 }
+
+/*
+ * Reassemble log lines from BLE notifications.
+ *
+ * The firmware drains its ring buffer into notifications sized to whatever
+ * fits an ATT payload — 244 bytes at the negotiated MTU — with **no regard
+ * for line boundaries**. A notification routinely ends mid-line and the next
+ * one carries the rest, and a multi-byte UTF-8 character can be split across
+ * the two.
+ *
+ * Handling that at every call site is how you get a viewer that mostly works
+ * and occasionally shows half a line, so it lives here with a test.
+ *
+ * Usage:
+ *   const asm = createLineAssembler();
+ *   for (const chunk of notifications) for (const line of asm.push(chunk)) …
+ */
+export function createLineAssembler() {
+  let partial = "";
+  return {
+    /** Feed one notification's text; returns the complete lines it finished. */
+    push(text) {
+      partial += text;
+      const parts = partial.split("\n");
+      /* The last element is either "" (the text ended on a newline) or the
+       * start of a line still in flight. Either way it is not complete. */
+      partial = parts.pop();
+      return parts;
+    },
+    /** Whatever is buffered but unterminated — shown greyed, or discarded. */
+    pending() { return partial; },
+    /** Emit the unterminated tail as a final line and reset. */
+    flush() {
+      const rest = partial;
+      partial = "";
+      return rest ? [rest] : [];
+    },
+    reset() { partial = ""; },
+  };
+}

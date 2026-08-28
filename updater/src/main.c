@@ -23,7 +23,10 @@
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/mgmt/mcumgr/transport/smp_bt.h>
 
+#include <zephyr/app_version.h>
+
 #include "app.h"
+#include "selfconfirm.h"
 #include "config.h"
 
 LOG_MODULE_REGISTER(app, LOG_LEVEL_INF);
@@ -83,6 +86,10 @@ static void on_connected(struct bt_conn *conn, uint8_t err)
 		return;
 	}
 	LOG_INF("peer connected");
+
+	/* A peer reaching us proves the path any future update would need, so
+	 * this is where a freshly swapped image earns its confirmation. */
+	selfconfirm_peer_connected();
 
 	/* Only nudge peripheral-role connections (phone / SMP client) —
 	 * requesting a param update on the CENTRAL link (our DFU target)
@@ -208,12 +215,17 @@ static int bt_ready(void)
 		return rc;
 	}
 	LOG_INF("BLE up, advertising as '%s'", CONFIG_BT_DEVICE_NAME);
+	selfconfirm_ble_ready();
 	return 0;
 }
 
 int main(void)
 {
-	LOG_INF("xiao_nrf54_updater booting");
+	/* The version comes from updater/VERSION via APP_VERSION_TWEAK_STRING,
+	 * which is the same value imgtool stamps into the MCUboot image header —
+	 * so this line and the web client's slot table always agree about which
+	 * firmware is running. */
+	LOG_INF("xiao_nrf54_updater %s booting", APP_VERSION_EXTENDED_STRING);
 
 	led_init();
 	led_set_state(LED_STATE_IDLE);

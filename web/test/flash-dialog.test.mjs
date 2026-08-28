@@ -63,9 +63,9 @@ const t = (name, ok, extra = "") => {
 };
 
 const app = d.getElementById("app");
-const btn = app.querySelector('button[aria-label="Flash updater"]');
+const btn = app.querySelector('button[aria-label="Update updater"]');
 t("WebUSB is stubbed", !!w.navigator.usb);
-t("toolbar has the Flash-updater button", !!btn);
+t("toolbar has the Update-updater button", !!btn);
 
 click(btn);
 await wait(400);
@@ -78,6 +78,21 @@ t("clicking opens the dialog", !!dlg);
 const text = () => (app.querySelector("#flash-overlay")?.textContent || "").replace(/\s+/g, " ");
 
 t("probe controls render when WebUSB exists", !!dlg?.querySelector(".flash-step"));
+
+/* Two routes, and exactly one is usable at a time: Bluetooth needs a
+   connection, USB needs there not to be one. */
+{
+  const sections = [...dlg.querySelectorAll(".cfg-section")].map(s => s.textContent.trim());
+  t("offers both update routes",
+    sections.includes("Over Bluetooth") && sections.includes("Over USB"), sections.join(" | "));
+  t("Bluetooth route renders", !!dlg.querySelector(".upd"));
+  /* Nothing is connected in the harness, so it must say so rather than
+     offering a button that cannot work. */
+  t("Bluetooth route explains it needs a connection",
+    /Not connected/.test(text()));
+  t("USB route is presented as the recovery path",
+    /way back|unable to advertise/.test(text()));
+}
 t("no 'cannot flash' notice with WebUSB present", !/has no WebUSB/.test(text()));
 t("names merged.hex as the file to use", /merged\.hex/.test(text()));
 

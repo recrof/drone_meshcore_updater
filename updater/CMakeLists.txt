@@ -20,6 +20,8 @@ target_sources(app PRIVATE
   src/upload_hook.c
   src/fsx_mgmt.c
   src/fsx_stream.c
+  src/log_stream.c
+  src/selfconfirm.c
   src/config.c
   src/ble_scanner.c
   src/firmware_zip.c

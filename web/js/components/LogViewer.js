@@ -1,8 +1,9 @@
-import { ref, reactive, computed, watch } from "../vue.js";
+import { ref, reactive, computed, watch, onUnmounted } from "../vue.js";
 import { smp, entries, log as appLog } from "../store.js";
 import { fmtSize } from "../lib/format.js";
 import {
-  parseLog, filterLog, levelCounts, isLogPath, logIndex, LEVELS,
+  parseLog, parseLogLine, filterLog, levelCounts, isLogPath, logIndex, LEVELS,
+  createLineAssembler,
 } from "../lib/log-file.js";
 
 /*
@@ -29,6 +30,71 @@ export default {
     const filter = reactive({ level: "dbg", text: "" });
     const pane = ref(null);
 
+    /* --- live stream ---------------------------------------------------
+     *
+     * The firmware only emits while something is subscribed, so this toggle
+     * is the on/off switch for the whole feature — including its cost to the
+     * radio, which matters because the DFU stream and this share three TX
+     * buffers. Off by default for that reason.
+     */
+    const live = ref(false);
+    const liveSupported = ref(true);
+    const follow = ref(true);
+    const asm = createLineAssembler();   // notifications split mid-line
+
+    const atBottom = () => {
+      const el = pane.value;
+      return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    };
+
+    /* Notifications are cut at whatever fits an ATT payload, not at line
+     * boundaries, so the tail of one is the head of the next. */
+    function ingest(text) {
+      const parts = asm.push(text);
+      if (!parts.length) return;
+      const stick = follow.value && atBottom();
+      let id = lines.value.length;
+      const add = parts.map(raw => ({ id: id++, ...parseLogLine(raw) }));
+      /* Cap the buffer: a long DFU emits thousands of lines and an unbounded
+       * array makes the pane slower the longer you watch it. */
+      const next = [...lines.value, ...add];
+      lines.value = next.length > 5000 ? next.slice(next.length - 5000) : next;
+      bytes.value += text.length;
+      if (stick) {
+        requestAnimationFrame(() => {
+          if (pane.value) pane.value.scrollTop = pane.value.scrollHeight;
+        });
+      }
+    }
+
+    async function toggleLive() {
+      error.value = "";
+      if (live.value) {
+        live.value = false;
+        await smp.stopLogStream();
+        return;
+      }
+      try {
+        const ok = await smp.startLogStream(ingest);
+        if (!ok) {
+          liveSupported.value = false;
+          error.value = "this firmware has no live log service — reflash to use it";
+          return;
+        }
+        /* A live view starts from now. Mixing it into a file read would put
+         * two different time bases in one pane. */
+        lines.value = [];
+        bytes.value = 0;
+        asm.reset();
+        live.value = true;
+      } catch (e) {
+        error.value = e.message;
+      }
+    }
+
+    watch(() => props.open, (isOpen) => { if (!isOpen && live.value) toggleLive(); });
+    onUnmounted(() => { if (live.value) smp.stopLogStream(); });
+
     /* Every log file on the device, oldest first. The backend numbers them in
      * write order, so ascending index is chronological. */
     const files = computed(() =>
@@ -39,7 +105,7 @@ export default {
 
     const current = ref("");
     watch(() => [props.open, props.path], ([isOpen, p]) => {
-      if (!isOpen) return;
+      if (!isOpen || live.value) return;
       current.value = p && isLogPath(p) ? p : (files.value[files.value.length - 1] || "");
       if (current.value) load(current.value);
     }, { immediate: true });
@@ -95,6 +161,7 @@ export default {
     return {
       lines, shown, counts, files, current, loading, error, bytes, pct,
       filter, pane, LEVELS, fmtSize,
+      live, liveSupported, follow, toggleLive,
       load, download, copy,
       shortName: (p) => p.split("/").pop(),
       close: () => emit("close"),
@@ -106,14 +173,23 @@ export default {
 
         <div class="cfg-head">
           <span class="title">DEVICE LOG</span>
-          <span class="path">{{ current || "no log files" }}</span>
+          <span class="path">{{ live ? "live from the device" : (current || "no log files") }}</span>
           <span class="grow"></span>
           <button title="Close" @click="close">✕</button>
         </div>
 
         <div class="logv-bar">
-          <select v-model="current" @change="load(current)" :disabled="loading"
-                  aria-label="Log file">
+          <button class="icon-btn" :class="{ primary: live }" @click="toggleLive"
+                  :disabled="!liveSupported"
+                  :title="live ? 'Stop the live stream'
+                               : 'Stream log lines from the device as they happen'"
+                  aria-label="Live">
+            <span class="live-dot" :class="{ on: live }"></span>
+            <span class="label">{{ live ? "Live" : "Go live" }}</span>
+          </button>
+
+          <select v-model="current" @change="load(current)"
+                  :disabled="loading || live" aria-label="Log file">
             <option v-for="f in files" :key="f" :value="f">{{ shortName(f) }}</option>
           </select>
 
@@ -128,7 +204,10 @@ export default {
                  placeholder="filter…" spellcheck="false" aria-label="Filter text">
 
           <span class="grow"></span>
-          <button class="small" @click="load(current)" :disabled="loading || !current">
+          <label class="logv-follow" v-if="live" title="Scroll to the newest line">
+            <input type="checkbox" v-model="follow"> follow
+          </label>
+          <button class="small" @click="load(current)" :disabled="loading || !current || live">
             {{ loading ? "Reading…" : "Reload" }}
           </button>
           <button class="small" @click="copy" :disabled="!shown.length">Copy</button>
@@ -136,7 +215,13 @@ export default {
         </div>
 
         <div class="logv-status">
-          <template v-if="loading">reading {{ current }}… {{ pct }}%</template>
+          <template v-if="live">
+            live · {{ lines.length }} lines · {{ fmtSize(bytes) }} received
+            <span class="err" v-if="counts.err">· {{ counts.err }} err</span>
+            <span class="warn" v-if="counts.wrn">· {{ counts.wrn }} wrn</span>
+            <template v-if="shown.length !== lines.length"> · showing {{ shown.length }}</template>
+          </template>
+          <template v-else-if="loading">reading {{ current }}… {{ pct }}%</template>
           <template v-else-if="error"><span class="err">{{ error }}</span></template>
           <template v-else-if="!files.length">
             No log files on the device. They appear as
@@ -158,7 +243,10 @@ export default {
           class="mod" v-if="l.module">{{ l.module }}</span>{{ l.msg }}</span>\n</template></pre>
 
         <div class="cfg-foot">
-          <span class="cfg-status" v-if="files.length > 1">
+          <span class="cfg-status" v-if="live">
+            the device only emits while this is open — dropped lines are marked inline
+          </span>
+          <span class="cfg-status" v-else-if="files.length > 1">
             {{ files.length }} files, oldest first — the firmware rotates them
           </span>
           <span class="grow"></span>
