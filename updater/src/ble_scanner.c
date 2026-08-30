@@ -39,6 +39,11 @@ static struct {
 	const char               *name_filter;
 	int8_t                    min_rssi;
 	const bt_addr_le_t       *prefer_mac;
+	/* Non-NULL switches the callback into "this address and nothing else"
+	 * mode: name, service UUID and RSSI are all ignored. Used to ask
+	 * whether one specific peer is on the air, which is a different
+	 * question from "find me something to flash". */
+	const bt_addr_le_t       *exact_addr;
 	bool                      debug;
 } s_ctx;
 
@@ -162,6 +167,16 @@ static void scan_rx_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
 	struct ad_parse ap = { .name = { 0 }, .has_dfu_uuid = false };
 	bt_data_parse(ad, ad_data_cb, &ap);
 
+	/* Exact-address mode answers a yes/no question about one peer, so
+	 * every other filter is off — including RSSI. A faint sighting still
+	 * means the peer is advertising, and that is the whole answer. */
+	if (s_ctx.exact_addr != NULL) {
+		if (!bt_addr_le_eq(addr, s_ctx.exact_addr)) {
+			return;
+		}
+		goto matched;
+	}
+
 	/* RSSI threshold first — cheapest test. */
 	if (rssi < s_ctx.min_rssi) {
 		log_rejected(addr, ap.name, rssi, "weak");
@@ -179,21 +194,40 @@ static void scan_rx_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
 		return;
 	}
 
+matched:
 	bt_addr_le_copy(&s_ctx.match.addr, addr);
 	s_ctx.match.rssi = rssi;
 	memcpy(s_ctx.match.name, ap.name, sizeof(ap.name));
+	s_ctx.match.dfu_uuid = ap.has_dfu_uuid;
 	s_ctx.found = true;
 	k_sem_give(&s_ctx.found_sem);
 }
 
-int ble_scanner_find_first(struct ble_scanner_target *out,
-			   uint32_t timeout_ms,
-			   const char *name_filter,
-			   int8_t min_rssi,
-			   const bt_addr_le_t *prefer_mac)
-{
-	if (!out) return -EINVAL;
+/* Set by ble_scanner_cancel(), cleared at the top of every find_first(). Read
+ * after the semaphore wakes, to tell "a peer matched" from "someone gave up on
+ * our behalf" — both arrive as the same k_sem_give(). */
+static atomic_t s_cancel = ATOMIC_INIT(0);
 
+void ble_scanner_cancel(void)
+{
+	atomic_set(&s_cancel, 1);
+	/* Only if the semaphore exists: cancelling before the first scan has
+	 * ever run is legal and is a no-op. */
+	if (s_sem_inited) {
+		k_sem_give(&s_ctx.found_sem);
+	}
+}
+
+/*
+ * Arm s_ctx, run one scan, wait for a match or the timeout, stop.
+ *
+ * Shared by both public entry points because the radio half is identical and
+ * only the acceptance test differs — which is a field in s_ctx, not a
+ * different scan. Callers set the criteria; this owns the semaphore, the
+ * start/stop pair, and the three ways a wait can end.
+ */
+static int scan_and_wait(uint32_t timeout_ms)
+{
 	if (!s_sem_inited) {
 		k_sem_init(&s_ctx.found_sem, 0, 1);
 		s_sem_inited = true;
@@ -201,11 +235,9 @@ int ble_scanner_find_first(struct ble_scanner_target *out,
 		k_sem_reset(&s_ctx.found_sem);
 	}
 
-	s_ctx.found       = false;
-	s_ctx.name_filter = name_filter;
-	s_ctx.min_rssi    = min_rssi;
-	s_ctx.prefer_mac  = prefer_mac;
-	s_ctx.debug       = s_debug;
+	atomic_clear(&s_cancel);
+	s_ctx.found = false;
+	s_ctx.debug = s_debug;
 	memset(&s_ctx.match, 0, sizeof(s_ctx.match));
 
 	/* Active scan so we catch the scan response too (some devices put
@@ -224,11 +256,6 @@ int ble_scanner_find_first(struct ble_scanner_target *out,
 		LOG_ERR("bt_le_scan_start rc=%d", rc);
 		return rc;
 	}
-	LOG_INF("scan started (name='%s' min_rssi=%d %s%s)",
-		name_filter ? name_filter : "",
-		min_rssi,
-		prefer_mac ? "mac_fallback " : "",
-		timeout_ms == 0 ? "no_timeout" : "with_timeout");
 
 	rc = k_sem_take(&s_ctx.found_sem,
 			timeout_ms == 0 ? K_FOREVER : K_MSEC(timeout_ms));
@@ -237,12 +264,72 @@ int ble_scanner_find_first(struct ble_scanner_target *out,
 		LOG_WRN("bt_le_scan_stop rc=%d", stop_rc);
 	}
 
+	/* Checked before rc, because a cancel wakes the semaphore exactly as a
+	 * match does — rc is 0 either way and s_ctx.match is stale. */
+	if (atomic_get(&s_cancel)) {
+		LOG_INF("scan cancelled");
+		return -ECANCELED;
+	}
 	if (rc == -EAGAIN) return -ETIMEDOUT;
-	if (rc) return rc;
+	return rc;
+}
+
+int ble_scanner_find_first(struct ble_scanner_target *out,
+			   uint32_t timeout_ms,
+			   const char *name_filter,
+			   int8_t min_rssi,
+			   const bt_addr_le_t *prefer_mac)
+{
+	if (!out) return -EINVAL;
+
+	s_ctx.name_filter = name_filter;
+	s_ctx.min_rssi    = min_rssi;
+	s_ctx.prefer_mac  = prefer_mac;
+	s_ctx.exact_addr  = NULL;
+
+	LOG_INF("scan started (name='%s' min_rssi=%d %s%s)",
+		name_filter ? name_filter : "",
+		min_rssi,
+		prefer_mac ? "mac_fallback " : "",
+		timeout_ms == 0 ? "no_timeout" : "with_timeout");
+
+	int rc = scan_and_wait(timeout_ms);
+	if (rc) {
+		return rc;
+	}
 
 	*out = s_ctx.match;
 	char addr_s[BT_ADDR_LE_STR_LEN];
 	bt_addr_le_to_str(&out->addr, addr_s, sizeof(addr_s));
 	LOG_INF("scan match: %s rssi=%d name='%s'", addr_s, out->rssi, out->name);
+	return 0;
+}
+
+int ble_scanner_seen_at(const bt_addr_le_t *addr, uint32_t timeout_ms,
+			struct ble_scanner_target *out)
+{
+	if (!addr || timeout_ms == 0) return -EINVAL;
+
+	s_ctx.name_filter = NULL;
+	s_ctx.min_rssi    = -127;    /* no filter; see scan_rx_cb */
+	s_ctx.prefer_mac  = NULL;
+	s_ctx.exact_addr  = addr;
+
+	char addr_s[BT_ADDR_LE_STR_LEN];
+	bt_addr_le_to_str(addr, addr_s, sizeof(addr_s));
+	LOG_INF("watching for %s for %u ms", addr_s, timeout_ms);
+
+	int rc = scan_and_wait(timeout_ms);
+	s_ctx.exact_addr = NULL;     /* it points at the caller's stack */
+	if (rc) {
+		return rc;
+	}
+
+	LOG_INF("%s is advertising: rssi=%d name='%s' dfu_service=%s",
+		addr_s, s_ctx.match.rssi, s_ctx.match.name,
+		s_ctx.match.dfu_uuid ? "yes" : "no");
+	if (out) {
+		*out = s_ctx.match;
+	}
 	return 0;
 }

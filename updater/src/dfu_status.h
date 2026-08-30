@@ -74,9 +74,14 @@ extern "C" {
 
 #define DFU_STATUS_PAYLOAD_VERSION 1
 #define DFU_STATUS_HEADER_LEN      20
-/* Matches BLE_SCANNER_NAME_MAX; duplicated rather than included so this
- * header stays dependency-free for the C++ side and the test that parses it. */
-#define DFU_STATUS_NAME_MAX        24
+/* Sized for the longest thing a transport can name a target: an ElegantOTA
+ * identity string, "<node name> (Seeed SenseCAP MeshTracker X1)". It was 24 —
+ * BLE_SCANNER_NAME_MAX — which is fine for an advertised name and would have
+ * silently cut the board out of a WiFi one, leaving the banner showing
+ * "MyRepeater (Seeed SenseCA". Matches DFU_TARGET_NAME_MAX; duplicated rather
+ * than included so this header stays dependency-free for the C++ side and for
+ * the test that parses it. */
+#define DFU_STATUS_NAME_MAX        64
 /* Basename only. A full /lfs1/... path is all prefix and no information, and
  * the whole point of this record is that it stays small. */
 #define DFU_STATUS_FILE_MAX        32
@@ -96,6 +101,12 @@ enum dfu_status_state {
 	DFU_STATUS_COOLDOWN      = 8,  /* waiting between attempts */
 	DFU_STATUS_DONE          = 9,  /* terminal, sticky until the next run */
 	DFU_STATUS_FAILED        = 10, /* terminal, sticky until the next run */
+	/* Out of narrative order on purpose: it belongs after DISCONNECTING,
+	 * but these values are on the wire and renumbering them would make an
+	 * older client render a running transfer as "Complete". New states are
+	 * appended, and clients must not assume the working states are a
+	 * contiguous range below DONE. */
+	DFU_STATUS_VERIFYING     = 11, /* peer reset; checking that it took */
 };
 
 /* Why the run ended.
@@ -120,6 +131,7 @@ enum dfu_status_result {
 	DFU_STATUS_RESULT_REMOTE_ERROR       = 10,
 	DFU_STATUS_RESULT_FS_ERROR           = 11,
 	DFU_STATUS_RESULT_RETRIES_EXHAUSTED  = 12,
+	DFU_STATUS_RESULT_TARGET_REJECTED    = 13, /* sent whole, peer would not run it */
 };
 
 /* Start a new run: clears the snapshot, starts the elapsed clock, and enters
@@ -147,6 +159,21 @@ void dfu_status_progress(uint8_t percent, uint32_t sent, uint32_t total);
 /* Terminal. Sets DONE or FAILED from `result` and stops the clock; the
  * snapshot stays readable until the next dfu_status_begin(). */
 void dfu_status_finish(enum dfu_status_result result);
+
+/* Back to the state the device was in before anything ran: IDLE, result NONE,
+ * attempt 0, timers zeroed, target and bundle names cleared.
+ *
+ * This is what "Stop" reports. Deliberately not a terminal state: DONE and
+ * FAILED are sticky so the last run's outcome survives for the operator to
+ * read, and a stop is the operator saying they have read enough and want a
+ * clean slate to retry from. Leaving a sticky FAILED behind would mean the
+ * next run's progress bar starts under a red banner from a run that was never
+ * allowed to finish.
+ *
+ * Notifies subscribers, so a client sees IDLE arrive rather than having to
+ * poll for the absence of something.
+ */
+void dfu_status_reset(void);
 
 /* Translate a DFU client result. Runner-level failures have no dfu_result and
  * use the DFU_STATUS_RESULT_* constants directly. */

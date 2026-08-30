@@ -32,6 +32,12 @@ enum dfu_result {
 	DFU_TIMEOUT,               /* waited too long for a peer response */
 	DFU_REMOTE_ERROR,          /* peer rejected a request via non-SUCCESS status */
 	DFU_FS_ERROR,              /* couldn't read the local .bin/.dat */
+	/* The transfer completed and the peer accepted it, but the peer did
+	 * not end up running it — appended rather than inserted, because
+	 * dfu_status_from_dfu_result() maps these by value and the web client
+	 * mirrors the status enum it maps *to*. Only a transport's verify()
+	 * hook produces this; dfu_client_run() never returns it. */
+	DFU_TARGET_REJECTED,
 };
 
 /* Connect to `target`, run one Legacy DFU session, disconnect. Blocks the
@@ -44,11 +50,25 @@ enum dfu_result {
  * Config mapping: prn -> packets_before_notification, high_mtu -> whether to
  * exchange MTU at all, pkt_gap_ms -> Parameters::packet_interval_us,
  * erase_pause_ms / erase_inflight -> the erase-aware pacing. See Trap 4 in
- * CLAUDE.md for why those values are what they are.
+ * notes/dfu-tuning.md for why those values are what they are — every one of
+ * them was measured, and most are counter-intuitive.
  */
 enum dfu_result dfu_client_run(const struct ble_scanner_target *target,
 			       const struct firmware_bundle *bundle,
 			       const struct app_config *cfg);
+
+/* Make a dfu_client_run() that is in progress give up as soon as it can.
+ *
+ * The library already has the machinery (LegacyDfuClient::abort(), which sets
+ * GattLink's aborted_ flag and is checked around every blocking wait); this
+ * only gives the C side a way to reach the client object, which is otherwise a
+ * local in dfu_client_run().
+ *
+ * Safe from any thread and safe when nothing is running. It does not wait: the
+ * aborted run returns through its own error path a moment later, disconnecting
+ * as it always does.
+ */
+void dfu_client_abort(void);
 
 #ifdef __cplusplus
 }

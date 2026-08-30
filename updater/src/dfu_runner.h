@@ -25,3 +25,22 @@ int dfu_runner_start(const char *zip_path);
 
 /* True if a DFU sequence is currently active. */
 bool dfu_runner_busy(void);
+
+/* Stop whatever is running and clear the status back to IDLE.
+ *
+ * Ends a K_FOREVER scan, aborts a transfer in progress, and cuts short a
+ * retry/wedge cooldown — the cooldowns being the reason this exists, since a
+ * wedged run can otherwise sit for a minute before it will look at a new
+ * config.txt.
+ *
+ * Returns 0 if a run was stopped, -EALREADY if nothing was running. Both are
+ * successful outcomes and leave the same state behind; -EALREADY is reported
+ * only so a caller can tell the two apart. In particular calling it while idle
+ * is useful: it clears the sticky DONE/FAILED from the previous run.
+ *
+ * Returns as soon as the stop has been *requested*. The run thread unwinds on
+ * its own — it may still be disconnecting for a moment afterwards — so
+ * dfu_runner_busy() can briefly stay true. dfu_runner_start() will return
+ * -EBUSY during that window; retry.
+ */
+int dfu_runner_stop(void);

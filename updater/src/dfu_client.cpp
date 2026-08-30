@@ -255,6 +255,35 @@ void disconnect_and_release(void)
 
 } /* namespace */
 
+/*
+ * The client object for the run in flight, so dfu_client_abort() can reach it.
+ *
+ * Guarded by a mutex rather than made atomic: abort() is a member call on the
+ * object, so the pointer has to stay valid for the duration of that call, and
+ * the run thread must not be able to unwind past `client`'s destructor in the
+ * middle of it. Held only across a pointer store or a single abort() call, so
+ * it never blocks the transfer.
+ */
+static LegacyDfuClient *s_active;
+static K_MUTEX_DEFINE(s_active_lock);
+
+static void set_active(LegacyDfuClient *c)
+{
+	k_mutex_lock(&s_active_lock, K_FOREVER);
+	s_active = c;
+	k_mutex_unlock(&s_active_lock);
+}
+
+extern "C" void dfu_client_abort(void)
+{
+	k_mutex_lock(&s_active_lock, K_FOREVER);
+	if (s_active != nullptr) {
+		LOG_WRN("abort requested — ending the session in progress");
+		s_active->abort();
+	}
+	k_mutex_unlock(&s_active_lock);
+}
+
 extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *target,
 					   const struct firmware_bundle *bundle,
 					   const struct app_config *cfg)
@@ -398,7 +427,12 @@ extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *targe
 
 	LegacyDfuClient client;
 	client.set_observer(&observer);
+
+	/* Published only for the duration of run(); cleared before `client`
+	 * goes out of scope so a late abort cannot touch a dead object. */
+	set_active(&client);
 	Report report = client.run(s_link.conn, firmware, params);
+	set_active(nullptr);
 
 	if (report.result == Result::RemoteError) {
 		LOG_ERR("result=%s remote=0x%02x (%s) sent=%u",

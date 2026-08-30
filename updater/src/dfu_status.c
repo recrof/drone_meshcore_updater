@@ -361,6 +361,26 @@ void dfu_status_finish(enum dfu_status_result result)
 	mark_dirty(true);
 }
 
+void dfu_status_reset(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&lock);
+	snap.state = DFU_STATUS_IDLE;
+	snap.result = DFU_STATUS_RESULT_NONE;
+	snap.percent = 0;
+	snap.attempt = 0;
+	snap.retries = 0;
+	snap.name_len = 0;
+	snap.file_len = 0;
+	snap.sent = 0;
+	snap.total = 0;
+	snap.t0 = k_uptime_get_32();
+	snap.frozen_ms = 0;
+	snap.running = false;
+	k_spin_unlock(&lock, key);
+
+	mark_dirty(true);
+}
+
 enum dfu_status_result dfu_status_from_dfu_result(int dfu_result)
 {
 	switch (dfu_result) {
@@ -372,6 +392,7 @@ enum dfu_status_result dfu_status_from_dfu_result(int dfu_result)
 	case DFU_TIMEOUT:              return DFU_STATUS_RESULT_TIMEOUT;
 	case DFU_REMOTE_ERROR:         return DFU_STATUS_RESULT_REMOTE_ERROR;
 	case DFU_FS_ERROR:             return DFU_STATUS_RESULT_FS_ERROR;
+	case DFU_TARGET_REJECTED:      return DFU_STATUS_RESULT_TARGET_REJECTED;
 	/* DFU_BUTTONLESS_TRIGGERED is not terminal — the runner rescans — so
 	 * it never reaches here. Anything unexpected is a remote error rather
 	 * than a silent success. */
