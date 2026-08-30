@@ -1,0 +1,12 @@
+/*
+ * XIAO nRF52840 Sense. Identical to the plain XIAO nRF52840 for everything
+ * this firmware touches — the Sense adds an IMU and a microphone, and uses
+ * the same nRF52840, the same 2 MB P25Q16H and the same UF2 bootloader.
+ *
+ * It needs its own file only because Zephyr looks board overlays up by name:
+ * `xiao_ble/nrf52840` finds boards/xiao_ble.overlay, `xiao_ble/nrf52840/sense`
+ * does not. A variant that fell back to no overlay at all would configure
+ * with no MCUboot slots and no filesystem, which is a confusing way to find
+ * out about a naming rule.
+ */
+#include "xiao_ble.overlay"

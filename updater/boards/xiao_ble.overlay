@@ -1,0 +1,70 @@
+/*
+ * Devicetree overlay for the Seeed XIAO nRF52840 (xiao_ble / xiao_ble sense).
+ *
+ * Second board this firmware runs on. Nothing in the application is nRF54L
+ * specific — the DFU client, the SMP groups, the log stream and the status
+ * service are all plain Zephyr Bluetooth — so what is here is entirely
+ * hardware plumbing: where the filesystem lives, where the MCUboot slots go,
+ * and which LED is which colour.
+ *
+ * What genuinely differs from the nRF54L board, beyond the numbers:
+ *
+ *   - **The bootloader is chainloaded.** This board ships with Adafruit's UF2
+ *     bootloader, which is also how the firmware gets on it in the first
+ *     place (drag a .uf2 onto the mass-storage device). MCUboot lives inside
+ *     the application region. See nrf52840_partitions.dtsi.
+ *   - **No CMSIS-DAP probe.** The nRF54L XIAO's USB-C goes to an on-board
+ *     SAMD11, which is what the browser's USB flasher talks to. Here USB-C
+ *     goes straight to the nRF52840, so that flasher does not apply — UF2
+ *     replaces it, and it needs no tooling at all.
+ *   - **The console is USB CDC**, not a UART bridge. The board handles that
+ *     itself (BOARD_SERIAL_BACKEND_CDC_ACM), so there is nothing to do here.
+ *
+ * The 2 MB P25Q16H QSPI flash is already enabled and described by the board;
+ * unlike Seeed's vendored nRF54L files it just has no partitions, so all this
+ * adds is the LittleFS partition over the whole part.
+ */
+
+#include "../common.dtsi"
+#include "../nrf52840_partitions.dtsi"
+
+/ {
+	chosen {
+		/* The application lives in slot0; MCUboot's own image overrides
+		 * this to boot_partition (sysbuild/mcuboot_xiao_ble.overlay).
+		 * The board's default points at code_partition, which this
+		 * table deletes. */
+		zephyr,code-partition = &slot0_partition;
+	};
+
+	/* led.c asks by colour. The numbering is not portable: led0 is red
+	 * here and blue on xiao_nrf54lm20a. */
+	aliases {
+		red-led = &led0;
+		green-led = &led1;
+		blue-led = &led2;
+	};
+};
+
+/*
+ * The whole 2 MB QSPI part as one LittleFS volume. Firmware bundles are
+ * 300-500 KB each, so this is what makes the board useful as an updater at
+ * all — flash0 has no room to spare once it holds two MCUboot slots.
+ *
+ * A quarter of the nRF54L board's 8 MB, so roughly four bundles rather than
+ * sixteen. Worth knowing before loading a library onto one.
+ */
+&p25q16h {
+	status = "okay";
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		lfs_partition: partition@0 {
+			label = "littlefs_storage";
+			reg = <0x00000000 DT_SIZE_M(2)>;
+		};
+	};
+};

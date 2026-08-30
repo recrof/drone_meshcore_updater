@@ -1,0 +1,18 @@
+/*
+ * Devicetree overlay for the MCUboot image on xiao_ble.
+ *
+ * Selected by updater/sysbuild.cmake — sysbuild only ever looks for one file
+ * name per image (sysbuild/<image>.overlay), which cannot serve two boards
+ * with different flash.
+ *
+ * Same two jobs as its nRF54L counterpart: give the bootloader the same
+ * partition table the application uses, and link it into boot_partition
+ * rather than wherever the board's `zephyr,code-partition` points.
+ */
+#include "../nrf52840_partitions.dtsi"
+
+/ {
+	chosen {
+		zephyr,code-partition = &boot_partition;
+	};
+};

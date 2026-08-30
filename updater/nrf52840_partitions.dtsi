@@ -1,0 +1,85 @@
+/*
+ * Flash partition table for the XIAO nRF52840 (xiao_ble).
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Shared by the application image and the MCUboot image — the same reasoning
+ * as rram_partitions.dtsi on the nRF54L: sysbuild builds MCUboot as its own
+ * Zephyr image with its own devicetree, so one fragment is what stops the two
+ * disagreeing about where the slots are.
+ *
+ * ---- Why the table is rebuilt at all -----------------------------------
+ *
+ * The stock layout (nrf52840_partition_uf2_sdv7.dtsi) is for a board whose
+ * only bootloader is Adafruit's UF2 one:
+ *
+ *   0x000000  156K  SoftDevice region   reserved, unused by Zephyr
+ *   0x027000  788K  Application
+ *   0x0EC000   32K  Storage
+ *   0x0F4000   48K  UF2 bootloader
+ *
+ * There are no MCUboot slots in it, so nothing here could update itself over
+ * Bluetooth: img_mgmt swaps slots, and there were none. MCUboot is therefore
+ * *chainloaded* — the UF2 bootloader starts MCUboot, MCUboot picks a slot.
+ * Both bootloaders stay, and the UF2 one remains the recovery path exactly as
+ * it is on a factory board.
+ *
+ * The 788K application region is split:
+ *
+ *   0x027000   48K  boot_partition   MCUboot
+ *   0x033000  368K  slot0_partition  (image-0)
+ *   0x08F000  368K  slot1_partition  (image-1)
+ *   0x0EB000    4K  (alignment slack)
+ *   0x0EC000   32K  storage_partition   unchanged
+ *   0x0F4000   48K  the UF2 bootloader  unchanged
+ *
+ * 368 KB against a ~280 KB image is about 30% headroom, which is thinner than
+ * the nRF54L's 896 KB slots and is the real cost of this board: 788 KB has to
+ * hold a bootloader and two copies of the application. If the image ever
+ * outgrows a slot, MCUboot's CMake says so at build time rather than at boot.
+ *
+ * storage_partition does not move, for the same reason it does not move on
+ * the nRF54L: CONFIG_SETTINGS=y with no explicit backend can land there, and
+ * relocating it silently discards whatever a deployed device has stored.
+ *
+ * `boot_partition` is *deleted and redefined*, not resized. The label is
+ * MCUboot's own hook — its image links at whatever `boot_partition` says —
+ * and on this board the name is already taken by the UF2 bootloader at
+ * 0x0F4000. Leaving it there would link MCUboot on top of the bootloader that
+ * is meant to start it. That is the same trap rram_partitions.dtsi documents
+ * for the nRF54L, where the board pins code-partition to slot0 instead.
+ *
+ * The firmware bundles do not live in flash0 at all — they are on the 2 MB
+ * P25Q16H QSPI part, which is what makes 368 KB slots workable.
+ */
+
+/delete-node/ &code_partition;
+/delete-node/ &boot_partition;
+
+&flash0 {
+	partitions {
+		boot_partition: partition@27000 {
+			label = "mcuboot";
+			reg = <0x00027000 DT_SIZE_K(48)>;
+		};
+
+		slot0_partition: partition@33000 {
+			label = "image-0";
+			reg = <0x00033000 DT_SIZE_K(368)>;
+		};
+
+		slot1_partition: partition@8f000 {
+			label = "image-1";
+			reg = <0x0008f000 DT_SIZE_K(368)>;
+		};
+
+		/* The Adafruit UF2 bootloader. Read-only and never written by
+		 * anything here; declared so the region is visibly spoken for
+		 * rather than looking like free space at the top of flash. */
+		uf2_boot_partition: partition@f4000 {
+			label = "uf2";
+			read-only;
+			reg = <0x000f4000 DT_SIZE_K(48)>;
+		};
+	};
+};
