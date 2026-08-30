@@ -72,6 +72,12 @@ jobs:
       - name: CMSIS-DAP / SWD encoding tests
         run: node web/test/cmsis-dap.test.mjs
 
+      # Cross-checks the fsx_mgmt command IDs against the client's copy. A
+      # renumbered command is silent both ways: the client sends one command
+      # and the device runs another, or waits out a 15 s timeout.
+      - name: fsx_mgmt command table tests
+        run: node web/test/fsx-mgmt.test.mjs
+
       # Cross-checks the log file naming against updater/prj.conf.
       - name: Log file tests
         run: node web/test/log-file.test.mjs
@@ -82,6 +88,35 @@ jobs:
       - name: DFU status wire-format tests
         run: node web/test/dfu-status.test.mjs
 
+      # The two USB flashers that reach a board over a serial port. Neither
+      # target can be watched while it is being written — the ESP32-S3 has no
+      # console at all in download mode — so the framing, checksums, block
+      # sizes and sequence numbers are driven here against device models that
+      # refuse what the real bootloaders refuse.
+      - name: Serial framing tests
+        run: node web/test/serial.test.mjs
+
+      - name: MD5 tests
+        run: node web/test/md5.test.mjs
+
+      - name: ESP32-S3 ROM loader tests
+        run: node web/test/esptool.test.mjs
+
+      - name: Nordic serial DFU tests
+        run: node web/test/nordic-dfu-serial.test.mjs
+
+      # Firmware-file inspection: is this a legacy DFU package or an ESP32
+      # image, is it intact, and can the device in front of the user flash it.
+      # Every fixture is built in the test, and the ZIP writer there is
+      # deliberately not the ZIP reader under test.
+      - name: Firmware image inspection tests
+        run: node web/test/firmware-image.test.mjs
+
+      # The inspector's wire contract: enum values, the rejected-extension
+      # list and the CRC variants, against the C that produces them.
+      - name: Firmware inspect contract tests
+        run: node web/test/dfu-inspect.test.mjs
+
       # Catches mistyped this.x() in the hardware-driving modules, which jsdom
       # cannot execute and whose error paths only run against a real device.
       - name: Self-call check
@@ -91,6 +126,14 @@ jobs:
       # is present.
       - name: MCUboot image tests
         run: node web/test/mcuboot-image.test.mjs
+
+      # The staged firmware index: stage-firmware.mjs's entries against
+      # firmware-manifest.js's reader and every consuming component, plus the
+      # three hand-written board tables — USB method, display name, and the
+      # button dance each flasher needs — against the boards this repo can
+      # actually build. Those are the board facts no build output carries.
+      - name: Firmware staging tests
+        run: node web/test/stage-firmware.test.mjs
 
       - name: Bundle single-file build
         run: node web/tools/build-single.mjs web/dist/updater.html
@@ -126,8 +169,10 @@ jobs:
           cp web/sw.js web/manifest.webmanifest _site/
           cp web/dist/updater.html _site/updater.html
 
-      # Publish the newest release's merged.hex next to the app, so "Flash
-      # newest" is one click and needs no GitHub round trip from the browser.
+      # Publish every board's artifacts next to the app, so "Flash newest" and
+      # "Update over Bluetooth" are one click and need no GitHub round trip
+      # from the browser. One subdirectory and one manifest entry per board;
+      # the client picks the entry matching the device in front of it.
       #
       # Deliberately never fails the build. There is nothing to publish until
       # a release exists, and build.yml creates releases as DRAFTS — a draft's
@@ -143,7 +188,7 @@ jobs:
           RELEASE_TAG: ""
         run: |
           set -u
-          mkdir -p _site/firmware
+          mkdir -p _site/firmware assets
 
           TAG="${RELEASE_TAG:-}"
           if [ -z "${TAG}" ]; then
@@ -156,42 +201,122 @@ jobs:
           fi
           echo "staging firmware from ${TAG}"
 
+          # Which boards did this release publish?
+          #
+          # build.yml writes one <base>-board.txt per board, holding the full
+          # Zephyr board target. That file IS the list — no board names here,
+          # so adding a board to the build matrix needs no change in this
+          # workflow. It also carries the variant ("xiao_ble/nrf52840"), which
+          # an asset filename cannot, and which the client needs because it
+          # compares against what the device reports over os_mgmt.
+          #
           # Retry briefly. With build.yml's default (draft: true) the assets
           # are always present by the time a human can publish, so this never
           # loops. It matters if anyone sets draft: false: the release is then
           # created already-published, which fires this workflow *before*
-          # softprops has finished uploading, and the asset appears seconds
+          # softprops has finished uploading, and the assets appear seconds
           # later.
           ok=""
           for attempt in 1 2 3 4 5; do
-            if gh release download "${TAG}" --pattern '*-merged.hex' \
-                 --output _site/firmware/merged.hex --clobber; then
+            if gh release download "${TAG}" --pattern '*-board.txt' --dir assets --clobber; then
               ok=yes
               break
             fi
-            echo "attempt ${attempt}: no *-merged.hex on ${TAG} yet, waiting…"
+            echo "attempt ${attempt}: no *-board.txt on ${TAG} yet, waiting…"
             sleep 10
           done
           if [ -z "${ok}" ]; then
-            echo "::warning::release ${TAG} has no *-merged.hex asset — 'Flash newest' will be unavailable"
-            rm -f _site/firmware/merged.hex
+            echo "::warning::release ${TAG} published no board manifests — firmware unavailable"
             exit 0
           fi
 
-          # Same script a developer runs locally, so the manifest schema has
-          # exactly one producer and cannot drift from its reader.
-          # The OTA image for "Update over Bluetooth". Optional: a release
-          # predating MCUboot has no such asset, and the USB route still works.
-          if ! gh release download "${TAG}" --pattern '*-dfu.zip' \
-                 --output _site/firmware/dfu_application.zip --clobber; then
-            echo "::notice::${TAG} has no *-dfu.zip — Bluetooth updates unavailable"
-            rm -f _site/firmware/dfu_application.zip
-          fi
+          # Everything else in one go; each board's files share its base name.
+          gh release download "${TAG}" --pattern '*-merged.hex' --dir assets --clobber || true
+          gh release download "${TAG}" --pattern '*-merged.uf2' --dir assets --clobber || true
+          gh release download "${TAG}" --pattern '*-dfu.zip'    --dir assets --clobber || true
+          # A board with no single-file image publishes its pieces plus a
+          # parts.txt saying where each one goes. Both patterns are harmless
+          # for boards that publish neither.
+          gh release download "${TAG}" --pattern '*-parts.txt'  --dir assets --clobber || true
+          gh release download "${TAG}" --pattern '*.bin'        --dir assets --clobber || true
+          ls -la assets/
 
-          node web/tools/stage-firmware.mjs _site/firmware/merged.hex \
-            --dfu _site/firmware/dfu_application.zip \
-            --out _site/firmware --tag "${TAG}"
-          ls -la _site/firmware/
+          # Same script a developer runs locally, so the manifest schema has
+          # exactly one producer and cannot drift from its reader. Each call
+          # rewrites only its own board's entry, so the boards accumulate into
+          # one index and a board that failed to build simply is not in it.
+          staged=0
+          for marker in assets/*-board.txt; do
+            [ -e "${marker}" ] || continue
+            base="${marker%-board.txt}"
+            board="$(tr -d '[:space:]' < "${marker}")"
+            [ -n "${board}" ] || { echo "::warning::${marker} is empty — skipping"; continue; }
+            echo "--- staging ${board}"
+
+            # A board with no single-file image ships <base>-parts.txt, one
+            # `name@offset` per line, written by the build from the stager's
+            # own layout. Nothing here knows an offset; this loop only moves
+            # files and passes the numbers through.
+            #
+            # The copy is not busywork: assets carry the release-wide prefix
+            # (`...-v1.0-xiao_esp32s3-mcuboot.bin`) and the stager names a
+            # staged part after the file it was handed. Without the rename,
+            # CI would publish part filenames that a local `./build.sh` never
+            # produces, and the manifest would differ by which machine wrote
+            # it.
+            # `${a[@]+"${a[@]}"}` at the call, not a bare `"${a[@]}"`: this
+            # step runs under `set -u`, and expanding an empty array that way
+            # is an unbound-variable error in bash 3.x. Every single-file
+            # board takes that path, so it would be the common case failing,
+            # not the new one.
+            partargs=()
+            if [ -f "${base}-parts.txt" ]; then
+              partdir="$(mktemp -d)"
+              want=0
+              missing=""
+              while IFS='@' read -r name off; do
+                [ -n "${name}" ] || continue
+                want=$((want + 1))
+                if [ ! -f "${base}-${name}" ]; then
+                  missing="${missing} ${name}"
+                  continue
+                fi
+                cp "${base}-${name}" "${partdir}/${name}"
+                partargs+=(--part "${partdir}/${name}@${off}")
+              done < "${base}-parts.txt"
+
+              # All or nothing. A partial parts board is worse than an absent
+              # one: the client would offer it, the flasher would write it,
+              # and a board that got a bootloader and no application does not
+              # boot and has no console to say so (Trap 6). "This release has
+              # no ESP32 build" is a true statement a user can act on.
+              if [ -n "${missing}" ]; then
+                echo "::warning::${board}: not published:${missing} — skipping this board entirely"
+                continue
+              fi
+              if [ "${want}" -eq 0 ]; then
+                echo "::warning::${board}: parts.txt is empty — skipping"
+                continue
+              fi
+            fi
+
+            node web/tools/stage-firmware.mjs \
+              --board "${board}" \
+              --out _site/firmware --tag "${TAG}" \
+              --hex "${base}-merged.hex" \
+              --uf2 "${base}-merged.uf2" \
+              --dfu "${base}-dfu.zip" \
+              ${partargs[@]+"${partargs[@]}"}
+            staged=$((staged + 1))
+          done
+
+          if [ "${staged}" -eq 0 ]; then
+            echo "::warning::release ${TAG} staged no boards — firmware unavailable"
+            rm -rf _site/firmware
+            exit 0
+          fi
+          echo "staged ${staged} board(s)"
+          find _site/firmware -type f | sort
 
       - uses: actions/upload-pages-artifact@v5
         if: (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') || github.event_name == 'workflow_dispatch'

@@ -36,6 +36,38 @@ jobs:
     # cross-compiler + all Python deps pre-installed, so we skip the
     # per-run west init dance.
     runs-on: ubuntu-latest
+    strategy:
+      # One board's failure must not cancel the others: a release with two of
+      # three boards attached is useful, and which board broke is the thing
+      # you want to see. The staging side is per-board too, so a missing
+      # asset degrades to "nothing published for that board" rather than to a
+      # broken index.
+      fail-fast: false
+      matrix:
+        include:
+          # `slug` is the board name, and it goes in the asset filename so the
+          # staging step reads the board off the asset rather than keeping its
+          # own copy of this list.
+          #
+          # slot0/low/limit are this board's partition geometry, from
+          # updater/rram_partitions.dtsi and updater/nrf52840_partitions.dtsi.
+          # They are what the merged-image check asserts against; they used to
+          # be nRF54L constants written inline, which would have passed
+          # vacuously for any other board.
+          - board: xiao_nrf54lm20a/nrf54lm20a/cpuapp
+            slug: xiao_nrf54lm20a
+            low: "0x0"        # MCUboot links at 0 — reset vector lives here
+            slot0: "0x10000"
+            limit: "0x1d0000" # storage_partition
+          - board: xiao_ble/nrf52840
+            slug: xiao_ble
+            low: "0x27000"    # under it sits the Adafruit UF2 bootloader
+            slot0: "0x33000"
+            limit: "0xf4000"  # uf2_boot_partition — overwriting it bricks USB
+          # NOT here: xiao_esp32s3. This container is Nordic's and carries no
+          # Xtensa toolchain, and the Espressif build additionally needs
+          # `west blobs fetch hal_espressif`. Adding it means a second job with
+          # a different image, not another matrix row — see notes/ci-release.md.
     defaults:
       run:
         # REQUIRED, and not merely tidy. The toolchain image puts west, cmake
@@ -134,14 +166,18 @@ jobs:
         run: west update --narrow -o=--depth=1
 
       - name: Build firmware
-        run: west build -b xiao_nrf54lm20a/nrf54lm20a/cpuapp updater --build-dir updater/build
+        run: west build -b ${{ matrix.board }} updater --build-dir updater/build
 
       - name: Stage release artifacts
         run: |
           mkdir -p out
           VER="${GITHUB_REF_NAME}"
           [[ "$GITHUB_REF" == refs/tags/* ]] || VER="dev-${GITHUB_SHA::7}"
-          BASE="xiao_nrf54_updater-${VER}"
+          # The board is IN the asset name. web.yml reads it back off the
+          # filename to stage per-board, so this is the single source of truth
+          # for which board an artifact is for — the alternative, a hard-coded
+          # board string in the staging step, is a second copy that drifts.
+          BASE="drone_meshcore_updater-${VER}-${{ matrix.slug }}"
           # Sysbuild nests each image domain: the app is under
           # <build>/updater/zephyr and the bootloader under
           # <build>/mcuboot/zephyr. <build>/zephyr exists but holds only
@@ -160,6 +196,24 @@ jobs:
           cp updater/build/dfu_application.zip out/${BASE}-dfu.zip
           cp ${APP}/zephyr.signed.bin          out/${BASE}-app.signed.bin
 
+          # Where the bootloader takes a .uf2, that — not the hex — is the
+          # file a user without a probe can actually install, by dragging it
+          # onto the mass-storage device the board exposes.
+          if [ -f updater/build/merged.uf2 ]; then
+            cp updater/build/merged.uf2 out/${BASE}-merged.uf2
+          fi
+
+          # The full board target, next to the artifacts it describes.
+          #
+          # The asset name can only carry the board *name* (xiao_ble) — a
+          # target contains slashes. But the client compares the manifest's
+          # board against what the device reports over os_mgmt, and since
+          # Zephyr 4.3 that is the full target, variant and all
+          # ("xiao_ble/nrf52840"). Encoding it in the filename is not
+          # reversible, and a slug->target table in web.yml would be a second
+          # copy of this matrix. So the build writes down what it built.
+          echo "${{ matrix.board }}" > out/${BASE}-board.txt
+
           # Unsigned, bootloader-relative — debugging only.
           cp ${APP}/zephyr.elf out/${BASE}.elf
           ls -la out/
@@ -175,20 +229,215 @@ jobs:
           from merge_hex import parse
           m = parse(glob.glob("out/*-merged.hex")[0])
           lo, hi = min(m), max(m)
+          low, slot0, limit = (int("${{ matrix.low }}", 16),
+                               int("${{ matrix.slot0 }}", 16),
+                               int("${{ matrix.limit }}", 16))
           print(f"merged image: {len(m)} bytes, {lo:#010x}..{hi:#010x}")
-          assert lo == 0, f"image does not start at 0 (got {lo:#x}) — no reset vector"
-          assert 0x10000 in m, "nothing at slot0 (0x10000) — application missing"
-          assert hi < 0x1d0000, f"image runs into storage_partition ({hi:#x})"
+          assert lo == low, f"image starts at {lo:#x}, expected {low:#x}"
+          assert slot0 in m, f"nothing at slot0 ({slot0:#x}) — application missing"
+          assert hi < limit, f"image runs past {limit:#x} ({hi:#x})"
           EOF
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: firmware
+          # Unique per board: upload-artifact refuses a name that already
+          # exists, so a shared one fails the second matrix job to finish.
+          name: firmware-${{ matrix.slug }}
           path: out/*
 
-      - name: Attach artifacts to the release
+  # The Espressif boards, which cannot be rows in the matrix above.
+  #
+  # Three things separate them from it, and only the first is about the
+  # compiler:
+  #
+  #  1. **No Espressif toolchain in Nordic's container.** That image carries
+  #     the ARM cross-compiler and nothing else, so this job runs on a plain
+  #     runner and installs the Zephyr SDK with the toolchains it needs.
+  #  2. **Blobs.** The Espressif HAL ships its radio as prebuilt libraries
+  #     that west fetches separately; without them the link fails late, on
+  #     missing symbols, long after anything points at the cause.
+  #  3. **No single-file image.** Every other board publishes a merged.hex
+  #     that a flasher writes at one address. These publish two binaries
+  #     written at two offsets, so they also publish where they go — see the
+  #     parts.txt step, which asks the stager rather than writing the offsets
+  #     down here.
+  #
+  # It is its own matrix rather than more rows in the Nordic one because
+  # everything above is shared between the Espressif boards and none of it is
+  # shared with the nRF boards. Two architectures are involved — Xtensa on the
+  # S3, RISC-V on the C5 — but both toolchains come from the one SDK install
+  # below, so that is not what splits the jobs.
+  build-esp32:
+    runs-on: ubuntu-latest
+    strategy:
+      # Same reasoning as the Nordic matrix: one board's failure must not
+      # cancel the other, and the release job tolerates a missing board.
+      fail-fast: false
+      matrix:
+        include:
+          - board: xiao_esp32s3/esp32s3/procpu
+            slug: xiao_esp32s3
+          - board: xiao_esp32c5/esp32c5/hpcore
+            slug: xiao_esp32c5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the Zephyr SDK and toolchains
+        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        with:
+          app-path: updater
+          # Must track `revision:` in updater/west.yml the same way the
+          # container image does for the Nordic job. The check below fails
+          # this job if they drift.
+          sdk-version: 1.0.1
+          # Only what these boards need. The full SDK is several GB and most
+          # of it is other people's silicon. Both are installed for both
+          # matrix rows: splitting them per row would save a couple of minutes
+          # and add a way for a row to be given the wrong compiler, which
+          # fails as a confusing configure error rather than as a clear one.
+          #   xtensa-espressif_esp32s3_zephyr-elf  -> xiao_esp32s3
+          #   riscv64-zephyr-elf                   -> xiao_esp32c5
+          toolchains: xtensa-espressif_esp32s3_zephyr-elf:riscv64-zephyr-elf
+
+      - name: Fetch the Espressif blobs
+        # The radio is a prebuilt library, not source, and it is not in the
+        # manifest checkout. Missing blobs surface as undefined references at
+        # link time with nothing naming the real cause.
+        run: west blobs fetch hal_espressif
+
+      - name: Set the firmware version from the tag
         if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          python3 updater/tools/set_version.py "${GITHUB_REF_NAME}"
+          cat updater/VERSION
+
+      - name: Install esptool
+        # zephyr/soc/espressif/common/CMakeLists.txt invokes the bare name
+        # `esptool` from PATH in a post-build step, and a version that is
+        # merely present is not enough — 4.x rejects 5.x's hyphenated options
+        # and fails after both images have linked. build.sh keeps its own venv
+        # locally for exactly this reason; here we just pin it.
+        run: pipx install 'esptool>=5.0.2' || pip install --user 'esptool>=5.0.2'
+
+      - name: Build firmware
+        run: west build -b ${{ matrix.board }} updater --build-dir updater/build
+
+      - name: Stage release artifacts
+        run: |
+          mkdir -p out
+          VER="${GITHUB_REF_NAME}"
+          [[ "$GITHUB_REF" == refs/tags/* ]] || VER="dev-${GITHUB_SHA::7}"
+          BASE="drone_meshcore_updater-${VER}-${{ matrix.slug }}"
+
+          # Same contract as the Nordic job: the build writes down what it
+          # built, and the staging side reads it back rather than keeping its
+          # own copy of this list.
+          echo "${{ matrix.board }}" > "out/${BASE}-board.txt"
+
+          # And, for a board with no single-file image, WHERE each piece goes.
+          # The offsets come from the stager's PART_LAYOUT — which a test
+          # holds against each board's *_partitions.dtsi — so they are not
+          # written down here, or in web.yml, or anywhere a third copy could
+          # rot. They are NOT the same on both boards — the C5's ROM reserves
+          # the first sectors of flash and the S3's does not, so the two
+          # bootloaders start in different places — which is exactly why
+          # asking the stager beats writing anything down here. (Naming the
+          # actual numbers in this comment is what the "writes down no part
+          # offsets" test forbids, and rightly: a number in a comment is read
+          # as authoritative and is updated by nobody.)
+          : > "out/${BASE}-parts.txt"
+          node web/tools/stage-firmware.mjs \
+            --board ${{ matrix.board }} --emit-parts > parts.tsv
+          [ -s parts.tsv ] || { echo "::error::stager emitted no parts layout"; exit 1; }
+          while IFS=$'\t' read -r src name off; do
+            cp "updater/build/${src}" "out/${BASE}-${name}"
+            echo "${name}@${off}" >> "out/${BASE}-parts.txt"
+          done < parts.tsv
+          cat "out/${BASE}-parts.txt"
+
+          # OTA update of the updater itself, same as every other board.
+          cp updater/build/dfu_application.zip "out/${BASE}-dfu.zip"
+          cp updater/build/updater/zephyr/zephyr.elf "out/${BASE}.elf"
+          ls -la out/
+
+      - name: Verify the images fit their partitions
+        # The parts-board equivalent of the merged-image overlap check. There
+        # is no merged file to inspect, so the assertion is that each image
+        # fits in the gap before the next offset — a bootloader that has grown
+        # past slot0 would otherwise be published, flash clean, verify clean
+        # (MD5 checks what was written where it was written) and not boot.
+        run: |
+          python3 - <<'EOF'
+          import glob, os, re
+          base = glob.glob("out/*-parts.txt")[0]
+          parts = []
+          for line in open(base):
+              line = line.strip()
+              if not line:
+                  continue
+              name, off = line.rsplit("@", 1)
+              path = os.path.join("out", os.path.basename(base)[:-len("parts.txt")] + name)
+              parts.append((int(off, 16), name, os.path.getsize(path)))
+          parts.sort()
+          print(parts)
+          for i, (off, name, size) in enumerate(parts):
+              assert size > 0, f"{name} is empty"
+              if i + 1 < len(parts):
+                  nxt = parts[i + 1][0]
+                  assert off + size <= nxt, (
+                      f"{name} is {size} bytes at {off:#x} and runs into "
+                      f"{parts[i + 1][1]} at {nxt:#x}")
+          EOF
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-${{ matrix.slug }}
+          path: out/*
+
+  # Attaching happens once, after every board has built.
+  #
+  # Not in the matrix: two jobs calling action-gh-release for the same tag
+  # race to create the release, and the loser can either fail or produce a
+  # second, draft release next to the first. Collecting the artifacts and
+  # attaching them in one step also means a release is never half-populated
+  # while a board is still compiling.
+  release:
+    needs: [build, build-esp32]
+    # `!cancelled()` rather than the default "all needs succeeded".
+    #
+    # The matrix already says a board's failure must not cancel the others,
+    # and the staging side is per-board — but `needs: build` quietly undid
+    # that: one failed board failed the whole job, and the release never ran.
+    # A release carrying two of three boards is worth having, and which board
+    # is missing is visible in the run. The empty-output guard below is what
+    # stops this creating a release with nothing in it.
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect every board's artifacts
+        uses: actions/download-artifact@v5
+        with:
+          pattern: firmware-*
+          merge-multiple: true
+          path: out
+
+      - name: Refuse to publish an empty release
+        # Reachable now that this job runs even when a build failed. Without
+        # it, a release where every board failed would be created, published
+        # and empty — which reads as "this version has no firmware" rather
+        # than as "the build broke".
+        run: |
+          ls -la out/
+          count=$(find out -type f | wc -l)
+          [ "$count" -gt 0 ] || {
+            echo "::error::every board failed to build — nothing to attach"
+            exit 1
+          }
+          echo "attaching ${count} file(s)"
+
+      - name: Attach artifacts to the release
         uses: softprops/action-gh-release@v3
         with:
           name: ${{ github.ref_name }}
