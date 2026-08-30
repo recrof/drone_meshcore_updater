@@ -15,6 +15,8 @@ manifest:
   remotes:
     - name: ncs
       url-base: https://github.com/nrfconnect
+    - name: zephyrproject
+      url-base: https://github.com/zephyrproject-rtos
   projects:
     # Nordic Connect SDK. NCS's internal modules.cmake sets
     #   SYSBUILD_NRF_KCONFIG (short name), but Zephyr's zephyr_module.py
@@ -31,6 +33,34 @@ manifest:
       remote: ncs
       revision: v3.4.0
       import: true
+
+    # Espressif HAL — the ESP32-S3 build needs it and NCS will not supply it.
+    #
+    # NCS imports Zephyr through a `name-allowlist`, and hal_espressif is not
+    # on it: NCS ships Nordic silicon, so it strips every other vendor HAL out
+    # of the manifest it inherits. Nothing warns about this. The board files
+    # for xiao_esp32s3 ARE in the Zephyr tree we already have, so the board
+    # resolves, DTS preprocesses, and the failure only lands at the SoC
+    # Kconfig — which is a long way from the cause.
+    #
+    # THE REVISION MUST MATCH zephyr/west.yml. This is not a version we get to
+    # choose: the HAL and the Zephyr tree it plugs into share headers and
+    # driver glue, and NCS pins Zephyr at ncs-v3.4.0. Pinning the HAL anywhere
+    # else is building two halves of one interface from different sources.
+    # Check with:
+    #
+    #   grep -A2 'name: hal_espressif' zephyr/west.yml
+    #
+    # This is the first thing in this repo that is not a pure NCS build, which
+    # is why it is spelled out rather than just added.
+    - name: hal_espressif
+      repo-path: hal_espressif
+      path: modules/hal/espressif
+      remote: zephyrproject
+      revision: b7953b8019361d09e613f7011d2ccc41b984d087
+      west-commands: west/west-commands.yml
+      groups:
+        - hal
   self:
     # Application lives in the `updater/` subdirectory of the repo (which is
     # also the west workspace root once `west init -l updater` is run).

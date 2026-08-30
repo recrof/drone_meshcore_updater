@@ -1,0 +1,40 @@
+/*
+ * Devicetree fragment shared by every board this firmware runs on.
+ *
+ * Only what is genuinely board-independent lives here. The flash the
+ * filesystem sits on, the partition table and the LED wiring are all
+ * per-board and live in boards/<board>.overlay.
+ *
+ * Note how Zephyr resolves these: boards/<board>.overlay *replaces*
+ * app.overlay rather than adding to it (configuration_files.cmake — the
+ * app.overlay lookup is inside `if(NOT DEFINED DTC_OVERLAY_FILE)`). So there
+ * is deliberately no app.overlay in this tree: with one present, adding the
+ * first board overlay would have silently stopped applying it, which is
+ * exactly the kind of quiet devicetree change that produces an image that
+ * flashes and does not boot.
+ */
+
+/ {
+	fstab {
+		compatible = "zephyr,fstab";
+
+		lfs1: lfs1 {
+			compatible = "zephyr,fstab,littlefs";
+			/* Mount point intentionally matches the DT node label
+			 * `lfs1` — nRF Connect Device Manager defaults its
+			 * upload/download destination to `/<label>/`, so
+			 * keeping them aligned means the app's default paths
+			 * "just work" and users don't have to hand-type
+			 * `/lfs/` every time.
+			 */
+			mount-point = "/lfs1";
+			partition = <&lfs_partition>;
+			automount;
+			read-size = <16>;
+			prog-size = <16>;
+			cache-size = <64>;
+			lookahead-size = <32>;
+			block-cycles = <512>;
+		};
+	};
+};

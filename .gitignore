@@ -38,6 +38,8 @@ __pycache__/
 # Claude
 .claude/
 CLAUDE.md
+# CLAUDE.md's detail, split out of it so it is not read on every exchange.
+notes/
 
 # macOS
 .DS_Store
@@ -57,9 +59,16 @@ node_modules/
 *.elf
 *.uf2
 *.map
+# Serial captures. Kept locally on purpose — a boot log is the only record of
+# what a board actually said, and one from before a rename reads as a stale
+# find in `grep -r` while being the one file that must not be rewritten.
+bootlog_*.log
 
 # Staged by web/tools/stage-firmware.mjs for local testing, and by
 # .github/workflows/web.yml at deploy time. Never committed: the real
 # copy comes from a release, and a stale hex sitting next to the sources
 # is one anybody could flash by pressing "Flash newest".
 web/firmware/
+
+# esptool >= 5.0.2 for Espressif builds; build.sh creates it (see ensure_esptool).
+.venv-esptool/
