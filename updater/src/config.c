@@ -13,6 +13,7 @@
  */
 
 #include "config.h"
+#include "dfu_tuning.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -69,31 +70,28 @@ static void apply_defaults(struct app_config *c)
 	 * SoftDevice, so a "default" that isn't on the list is a default the
 	 * radio never runs at.
 	 */
-	c->tx_power       = 8;
+	c->ble_tx_power   = 8;
+	/* The chip's own maximum, so the default changes nothing. */
+	c->wifi_tx_power  = 20;
 	c->scan_timeout   = 0;
 	c->scan_debug     = false;
-	/* Erase-aware pacing, calibrated on hardware.
+	/* On: the ESP32 board exists to reach ElegantOTA targets, so making
+	 * that the thing you have to switch on would be backwards. Costs
+	 * nothing on a board with no WiFi radio. */
+	c->wifi_ota       = true;
+	/* Erase-aware pacing. The target erases each 4 KB page lazily on the
+	 * first write that touches it (~100 ms, buffering into an 8-slot ring),
+	 * then writes each 244 B store in ~2.5 ms. One packet per page is
+	 * expensive; the other ~16 are cheap. erase_pause_ms covers the erase,
+	 * pkt_gap_ms covers the write rate for the rest.
 	 *
-	 * The target erases each 4 KB page lazily on the first write that
-	 * touches it (~100 ms, buffering into an 8-slot ring), then writes each
-	 * 244 B store in ~2.5 ms. One packet per page is expensive; the other
-	 * ~16 are cheap. erase_pause_ms covers the erase, pkt_gap_ms covers the
-	 * write rate for the rest.
-	 *
-	 * pkt_gap_ms=4, not 2. Traced per-packet, gap=2 put packets on the wire
-	 * every ~2.2-2.8 ms — at or below the target's own write rate — so its
-	 * queue crept up across a page and the boundary packet, which needs a
-	 * ring slot, found none. That failed at the *first* page boundary every
-	 * time, and only on the attempt that happened to run fastest:
-	 *
-	 *   page-0 spacing 2.78 ms/packet -> rejected at 4392 B
-	 *   page-0 spacing 3.49 ms/packet -> completed the whole image
-	 *
-	 * 4 ms sits clear of that threshold. It costs ~22 ms per 4 KB, which
-	 * erase_inflight can win back.
+	 * Both values are per-platform, because erase_pause_ms is anchored to a
+	 * write-completion callback and completion does not mean the same thing
+	 * on every controller. dfu_tuning.h has the numbers, the measurements
+	 * behind them, and why an unknown SoC family is a build error.
 	 */
-	c->pkt_gap_ms     = 4;
-	c->erase_pause_ms = 100;
+	c->pkt_gap_ms     = DFU_PKT_GAP_MS_DEFAULT;
+	c->erase_pause_ms = DFU_ERASE_PAUSE_MS_DEFAULT;
 	/* 0 keeps the measured-good pacing. 6 overlaps packets with the erase
 	 * and should recover the throughput that pkt_gap_ms=4 costs. */
 	c->erase_inflight = 0;
@@ -144,15 +142,37 @@ static void apply_kv(struct app_config *c, const char *key, const char *val)
 		if (n >= 0 && n <= 600) c->retry_cooldown = (uint16_t)n;
 	} else if (!strcmp(key, "wedge_cooldown")) {
 		if (n >= 0 && n <= 600) c->wedge_cooldown = (uint16_t)n;
-	} else if (!strcmp(key, "tx_power")) {
+	} else if (!strcmp(key, "ble_tx_power") || !strcmp(key, "tx_power")) {
+		/* `tx_power` is the old name, kept as an alias because a
+		 * silently-ignored key would leave a device running at a
+		 * different power than its config.txt says — and unknown keys
+		 * are only LOG_DBG here, so nothing would have said a word.
+		 * Named in the warning so the fix is obvious. */
+		if (key[0] == 't') {
+			LOG_WRN("config.txt: `tx_power` is now `ble_tx_power` "
+				"(there is a `wifi_tx_power` too). Still "
+				"honoured; rename it when convenient.");
+		}
 		/* Actual allowed values checked at Bluetooth apply time —
 		 * the SoftDevice clips silently otherwise.
 		 */
-		if (n >= -40 && n <= 8) c->tx_power = (int8_t)n;
+		/* +20, not +8: the ceiling is the most capable radio this
+		 * firmware runs on, not the first one it ran on. The nRF parts
+		 * top out at +8 and their controllers clip anything above it —
+		 * ble_tx_power.c reads back what was actually selected and warns
+		 * when it differs, so an over-ask is reported, not silent. */
+		if (n >= -40 && n <= 20) c->ble_tx_power = (int8_t)n;
+	} else if (!strcmp(key, "wifi_tx_power")) {
+		/* The ESP32's own range: esp_wifi_set_max_tx_power() takes
+		 * quarter-dBm over [8, 84], which is 2 dBm to 20 dBm. Below 2
+		 * is not expressible and above 20 is not permitted. */
+		if (n >= 2 && n <= 20) c->wifi_tx_power = (int8_t)n;
 	} else if (!strcmp(key, "scan_timeout")) {
 		if (n >= 0 && n <= 65535) c->scan_timeout = (uint16_t)n;
 	} else if (!strcmp(key, "scan_debug")) {
 		c->scan_debug = parse_bool(val);
+	} else if (!strcmp(key, "wifi_ota")) {
+		c->wifi_ota = parse_bool(val);
 	} else if (!strcmp(key, "pkt_gap_ms")) {
 		if (n >= 0 && n <= 1000) c->pkt_gap_ms = (uint16_t)n;
 	} else if (!strcmp(key, "erase_pause_ms")) {

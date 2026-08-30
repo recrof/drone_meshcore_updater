@@ -91,12 +91,27 @@ struct app_config {
 	 */
 	uint16_t wedge_cooldown;
 
-	/* BLE transmit power in dBm. nRF54L allowed values:
-	 *   -40, -20, -16, -12, -8, -4, 0, 3, 6, 8
-	 * (nRF54L has fewer allowed levels than nRF52840.) Anything not in
-	 * the list is silently clipped by the SoftDevice.
+	/* BLE transmit power in dBm. **The ladder is per radio**, and the
+	 * accepted range spans all of them (-40..20):
+	 *
+	 *   nRF54L    -40, -20, -16, -12, -8, -4, 0, 3, 6, 8   (fewer than
+	 *             the nRF52840's; the SoftDevice clips silently)
+	 *   Espressif -15, -12, -9, -6, -3, 0, 3, 6, 9, 12, 15, 18, 20
+	 *             (ESP_PWR_LVL_*; hci_esp32.c rounds *down* to a level,
+	 *             so a request of 8 lands at 6)
+	 *
+	 * So the same number means different things on different boards, and
+	 * an nRF part cannot reach the top of this range at all. That is why
+	 * ble_tx_power.c reads the selected level back out of the command
+	 * response and warns when it is not what was asked for — the config
+	 * value is a request, and the boot log is the fact.
 	 */
-	int8_t   tx_power;
+	int8_t   ble_tx_power;
+	/* WiFi radio power in dBm, for the ElegantOTA transport. Separate from
+	 * ble_tx_power because they are different radios with different ladders
+	 * and different legal ranges — and because one config key named for
+	 * neither of them is a key nobody can reason about. */
+	int8_t   wifi_tx_power;
 
 	/* Per-scan timeout (seconds). 0 = scan forever (default, intended for
 	 * drone use). Non-zero caps the wait; on expiry the sequence gives up
@@ -109,6 +124,17 @@ struct app_config {
 	 * Off by default to keep the field log quiet.
 	 */
 	bool     scan_debug;
+
+	/* Try the WiFi/ElegantOTA transport as well as BLE.
+	 *
+	 * On by default, but it is not free: a scan cycle that finds no BLE
+	 * target then tries to associate with `MeshCore-OTA`, which costs
+	 * seconds. An operator flashing only nRF targets from an ESP32
+	 * updater can turn it off and get the BLE-only cadence back.
+	 *
+	 * Ignored on hardware with no WiFi radio, where the transport's own
+	 * available() returns false regardless — which is every nRF board. */
+	bool     wifi_ota;
 
 	/* Idle gap inserted between consecutive firmware packets, in
 	 * milliseconds. 0 = send back-to-back.
