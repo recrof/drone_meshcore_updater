@@ -11,6 +11,7 @@ import {
   CONFIG_SCHEMA, CONFIG_MAX_BYTES, CONFIG_PATH, FIELDS,
   isConfigPath, canonicalUploadPath, parseMapping, serializeMapping,
   parseConfig, serializeConfig, encodedSize, defaults, validateField, advisories,
+  TUNING_PLATFORMS, platformFor, tuningFor, defFor,
 } from "../js/lib/config-file.js";
 
 let bad = 0;
@@ -23,8 +24,10 @@ const t = (name, cond, extra = "") => {
 const FIRMWARE_DEFAULTS = {
   ble_name: "OTA | DFU", ble_firmware_mapping: "",
   prn: 32, high_mtu: true, retries: 5, min_rssi: -75,
-  retry_cooldown: 5, wedge_cooldown: 10, tx_power: 8, scan_timeout: 0,
-  scan_debug: false, pkt_gap_ms: 4, erase_pause_ms: 100, erase_inflight: 0,
+  retry_cooldown: 5, wedge_cooldown: 10, ble_tx_power: 8, wifi_tx_power: 20,
+  scan_timeout: 0,
+  scan_debug: false, wifi_ota: true, pkt_gap_ms: 4, erase_pause_ms: 100,
+  erase_inflight: 0,
 };
 const d = defaults();
 t("schema has exactly the firmware keys",
@@ -32,6 +35,151 @@ t("schema has exactly the firmware keys",
   Object.keys(d).join(","));
 for (const [k, v] of Object.entries(FIRMWARE_DEFAULTS)) {
   t(`default ${k} = ${JSON.stringify(v)}`, d[k] === v, `got ${JSON.stringify(d[k])}`);
+}
+
+/* --- per-platform pacing, against updater/src/dfu_tuning.h ----------------
+ *
+ * Two of the defaults are not one number any more: pkt_gap_ms and
+ * erase_pause_ms are set per SoC family, because erase_pause_ms is timed from
+ * a write-completion callback and completion does not mean the same thing on
+ * every controller.
+ *
+ * That makes a third copy of these values — config.c, dfu_tuning.h, and this
+ * client — and the copy most likely to be forgotten is this one: a firmware
+ * change is compiled and flashed, while a stale number here only shows up as
+ * a "reset to default" button that quietly sets the wrong thing on one board.
+ * So the header is parsed rather than transcribed.
+ *
+ * `#if defined(CONFIG_SOC_FAMILY_X)` maps to a platform key here. If a branch
+ * is added to the header for a new family, this test fails until the client
+ * learns about it too — which is the point.
+ */
+{
+  const FAMILY_TO_PLATFORM = {
+    CONFIG_SOC_SERIES_ESP32C5: "espressif_c5",
+    CONFIG_SOC_FAMILY_ESPRESSIF_ESP32: "espressif",
+    CONFIG_SOC_FAMILY_NORDIC_NRF: "nordic",
+  };
+  const src = new URL("../../updater/src/dfu_tuning.h", import.meta.url);
+  let header = null;
+  try { header = readFileSync(src, "utf8"); } catch { /* outside the repo */ }
+
+  if (!header) {
+    console.log("  skip  dfu_tuning.h not readable; per-platform defaults not cross-checked");
+  } else {
+    /* Split on the #if/#elif/#else chain and read the two #defines out of
+     * each arm. Deliberately crude: if the header grows a shape this cannot
+     * read, that should fail here rather than silently match nothing. */
+    const arms = header.split(/^#(?:el)?if\s+defined\(/m).slice(1);
+    const fromHeader = {};
+    for (const arm of arms) {
+      const family = arm.match(/^(CONFIG_[A-Z0-9_]+)\)/)?.[1];
+      const plat = FAMILY_TO_PLATFORM[family];
+      const gap = arm.match(/#define\s+DFU_PKT_GAP_MS_DEFAULT\s+(\d+)/)?.[1];
+      const pause = arm.match(/#define\s+DFU_ERASE_PAUSE_MS_DEFAULT\s+(\d+)/)?.[1];
+      if (!family) continue;
+      t(`dfu_tuning.h's ${family} branch is known to the client`, !!plat,
+        "add it to FAMILY_TO_PLATFORM and to TUNING_PLATFORMS");
+      if (!plat) continue;
+      t(`dfu_tuning.h defines both knobs for ${plat}`, !!gap && !!pause);
+      fromHeader[plat] = { pkt_gap_ms: Number(gap), erase_pause_ms: Number(pause) };
+    }
+
+    t("every platform the client knows has a branch in dfu_tuning.h",
+      Object.keys(TUNING_PLATFORMS).every(k => k in fromHeader),
+      Object.keys(fromHeader).join(","));
+
+    for (const [plat, want] of Object.entries(fromHeader)) {
+      const got = TUNING_PLATFORMS[plat];
+      t(`${plat} pkt_gap_ms = ${want.pkt_gap_ms}`, got?.pkt_gap_ms === want.pkt_gap_ms,
+        `client has ${got?.pkt_gap_ms}`);
+      t(`${plat} erase_pause_ms = ${want.erase_pause_ms}`,
+        got?.erase_pause_ms === want.erase_pause_ms, `client has ${got?.erase_pause_ms}`);
+    }
+
+    /* The header refuses to build for silicon it has no numbers for. That is
+     * load-bearing — a silent fallback to the nRF's values would present as a
+     * DFU that aborts mid-image on a board nobody has measured. */
+    t("dfu_tuning.h refuses to guess for an unknown family", /#error/.test(header));
+  }
+}
+
+/* --- board target -> platform ---
+ *
+ * Derived from the string the device reports over os_mgmt, so a new part is
+ * classified without a firmware change. The C6 case is the reason it is a
+ * pattern and not a table: that part does not exist here yet, and should land
+ * on the ESP32's numbers rather than the nRF's the first time one boots.
+ *
+ * **The C5 no longer falls through, and that is the point of these cases.**
+ * It was measured on hardware and wants `erase_pause_ms` 100 where the S3
+ * wants 150, so it has its own entry — and because `platformFor` is a regex
+ * chain, the specific test has to run before the general one. Reordering
+ * those two lines silently gives every C5 the S3's pacing again, which is a
+ * throughput regression no other test would notice. Hence a case for each. */
+{
+  const cases = [
+    ["xiao_nrf54lm20a/nrf54lm20a/cpuapp", "nordic"],
+    ["xiao_ble/nrf52840", "nordic"],
+    ["xiao_ble/nrf52840/sense", "nordic"],
+    ["xiao_esp32s3/esp32s3/procpu", "espressif"],
+    ["xiao_esp32c6/esp32c6/hpcore", "espressif"],
+    ["xiao_esp32c5/esp32c5/hpcore", "espressif_c5"],
+  ];
+  for (const [board, want] of cases) {
+    t(`${board} is ${want}`, platformFor(board) === want, `got ${platformFor(board)}`);
+  }
+  /* Firmware predating the board report can only be an nRF — the ESP32 port
+   * is newer than the report — so an unknown board resolves to nordic rather
+   * than to nothing. */
+  t("an unreported board is not classified", platformFor(null) === null);
+  t("...but resolves to the nRF's numbers", tuningFor(null) === TUNING_PLATFORMS.nordic);
+  t("...and so does a board this client has never heard of",
+    tuningFor("some_future_board/riscv") === TUNING_PLATFORMS.nordic);
+
+  const esp = defaults("xiao_esp32s3/esp32s3/procpu");
+  t("the ESP32's defaults are the ESP32's", esp.pkt_gap_ms === 7 && esp.erase_pause_ms === 150,
+    JSON.stringify({ gap: esp.pkt_gap_ms, pause: esp.erase_pause_ms }));
+  t("and nothing else moves with the board",
+    Object.entries(esp).every(([k, v]) =>
+      ["pkt_gap_ms", "erase_pause_ms"].includes(k) || v === d[k]),
+    Object.entries(esp).filter(([k, v]) => v !== d[k]).map(([k]) => k).join(","));
+  t("only the keys marked defByPlatform move",
+    CONFIG_SCHEMA.filter(f => f.defByPlatform).map(f => f.key).sort().join(",") ===
+    "erase_pause_ms,pkt_gap_ms");
+  t("defFor falls back to f.def for keys that do not move",
+    defFor(FIELDS.prn, "xiao_esp32s3/esp32s3/procpu") === FIELDS.prn.def);
+}
+
+/* --- advisories must not fight the board's own defaults -------------------
+ *
+ * The nRF's numbers on an ESP32 (and the reverse) are the mistake this whole
+ * change exists to prevent, so both directions are asserted: a board's own
+ * defaults are silent, and the other board's are not. */
+{
+  const ESP = "xiao_esp32s3/esp32s3/procpu";
+  const NRF = "xiao_nrf54lm20a/nrf54lm20a/cpuapp";
+  t("the ESP32's defaults raise nothing on an ESP32",
+    advisories(defaults(ESP), ESP).length === 0, advisories(defaults(ESP), ESP).join(" | "));
+  t("the nRF's defaults raise nothing on an nRF",
+    advisories(defaults(NRF), NRF).length === 0, advisories(defaults(NRF), NRF).join(" | "));
+  t("the nRF's erase_pause_ms is flagged on an ESP32",
+    advisories({ ...defaults(ESP), erase_pause_ms: 100 }, ESP).some(s => /150 ms/.test(s)));
+  t("the nRF's pkt_gap_ms is flagged on an ESP32",
+    advisories({ ...defaults(ESP), pkt_gap_ms: 4 }, ESP).some(s => /untested/.test(s)));
+  /* The other way round is *not* a warning: 150 on an nRF is generous, not
+   * dangerous, and warning about a safe value trains people to ignore the
+   * banner. */
+  t("the ESP32's erase_pause_ms is not flagged on an nRF",
+    advisories({ ...defaults(NRF), erase_pause_ms: 150 }, NRF).length === 0);
+  /* Uniform pacing has only ever been measured on the nRF. Naming 18 ms on an
+   * ESP32 would be inventing a measurement. */
+  t("uniform pacing on an ESP32 says the floor is unmeasured",
+    advisories({ ...defaults(ESP), erase_pause_ms: 0 }, ESP)
+      .some(s => /never been measured/.test(s)));
+  t("uniform pacing on an nRF still names its measured floor",
+    advisories({ ...defaults(NRF), erase_pause_ms: 0, pkt_gap_ms: 0 }, NRF)
+      .some(s => /18\.0 ms floor/.test(s)));
 }
 
 /* --- the seeded starter file must agree with apply_defaults() -------------
@@ -69,7 +217,7 @@ for (const [k, v] of Object.entries(FIRMWARE_DEFAULTS)) {
 }
 
 /* --- serialize → parse round trip --- */
-const vals = { ...d, ble_name: "RAK4631_OTA|4631_DFU", prn: 1, pkt_gap_ms: 35, tx_power: 0 };
+const vals = { ...d, ble_name: "RAK4631_OTA|4631_DFU", prn: 1, pkt_gap_ms: 35, ble_tx_power: 0 };
 const text = serializeConfig(vals, []);
 const back = parseConfig(text);
 t("round-trips unchanged", JSON.stringify(back.values) === JSON.stringify(vals),
@@ -121,15 +269,35 @@ for (const [key, v, shouldFail] of cases) {
     shouldFail ? !!err : !err, err || "");
 }
 
-/* tx_power must only ever default to a level the nRF54L implements — an
+/* ble_tx_power must only ever default to a level the nRF54L implements — an
  * off-list default is one the SoftDevice silently clips, so the radio never
  * actually runs at it. (It defaulted to 4, which is off-list, until it was
  * changed to 6.) */
-t("tx_power default is an implemented level", !validateField(FIELDS.tx_power, FIELDS.tx_power.def));
-t("tx_power=0 accepted", !validateField(FIELDS.tx_power, 0));
-t("tx_power=8 accepted", !validateField(FIELDS.tx_power, 8));
-t("tx_power=4 rejected (off-list)", !!validateField(FIELDS.tx_power, 4));
-t("tx_power=5 rejected", !!validateField(FIELDS.tx_power, 5));
+t("ble_tx_power default is an implemented level", !validateField(FIELDS.ble_tx_power, FIELDS.ble_tx_power.def));
+t("ble_tx_power=0 accepted", !validateField(FIELDS.ble_tx_power, 0));
+t("ble_tx_power=8 accepted", !validateField(FIELDS.ble_tx_power, 8));
+t("ble_tx_power=4 rejected (off-list)", !!validateField(FIELDS.ble_tx_power, 4));
+t("ble_tx_power=5 rejected", !!validateField(FIELDS.ble_tx_power, 5));
+
+/* The WiFi radio has its own ladder and its own units — esp_wifi_set_max_tx_power()
+ * takes quarter-dBm and rounds down. Offering only implemented levels is what
+ * keeps "what the device reports" equal to "what was asked for". */
+t("wifi_tx_power default is an implemented level",
+  !validateField(FIELDS.wifi_tx_power, FIELDS.wifi_tx_power.def));
+t("wifi_tx_power=20 accepted", !validateField(FIELDS.wifi_tx_power, 20));
+t("wifi_tx_power=2 accepted", !validateField(FIELDS.wifi_tx_power, 2));
+t("wifi_tx_power=0 rejected (below the chip's floor)",
+  !!validateField(FIELDS.wifi_tx_power, 0));
+t("wifi_tx_power=21 rejected (above the chip's ceiling)",
+  !!validateField(FIELDS.wifi_tx_power, 21));
+t("wifi_tx_power=10 rejected (off-list)", !!validateField(FIELDS.wifi_tx_power, 10));
+
+/* The old name still works on the device, and the client must not resurrect
+ * it as a schema key — a file with both would otherwise round-trip two keys
+ * that set the same thing. */
+t("tx_power is no longer a schema key", FIELDS.tx_power === undefined);
+t("a legacy tx_power line is dropped on parse",
+  parseConfig("tx_power=0\nble_tx_power=6\n").values.ble_tx_power === 6);
 
 /* ble_name length cap (APP_CONFIG_NAME_MAX 24 → 23 usable) */
 t("ble_name 23 chars accepted", !validateField(FIELDS.ble_name, "x".repeat(23)));
@@ -305,6 +473,60 @@ t("over-long mapping rejected",
 /* --- oversize guard --- */
 const huge = Array.from({ length: 60 }, (_, i) => `unknown_key_${i}=some_value_here`);
 t("oversize file detected", encodedSize(serializeConfig(d, huge)) > CONFIG_MAX_BYTES);
+
+/* --- auto-flash across two transports -----------------------------------
+ *
+ * The rule mirrors mapping_kind_mask() in dfu_runner.c, which is the half
+ * that matters: it decides which transports actually get a scan slice. This
+ * side only decides whether to warn, so a divergence makes the warning wrong
+ * rather than the flashing — but it is still a pair that has to agree, and
+ * the source check below is the cheapest way to notice.
+ */
+{
+  const withMap = (m) => advisories({ ...d, ble_firmware_mapping: m });
+  const mapNotes = (m) => withMap(m).filter(s => /ble_firmware_mapping/.test(s));
+
+  t("a zip-only mapping raises nothing", mapNotes("RAK:rak*.zip").length === 0,
+    mapNotes("RAK:rak*.zip").join(" | "));
+  t("a bin-only mapping raises nothing", mapNotes("Heltec:heltec*.bin").length === 0);
+  t("a mapping spanning both transports is flagged",
+    mapNotes("RAK:rak*.zip | Heltec:heltec*.bin").some(s => /both \.zip and \.bin/.test(s)));
+  t("...and says why it costs, rather than just that it does",
+    mapNotes("RAK:rak*.zip | Heltec:h*.bin").some(s => /One radio serves both/.test(s)));
+  /* A pattern with no extension cannot be classified, and the firmware then
+   * has to try everything — which is worth saying, because adding the
+   * extension is a one-character fix. */
+  t("an unclassifiable pattern is flagged",
+    mapNotes("RAK:rak*").some(s => /do not end in \.zip or \.bin/.test(s)));
+  t("...naming the rule at fault", mapNotes("RAK:rak*").some(s => /"rak\*"/.test(s)));
+  t("an empty mapping raises nothing", mapNotes("").length === 0);
+  /* Whitespace around the pattern is cosmetic everywhere else in this file,
+   * and must be here too or the advisory fires on a well-formed rule. */
+  t("spacing does not change the verdict", mapNotes("RAK : rak*.zip ").length === 0,
+    mapNotes("RAK : rak*.zip ").join(" | "));
+
+  /* The firmware half, checked at source level. Compiling dfu_runner.c here
+   * is not possible — it pulls in Zephyr — so this asserts only that the
+   * classification exists and keys on the same two extensions. */
+  const runner = (() => {
+    try { return readFileSync(new URL("../../updater/src/dfu_runner.c", import.meta.url), "utf8"); }
+    catch { return null; }
+  })();
+  if (!runner) {
+    console.log("  skip  dfu_runner.c not readable; transport narrowing not cross-checked");
+  } else {
+    t("the firmware narrows transports from the mapping",
+      /mapping_kind_mask/.test(runner));
+    t("...keying on the same two extensions",
+      /"\.zip"/.test(runner) && /"\.bin"/.test(runner));
+    t("...and an unclassifiable pattern falls back to trying both",
+      /return KIND_ANY;\s*\/\* unclassifiable/.test(runner));
+    /* The explicit path must not guess at all: an open bundle already knows
+     * its shape, and that is the case the user actually presses a button for. */
+    t("an explicit flash picks the transport from the file",
+      /bundle_open \? KIND_BIT\(payload\.kind\)/.test(runner));
+  }
+}
 
 console.log(bad ? `\n${bad} FAILURES` : "\nall config-file tests passed");
 process.exit(bad ? 1 : 0);

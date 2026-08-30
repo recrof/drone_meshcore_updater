@@ -179,6 +179,15 @@ t("a no-target failure names what to check",
 /* COOLDOWN is between attempts and the device is still working — treating it
  * as finished would hide a run that is about to retry. */
 t("COOLDOWN counts as active", isActive(STATE.COOLDOWN) === true);
+/* The one that a numeric-range isActive() got wrong: VERIFYING is appended
+ * above FAILED, because these values are on the wire and cannot be
+ * renumbered. Every non-idle, non-terminal state is active, whatever its
+ * number — asserted for all of them so the next appended state is covered
+ * without anyone remembering to add a line. */
+for (const [name, v] of Object.entries(STATE)) {
+  if (v === STATE.IDLE || isTerminal(v)) continue;
+  t(`${name} counts as active`, isActive(v) === true, `state ${v}`);
+}
 t("IDLE is not active", isActive(STATE.IDLE) === false);
 t("DONE is not active", isActive(STATE.DONE) === false);
 t("only DONE and FAILED are terminal",

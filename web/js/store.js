@@ -14,6 +14,9 @@ import {
   CONFIG_PATH, CONFIG_MAX_BYTES, isConfigPath, canonicalUploadPath,
   parseConfig, serializeConfig, encodedSize, defaults as configDefaults,
 } from "./lib/config-file.js";
+import { inspectFirmware, isFirmwareName, TRANSPORT, transportForName,
+         transportsFromMask, unsupportedReason }
+  from "./lib/firmware-image.js";
 import { isLogPath } from "./lib/log-file.js";
 import { idleStatus, STATE as DFU_STATE } from "./lib/dfu-status.js";
 
@@ -22,6 +25,16 @@ export const smp = new SmpClient();
 /* ---- state ------------------------------------------------------------ */
 export const connected  = ref(false);
 export const deviceName = ref("");
+/* The board target the device reports (os_mgmt info, format "i") — e.g.
+ * "xiao_ble/nrf52840". Null on firmware that predates it. Not cosmetic: it is
+ * what lets the client refuse an update built for a different board, which
+ * MCUboot cannot do for itself (it checks the signature, not the
+ * architecture, and every board here signs with the same key). */
+export const deviceBoard = ref(null);
+/* Transports the *device* says it has, asked once at connect (fsxCaps).
+ * Null until answered, and on firmware too old to answer — which the
+ * inspector reads as "make no compatibility claim" rather than as a guess. */
+export const deviceTransports = ref(null);
 /* Fixed: the folder controls were removed from the toolbar, so nothing
  * changes this. Kept as a ref because refresh() and FileListing both read
  * it, and because the firmware path could still become configurable. */
@@ -78,6 +91,8 @@ smp.addEventListener("disconnected", () => {
   listError.value = "Disconnected.";
   fsInfo.value = "—";
   mtuInfo.value = "—";
+  deviceBoard.value = null;
+  deviceTransports.value = null;
   dfuStatus.value = idleStatus();
   dfuRate.value = 0;
 });
@@ -168,7 +183,24 @@ export async function connect() {
     const name = await smp.connect();
     deviceName.value = name;
     connected.value = true;
-    log(`connected to ${name}`, "ok");
+    deviceBoard.value = await smp.osBoard();
+    log(`connected to ${name}${deviceBoard.value ? ` (${deviceBoard.value})` : ""}`, "ok");
+    if (!deviceBoard.value) {
+      log("this firmware does not report its board — an update built for a " +
+          "different board cannot be detected before it is installed", "warn");
+    }
+    /* What can this build actually flash? Asked rather than inferred from
+     * the board, so the client keeps no copy of the firmware's transport
+     * table. Older firmware has no such command; that is not an error. */
+    try {
+      const caps = await smp.fsxCaps();
+      deviceTransports.value = transportsFromMask(caps.transports);
+      log(`updater transports: ${deviceTransports.value.join(", ")}`);
+    } catch {
+      log("this firmware does not report its transports — assuming Bluetooth only");
+      deviceTransports.value = null;
+    }
+
     await refresh();
   } catch (e) {
     log(`connect failed: ${e.message}`, "err");
@@ -248,16 +280,116 @@ export async function remove(fullpath, isDir) {
   } catch (e) { log(`rm: ${e.message}`, "err"); }
 }
 
-export async function flashZip(fullpath) {
-  if (!confirm(`Flash "${fullpath.split("/").pop()}" to the DFU target?\n\n` +
-               `The updater will scan for a matching BLE peer, connect, and start ` +
-               `the Legacy DFU sequence. Progress appears here as it happens; ` +
+/*
+ * Per-file verdicts from the device, keyed by path.
+ *
+ * Not fetched with the listing: the device reads the whole file to checksum
+ * it, so an automatic pass would spend a second per firmware file on every
+ * refresh. It is asked for on demand, and the answer is kept until the file's
+ * size changes — which is what a re-upload looks like from here.
+ */
+export const fileInfo = reactive({});
+
+export async function inspectFile(fullpath, size) {
+  const held = fileInfo[fullpath];
+  if (held && held.size === size && !held.pending) return held;
+
+  fileInfo[fullpath] = { pending: true, size };
+  try {
+    const info = await smp.fsxInspect(fullpath);
+    fileInfo[fullpath] = { ...info, size, pending: false };
+  } catch (e) {
+    /* Firmware without the command, or busy with a run. Both are "ask
+     * later", not "bad file", and must not render as a verdict. */
+    fileInfo[fullpath] = { size, pending: false, unavailable: e.message };
+  }
+  return fileInfo[fullpath];
+}
+
+export async function flashFile(fullpath) {
+  /* A second, much cheaper check at flash time.
+   *
+   * The upload check is the thorough one, but it only ever saw files this
+   * browser uploaded — a device may be carrying firmware put there by another
+   * client, or before these checks existed. This one needs no bytes: the file
+   * name says which transport it wants, and the device has already said which
+   * board it is.
+   */
+  const name = fullpath.split("/").pop();
+
+  /* Ask the device about the file it is holding. It is the authority — it
+   * reads the actual bytes, and it knows what it was built with — and this
+   * covers files this browser never saw: plain SMP uploads from nRF Connect
+   * Device Manager never run the upload-time check.
+   *
+   * A device too old to answer, or busy with a run, is not a reason to
+   * refuse: fall through and let the flash attempt report for itself.
+   */
+  try {
+    const info = await smp.fsxInspect(fullpath);
+    if (info.name || info.version) {
+      log(`${name}: ${[info.name, info.version].filter(Boolean).join(" ")}` +
+          `${info.chip ? ` (${info.chip})` : ""}`);
+    }
+    if (!info.flashable) {
+      log(`${name}: ${info.reason || "the updater cannot flash this file"}`, "err");
+      return;
+    }
+  } catch (e) {
+    log(`${name}: could not be inspected (${e.message}) — flashing anyway`, "warn");
+  }
+
+  /* The confirm says what is about to happen on the radio, which differs per
+   * transport and is the part a user can act on: a BLE run scans for a peer,
+   * a WiFi run joins the target's own access point and drops this device off
+   * anything else it was on. Naming the wrong one is worse than naming
+   * neither, so an unrecognised extension gets the generic sentence. */
+  const how = {
+    [TRANSPORT.BLE]:
+      "The updater will scan for a matching BLE peer, connect, and start the " +
+      "Legacy DFU sequence.",
+    [TRANSPORT.WIFI]:
+      "The updater will join the target's own WiFi access point and POST the " +
+      "image to its ElegantOTA endpoint. Its radio is shared with Bluetooth, " +
+      "so anything else it was doing pauses.",
+  }[transportForName(name)] ?? "The updater will pick a transport from the file.";
+
+  if (!confirm(`Flash "${name}" to the DFU target?\n\n${how} ` +
+               `Progress appears here as it happens; ` +
                `the device log has the detail.`)) return;
   try {
     await smp.fsxTriggerDfu(fullpath);
     log(`DFU triggered: ${fullpath}`, "ok");
   } catch (e) {
     log(`DFU trigger: ${e.message}`, "err");
+  }
+}
+
+/*
+ * Stop whatever the updater is doing and clear the status.
+ *
+ * No confirm(). Stop is the button you press *because* something is going
+ * wrong, often while watching a retry loop grind, and putting a modal in front
+ * of it would be the one dialog guaranteed to be dismissed without reading.
+ * It is also cheap to get wrong — Legacy DFU has no resume, so an interrupted
+ * transfer costs a retry either way, and re-triggering is one click.
+ *
+ * Safe to press at any time: the device treats "nothing was running" as a
+ * successful clear of the previous run's sticky result.
+ */
+export const stopping = ref(false);
+
+export async function stopDfu() {
+  if (stopping.value) return;
+  stopping.value = true;
+  try {
+    const r = await smp.fsxStopDfu();
+    log(r?.stopped ? "stopped — counters and cooldowns cleared"
+                   : "nothing was running; status cleared", "ok");
+  } catch (e) {
+    log(`stop: ${e.message}`, "err");
+  } finally {
+    stopping.value = false;
   }
 }
 
@@ -360,6 +492,42 @@ export async function uploadFiles(files) {
       dst = canonical;
     }
     const bytes = new Uint8Array(await f.arrayBuffer());
+
+    /* Look at firmware before spending the transfer on it.
+     *
+     * The alternative is what used to happen: upload half a megabyte at BLE
+     * speed, press flash, and find out from whatever the device's parser
+     * tripped over first — which is rarely the thing that was actually wrong.
+     * Everything checked here is checked from the bytes in hand, at no cost.
+     *
+     * Errors stop the upload; warnings do not. The line is whether the file
+     * could ever be flashed by this device: a damaged archive or an image for
+     * a transport this board does not have is a refusal, while a name that
+     * disagrees with its contents is the user's business.
+     */
+    /* Formats nothing here can flash, refused by name before anything else
+     * happens. The device refuses these too, on both upload paths — this copy
+     * only saves the round trip. */
+    const unsupported = unsupportedReason(f.name);
+    if (unsupported) {
+      log(`upload ${f.name}: refused — ${unsupported}`, "err");
+      continue;
+    }
+
+    if (isFirmwareName(f.name) && !isConfigPath(dst)) {
+      const rep = inspectFirmware(bytes, {
+        name: f.name, transports: deviceTransports.value,
+      });
+      for (const finding of rep.findings) {
+        log(`${f.name}: ${finding.message}`,
+            finding.level === "error" ? "err" : finding.level === "warn" ? "warn" : "");
+      }
+      if (!rep.ok) {
+        log(`upload ${f.name}: refused — nothing on this device could flash it`, "err");
+        continue;
+      }
+    }
+
     const t0 = performance.now();
     const via = smp.hasStream() ? "stream" : "smp";
     try {
@@ -383,7 +551,9 @@ export async function uploadFiles(files) {
 export async function loadConfig() {
   try {
     const bytes = await smp.readFile(CONFIG_PATH);
-    const parsed = parseConfig(new TextDecoder().decode(bytes));
+    /* The board matters: two of the pacing defaults differ per SoC family,
+     * so a key the file omits has to be filled from the right one. */
+    const parsed = parseConfig(new TextDecoder().decode(bytes), deviceBoard.value);
     log(`loaded ${CONFIG_PATH} (${bytes.length} B)`, "ok");
     for (const ig of parsed.ignored) {
       log(`${CONFIG_PATH}: ${ig.key}=${ig.value} ignored by firmware — ${ig.reason}`, "err");
@@ -391,7 +561,8 @@ export async function loadConfig() {
     return { ...parsed, exists: true, size: bytes.length };
   } catch (e) {
     log(`${CONFIG_PATH} not readable (${e.message}) — showing firmware defaults`);
-    return { values: configDefaults(), unknown: [], ignored: [], exists: false, size: 0 };
+    return { values: configDefaults(deviceBoard.value), unknown: [], ignored: [],
+             exists: false, size: 0 };
   }
 }
 

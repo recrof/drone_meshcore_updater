@@ -14,7 +14,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve, join } from "node:path";
 import {
-  parseIntelHex, totalBytes, lowAddress, highAddress, splitForWrite, padToWords,
+  parseIntelHex, totalBytes, lowAddress, highAddress, splitForWrite, padToWords, flatten,
 } from "../js/lib/intel-hex.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -133,6 +133,38 @@ throws("overlapping data rejected",
   t("keeps the data", [...p.bytes.subarray(0, 3)].join() === "1,2,3");
   const q = { address: 0, bytes: new Uint8Array(8), end: 8 };
   t("already aligned is untouched", padToWords(q) === q);
+}
+
+/* --- flatten: what a bootloader with no addresses needs ----------------- */
+
+/* The nRF52840's serial DFU sends a stream of bytes and nothing else — no
+ * offsets, no addresses — so a gap in the image has to become bytes. Getting
+ * `from` wrong shifts the entire image by the difference, which flashes
+ * cleanly and boots nothing, so this is the one conversion in the file with a
+ * silent failure mode. */
+{
+  const chunks = [
+    { address: 0x100, bytes: Uint8Array.from([1, 2, 3]), end: 0x103 },
+    { address: 0x110, bytes: Uint8Array.from([9]), end: 0x111 },
+  ];
+  const flat = flatten(chunks, 0x100);
+  t("spans the first byte to the last", flat.length === 0x11);
+  t("keeps both runs", flat[0] === 1 && flat[2] === 3 && flat[0x10] === 9);
+  t("fills the gap with the erased value",
+    [...flat.subarray(3, 0x10)].every(b => b === 0xff));
+
+  /* Writing at a lower base than the image starts is legal — the leading
+   * padding is erased flash — and is how a bootloader whose application
+   * region starts below the first byte of the image is fed. */
+  const lower = flatten(chunks, 0xf0);
+  t("padding below the first chunk is erased",
+    lower.length === 0x21 && [...lower.subarray(0, 0x10)].every(b => b === 0xff));
+
+  /* The dangerous direction, refused rather than truncated. */
+  t("an image starting below the write address is refused", (() => {
+    try { flatten(chunks, 0x200); return false; }
+    catch (e) { return /below the 0x200/.test(e.message); }
+  })());
 }
 
 /* --- against a real build ---------------------------------------------- */

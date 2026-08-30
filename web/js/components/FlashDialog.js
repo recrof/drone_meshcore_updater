@@ -1,252 +1,133 @@
-import { ref, reactive, computed, watch, onUnmounted } from "../vue.js";
-import { webUsbAvailable } from "../lib/cmsis-dap.js";
-import { Nrf54lFlasher, EXPECTED_DPIDR } from "../lib/nrf54l-flash.js";
-import { parseIntelHex, totalBytes, lowAddress, highAddress } from "../lib/intel-hex.js";
-import { fmtSize } from "../lib/format.js";
+import { ref, computed, watch } from "../vue.js";
+import { loadIndex, usbEntries, boardLabel } from "../lib/firmware-manifest.js";
+import {
+  SUPPORTED_METHODS, flasherFor, apiAvailable, entryIsFlashable,
+} from "../lib/usb-flashers.js";
 import { connected } from "../store.js";
 import BleUpdate from "./BleUpdate.js";
-
-/* Staged by CI from the newest published release — see web.yml. Relative, so
- * it works under a GitHub Pages sub-path and from a local checkout alike. */
-const FIRMWARE_DIR = "firmware/";
-const MANIFEST_URL = `${FIRMWARE_DIR}manifest.json`;
-
-/* Partition geometry, from updater/rram_partitions.dtsi. Used only to check an
- * image before writing it — the device remains the authority. */
-const RRAM_SIZE = 2036 * 1024;
-const SLOT0 = 0x10000;
-const STORAGE = 0x1d1000;
-
-const hex8 = (n) => (n >>> 0).toString(16).padStart(8, "0");
+import ProbeFlash from "./ProbeFlash.js";
+import SerialFlash from "./SerialFlash.js";
 
 /*
- * Flash the updater itself, over USB, from the browser.
+ * Update the updater's own firmware — over Bluetooth, or over USB.
  *
- * Two steps, not three: attach a probe, then press one button. Choosing a file
- * and writing it used to be separate stages, which made the common case (flash
- * the current release) a three-click errand for no benefit — the checks that
- * used to gate the write now run as part of it and abort with a reason.
+ * This file used to *be* the USB flasher. It is now the part that decides
+ * which one to show: three boards ship from this repo and no two of them are
+ * reached the same way — a CMSIS-DAP probe on the nRF54L, the Adafruit
+ * bootloader on the nRF52840, the ROM loader on the ESP32-S3 — so the flashers
+ * live in ProbeFlash.js and SerialFlash.js and this dispatches on the `usb`
+ * field the manifest gives each board.
+ *
+ * Until that dispatch existed, two of the three boards were staged, listed,
+ * and then explicitly disowned by a line of UI telling the user to go and find
+ * another tool. The ESP32-S3 had no other tool that a non-developer would
+ * find: no probe, no drag-and-drop bootloader, and Bluetooth OTA cannot
+ * install the bootloader it needs before it can work at all.
+ *
+ * ---- There is deliberately no "flash a file you choose" ------------------
+ *
+ * Picking the wrong one is easy and the consequences are not obvious:
+ * zephyr.hex instead of merged.hex leaves a device with no reset vector, and a
+ * hex for another board flashes happily and then does not boot — MCUboot
+ * validates a signature, not an architecture, and every board here signs with
+ * the same key. Every one of those needs a probe to undo, which is the very
+ * thing a user in that position is least likely to have. The staged image is
+ * checked, digest-matched and named with its board, and a local build restages
+ * itself on every `./build.sh`, so a developer's own image is already what
+ * these buttons write.
  */
 export default {
   name: "FlashDialog",
-  components: { BleUpdate },
+  components: { BleUpdate, ProbeFlash, SerialFlash },
   props: { open: Boolean },
   emits: ["close"],
   setup(props, { emit }) {
-    const flasher = ref(null);
-    const dpidr = ref(0);
-    const protectedPart = ref(false);
-    const busy = ref("");
-    const error = ref("");
-    const lines = reactive([]);
-    const progress = reactive({ shown: false, pct: 0, label: "" });
-    const newest = ref(null);          // manifest.json, or null when none published
-    const newestError = ref("");
-
-    const log = (msg, cls = "") => {
-      lines.push({ msg, cls, id: lines.length });
-      if (lines.length > 200) lines.splice(0, lines.length - 200);
-    };
-
-    const attached = computed(() => !!flasher.value && dpidr.value !== 0);
-    const recognised = computed(() => dpidr.value === EXPECTED_DPIDR);
-    const ready = computed(() => attached.value && !busy.value && !connected.value);
-
-    /* --- what the release published ------------------------------------ */
+    const entries = ref([]);          // every board this client can flash by USB
+    const manifestError = ref("");
+    /*
+     * The chosen board target, empty until the user picks one.
+     *
+     * Deliberately not defaulted when there is more than one board. There is
+     * no honest default available: `deviceBoard` in the store would be the
+     * right answer, but it is cleared on disconnect and USB flashing requires
+     * there to be no connection, so it is null exactly when it would be
+     * useful. Anything else — first alphabetically, first in the manifest — is
+     * a pre-selection the user did not make, sitting next to a button that
+     * writes to their hardware.
+     */
+    const board = ref("");
+    /*
+     * Whichever flasher is mounted, reported up so the dialog can refuse to
+     * close. Unmounting mid-write drops the probe handle or the serial port
+     * with the device halted and half-written, and nothing downstream would
+     * ever say so.
+     */
+    const running = ref("");
 
     async function loadManifest() {
-      newest.value = null;
-      newestError.value = "";
+      entries.value = [];
+      manifestError.value = "";
       try {
-        const res = await fetch(MANIFEST_URL, { cache: "no-cache" });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const m = await res.json();
-        if (!m.file) throw new Error("manifest names no file");
-        newest.value = m;
+        const index = await loadIndex();
+        /* Two filters, and the second is not redundant: `usbEntries` asks
+         * whether the entry has *anything* to write, `entryIsFlashable` asks
+         * whether it has what its own method needs — a `parts` list for the
+         * ESP32-S3, a single file for the other two. An entry staged with the
+         * wrong one would otherwise be offered, and fail after the user had
+         * committed to a write. */
+        entries.value = usbEntries(index, SUPPORTED_METHODS).filter(entryIsFlashable);
+        if (!entries.value.length) throw new Error("no published build for any board");
+        /* One board is not a choice, so do not stage it as one. */
+        if (entries.value.length === 1) board.value = entries.value[0].board;
+        else if (!entries.value.some(e => e.board === board.value)) board.value = "";
       } catch (e) {
         /* Entirely normal on a local checkout, and before the first release is
          * published — build.yml creates releases as drafts, whose assets are
          * not downloadable until someone publishes them. */
-        newestError.value = e.message;
+        manifestError.value = e.message;
       }
     }
     watch(() => props.open, (isOpen) => { if (isOpen) loadManifest(); }, { immediate: true });
 
-    /* --- image checks --------------------------------------------------- */
+    const entry = computed(() => entries.value.find(e => e.board === board.value) ?? null);
+    const flasher = computed(() => (entry.value ? flasherFor(entry.value.usb) : null));
 
-    /* Returns { fatal: [], warn: [] }. Fatal aborts the write; the old UI made
-     * these banners next to a disabled button, which only worked because
-     * choosing a file was its own step. */
-    function inspect(chunks) {
-      const lo = lowAddress(chunks), hi = highAddress(chunks);
-      const fatal = [], warn = [];
+    /*
+     * Two capability questions, asked in this order on purpose.
+     *
+     * `anyUsb` is about the *browser* and is true of Chrome and Edge on
+     * desktop and nothing else. It is asked before the manifest is consulted
+     * because it is the more fundamental answer: on Firefox or an iPhone,
+     * "there is no published build" would be beside the point and would send
+     * the reader looking for a problem that is not theirs.
+     *
+     * `usable` is about the *board*, and can differ: WebUSB and Web Serial are
+     * separate permissions and separate flags, so a browser can plausibly have
+     * one and not the other.
+     */
+    const anyUsb = computed(() => apiAvailable("webusb") || apiAvailable("webserial"));
+    const usable = computed(() => (flasher.value ? apiAvailable(flasher.value.api) : false));
 
-      if (lo !== 0) {
-        fatal.push(`starts at 0x${hex8(lo)}, not 0 — no reset vector. This looks like a ` +
-                   `bootloader-relative application image (zephyr.hex); the device will not ` +
-                   `boot from it. Use merged.hex.`);
-      }
-      if (hi >= RRAM_SIZE) {
-        fatal.push(`runs to 0x${hex8(hi)}, past the end of the ${fmtSize(RRAM_SIZE)} RRAM.`);
-      } else if (hi >= STORAGE) {
-        warn.push(`overlaps storage_partition at 0x${hex8(STORAGE)} — settings will be overwritten.`);
-      }
-      if (lo === 0 && hi < SLOT0) {
-        warn.push("bootloader only, no application — the device will boot MCUboot and stop there.");
-      }
-      return { fatal, warn };
-    }
-
-    /* --- the write ------------------------------------------------------ */
-
-    async function guard(label, fn) {
-      busy.value = label;
-      error.value = "";
-      try {
-        return await fn();
-      } catch (e) {
-        error.value = e.message;
-        log(e.message, "err");
-        throw e;
-      } finally {
-        busy.value = "";
-        progress.shown = false;
-      }
-    }
-
-    /** Parse, check, halt, write, verify, reset. The whole of step 2. */
-    async function writeImage(name, text) {
-      const chunks = parseIntelHex(text);
-      const { fatal, warn } = inspect(chunks);
-      log(`${name}: ${totalBytes(chunks)} bytes, ` +
-          `0x${hex8(lowAddress(chunks))}..0x${hex8(highAddress(chunks))}`);
-      for (const w of warn) log(w, "warn");
-      if (fatal.length) throw new Error(`${name} ${fatal[0]}`);
-
-      const f = flasher.value;
-      log("halting core…");
-      await f.halt();
-
-      progress.shown = true;
-      progress.label = "Writing";
-      progress.pct = 0;
-      const written = await f.program(chunks, (done, total) => {
-        progress.pct = Math.floor((done / total) * 100);
-      });
-      log(`wrote ${written} bytes`, "ok");
-
-      progress.label = "Verifying";
-      progress.pct = 0;
-      await f.verify(chunks, (done, total) => {
-        progress.pct = Math.floor((done / total) * 100);
-      });
-      log("verified — every byte reads back as written", "ok");
-
-      progress.shown = false;
-      log("resetting…");
-      await f.resetAndRun();
-      log("done. The device is running the new firmware.", "ok");
-      /* The part drops the debug connection on reset; a stale handle only
-       * produces confusing errors on the next click. */
-      dpidr.value = 0;
-    }
-
-    async function flashNewest() {
-      try {
-        await guard("flashing", async () => {
-          const url = FIRMWARE_DIR + newest.value.file;
-          log(`fetching ${newest.value.tag ?? "newest"} (${url})…`);
-          const res = await fetch(url, { cache: "no-cache" });
-          if (!res.ok) throw new Error(`could not fetch ${url}: HTTP ${res.status}`);
-          const buf = await res.arrayBuffer();
-
-          /* The manifest carries a digest; a truncated or substituted download
-           * should fail here rather than as a verify mismatch after the write
-           * has already replaced the bootloader. */
-          if (newest.value.sha256) {
-            const got = await sha256Hex(buf);
-            if (got !== newest.value.sha256) {
-              throw new Error(`downloaded image does not match the manifest digest ` +
-                              `(expected ${newest.value.sha256.slice(0, 16)}…, got ${got.slice(0, 16)}…)`);
-            }
-            log("digest matches the manifest", "ok");
-          }
-          await writeImage(newest.value.file, new TextDecoder().decode(buf));
-        });
-      } catch { /* reported */ }
-    }
-
-    async function flashCustom(e) {
-      const file = e.target.files?.[0];
-      e.target.value = "";
-      if (!file) return;
-      try {
-        await guard("flashing", async () => writeImage(file.name, await file.text()));
-      } catch { /* reported */ }
-    }
-
-    /* --- probe ---------------------------------------------------------- */
-
-    async function connect() {
-      try {
-        await guard("connecting", async () => {
-          const f = await Nrf54lFlasher.connect(log);
-          flasher.value = f;
-          dpidr.value = await f.attach();
-          protectedPart.value = await f.isProtected();
-          if (protectedPart.value) {
-            log("MEM-AP is locked (APPROTECT) — mass erase is required before flashing", "warn");
-            return;
-          }
-          const csw = await f.setupMemAp();
-          log(`MEM-AP ready, CSW=0x${hex8(csw)} (secure access)`);
-          await f.checkSystemBus();
-          log("debug port up, system bus reachable", "ok");
-        });
-      } catch { /* reported */ }
-    }
-
-    async function disconnect() {
-      if (!flasher.value) return;
-      await flasher.value.close();
-      flasher.value = null;
-      dpidr.value = 0;
-      protectedPart.value = false;
-      log("probe released");
-    }
-
-    async function massErase() {
-      if (!confirm("Mass erase?\n\nThis destroys everything in the chip's internal " +
-                   "memory — firmware and settings — and unlocks the debug port. " +
-                   "Files on the external flash (/lfs1) are not touched.")) return;
-      try {
-        await guard("erasing", async () => {
-          log("mass erasing via CTRL-AP…");
-          await flasher.value.massErase();
-          dpidr.value = await flasher.value.attach();
-          protectedPart.value = await flasher.value.isProtected();
-          await flasher.value.setupMemAp();
-          await flasher.value.checkSystemBus();
-          log("erased and unlocked", "ok");
-        });
-      } catch { /* reported */ }
-    }
+    /*
+     * Why the USB half is unavailable, as a sentence, or "".
+     *
+     * A live Bluetooth link is the interesting case: flashing halts or resets
+     * the CPU, which takes the link down with it, so the app would be left
+     * describing a device that no longer exists. It is re-checked here rather
+     * than only when the dialog opened, because a link can come up after.
+     */
+    const blocked = computed(() => connected.value
+      ? "Disconnect Bluetooth first — flashing over USB restarts the CPU, which drops the link."
+      : "");
 
     function close() {
-      if (busy.value) return;
-      disconnect();
+      if (running.value) return;
       emit("close");
     }
 
-    onUnmounted(() => { if (flasher.value) flasher.value.close(); });
-
     return {
-      webUsbAvailable: webUsbAvailable(), EXPECTED_DPIDR, connected,
-      flasher, dpidr, protectedPart, busy, error, lines, progress,
-      newest, newestError,
-      attached, recognised, ready,
-      connect, disconnect, flashNewest, flashCustom, massErase, close,
-      hex: hex8, fmtSize,
+      connected, entries, manifestError, board, entry, flasher, anyUsb, usable, blocked,
+      running, boardLabel, close,
     };
   },
   template: /* html */ `
@@ -257,7 +138,7 @@ export default {
           <span class="title">UPDATE UPDATER</span>
           <span class="path">Bluetooth or USB</span>
           <span class="grow"></span>
-          <button :disabled="!!busy" title="Close" @click="close">✕</button>
+          <button :disabled="!!running" title="Close" @click="close">✕</button>
         </div>
 
         <div class="cfg-body">
@@ -272,106 +153,68 @@ export default {
 
           <div class="cfg-section">Over USB</div>
           <p class="cfg-lede">
-            Programs through the on-board debug probe — nothing to install. This is
-            also the way back if a Bluetooth update ever leaves the device unable
-            to advertise.
+            The way in when Bluetooth is not an option — including when a Bluetooth
+            update has left the device unable to advertise.
           </p>
 
-          <div class="cfg-banner err" v-if="connected">
-            Still connected over Bluetooth. Flashing over USB halts the CPU, which
-            takes the Bluetooth link down with it — disconnect first, or use the
-            Bluetooth route above.
+          <div class="cfg-banner err" v-if="connected">{{ blocked }}</div>
+
+          <div class="cfg-banner err" v-if="!anyUsb">
+            This browser has no WebUSB or Web Serial, so it cannot flash over USB.
+            Chrome or Edge on desktop can; Firefox, Safari and every browser on
+            iOS cannot.
           </div>
 
-          <div class="cfg-banner err" v-if="!webUsbAvailable">
-            This browser has no WebUSB. Chrome or Edge on desktop can flash;
-            Firefox, Safari and every browser on iOS cannot.
+          <div class="cfg-banner err" v-else-if="manifestError">
+            No firmware to flash: {{ manifestError }}.
           </div>
 
           <template v-else>
-            <div class="cfg-section-sub">Probe</div>
-            <div class="flash-step">
-              <button v-if="!attached" class="primary" :disabled="!!busy" @click="connect">
-                {{ busy === "connecting" ? "Connecting…" : "Connect probe" }}
-              </button>
-              <template v-else>
-                <span class="flash-ok">▲</span>
-                <span class="mono">DPIDR 0x{{ hex(dpidr) }}</span>
-                <span class="flash-note" v-if="recognised">nRF54L</span>
-                <span class="flash-note warn" v-else>
-                  unrecognised part — expected 0x{{ hex(EXPECTED_DPIDR) }}
-                </span>
-                <span class="grow"></span>
-                <button class="small" :disabled="!!busy" @click="disconnect">Release</button>
-              </template>
+            <!-- Which board is in front of the user. The browser cannot say
+                 until permission has been granted for one specific device, and
+                 the prompt differs per API, so this is asked rather than
+                 detected — after which each flasher does detect, and refuses a
+                 mismatch. -->
+            <template v-if="entries.length > 1">
+              <div class="cfg-section-sub">Which board</div>
+              <div class="flash-boards" role="radiogroup" aria-label="Board to flash">
+                <button v-for="e in entries" :key="e.board"
+                        class="flash-board" :class="{ on: e.board === board }"
+                        role="radio" :aria-checked="e.board === board"
+                        :disabled="!!running" @click="board = e.board">
+                  {{ boardLabel(e.board) }}
+                </button>
+              </div>
+            </template>
+
+            <p class="flash-note" v-if="!entry">
+              Pick the board you are flashing. Each one is reached a different
+              way, and the steps below change with it.
+            </p>
+
+            <template v-else>
+            <div class="cfg-banner err" v-if="!usable">
+              This board is flashed through {{ flasher.label }}, which needs
+              {{ flasher.api === 'webusb' ? 'WebUSB' : 'Web Serial' }} — and this
+              browser has not got it.
             </div>
 
-            <div class="cfg-banner err" v-if="protectedPart">
-              The debug port answers but memory access is blocked (APPROTECT).
-              A mass erase is the only way in, and it wipes the chip.
-              <button class="small danger" :disabled="!!busy" @click="massErase">
-                {{ busy === "erasing" ? "Erasing…" : "Mass erase & unlock" }}
-              </button>
-            </div>
-
-            <div class="cfg-section-sub">Write</div>
-
-            <!-- Each button is the whole operation: fetch or pick, check, halt,
-                 write, verify, reset. -->
-            <div class="flash-step">
-              <button class="primary" :disabled="!ready || !newest" @click="flashNewest">
-                {{ busy === "flashing" ? "Flashing…" : "Flash newest" }}
-              </button>
-              <span class="flash-note" v-if="newest">
-                <strong v-if="newest.version">v{{ newest.version }}</strong><template
-                  v-if="newest.version && newest.tag"> · </template><template
-                  v-if="newest.tag">{{ newest.tag }}</template><template
-                  v-if="newest.bytes"> · {{ fmtSize(newest.bytes) }}</template><template
-                  v-if="newest.published"> · {{ newest.published.slice(0, 10) }}</template>
-              </span>
-              <span class="flash-note warn" v-else>
-                no published build available{{ newestError ? " (" + newestError + ")" : "" }}
-              </span>
-            </div>
-
-            <div class="flash-step">
-              <label class="btn" :class="{ disabled: !ready }">
-                {{ busy === "flashing" ? "Flashing…" : "Flash custom .hex…" }}
-                <input type="file" accept=".hex" :disabled="!ready" @change="flashCustom">
-              </label>
-              <span class="flash-note">
-                writes the file you choose, straight away — use <code>merged.hex</code>,
-                not <code>zephyr.hex</code>
-              </span>
-            </div>
-
-            <div class="flash-step" v-if="!attached || connected">
-              <span class="flash-note err" v-if="connected">disconnect Bluetooth first</span>
-              <span class="flash-note" v-else>connect the probe first</span>
-            </div>
-
-            <div class="flash-progress" v-if="progress.shown">
-              <div class="bar"><div class="fill" :style="{ width: progress.pct + '%' }"></div></div>
-              <span class="mono">{{ progress.label }} {{ progress.pct }}%</span>
-            </div>
-
-            <pre class="flash-log" v-if="lines.length"><span v-for="l in lines" :key="l.id"
-              :class="l.cls">{{ l.msg }}\n</span></pre>
+            <template v-else>
+              <ProbeFlash v-if="entry.usb === 'cmsis-dap'" :entry="entry" :blocked="blocked"
+                          @busy="running = $event" />
+              <SerialFlash v-else :key="entry.board" :entry="entry" :blocked="blocked"
+                           @busy="running = $event" />
+            </template>
+            </template>
           </template>
         </div>
 
         <div class="cfg-foot">
-          <span class="cfg-status err" v-if="error">{{ error }}</span>
           <span class="grow"></span>
-          <button :disabled="!!busy" @click="close">Close</button>
+          <button :disabled="!!running" @click="close">Close</button>
         </div>
 
       </div>
     </div>
   `,
 };
-
-async function sha256Hex(buf) {
-  const digest = await crypto.subtle.digest("SHA-256", buf);
-  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
-}

@@ -129,3 +129,29 @@ export function padToWords(chunk) {
 }
 
 export { Chunk };
+
+/*
+ * Collapse chunks into one contiguous buffer, gaps filled with 0xFF.
+ *
+ * The opposite of what `splitForWrite` is for. A probe writes chunks and
+ * skips the gaps; a bootloader that takes a stream of bytes with no addresses
+ * in it — Nordic Legacy DFU is one — cannot skip anything, so a gap has to
+ * become bytes. 0xFF is the erased value, so filling a gap writes what the
+ * erase already left there.
+ *
+ * `from` is the address the first byte of the result corresponds to. It is
+ * required rather than defaulted to `lowAddress`, because the caller is the
+ * only thing that knows where the receiving bootloader intends to put this:
+ * getting it wrong shifts the whole image by the difference, which produces a
+ * device that flashes cleanly and boots nothing.
+ */
+export function flatten(chunks, from) {
+  const lo = lowAddress(chunks);
+  if (lo < from) {
+    throw new Error(`image starts at 0x${lo.toString(16)}, below the 0x${from.toString(16)} ` +
+                    `it would be written at`);
+  }
+  const out = new Uint8Array(highAddress(chunks) + 1 - from).fill(0xff);
+  for (const c of chunks) out.set(c.bytes, c.address - from);
+  return out;
+}

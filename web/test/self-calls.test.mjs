@@ -76,5 +76,38 @@ for (const file of files) {
     called.includes("emit") && !declared.has("emit"));
 }
 
+/* --- every suite in web/test/ actually runs in CI ------------------------
+ *
+ * A test file nobody runs is worse than no test file: it reads as coverage on
+ * the file listing, it goes green locally on the one machine that remembers
+ * to run it, and it rots. Adding a suite means adding a step, and there is
+ * nothing in the shape of `web/test/*.test.mjs` that makes CI notice a new
+ * one — so this notices instead.
+ *
+ * Grepping for the filename rather than parsing the YAML on purpose: a suite
+ * is "run" if the workflow mentions it at all, however it is invoked. Several
+ * are run from a multi-line `run:` block rather than their own step.
+ */
+{
+  const wf = join(WEB, "..", ".github", "workflows", "web.yml");
+  let text = null;
+  try { text = readFileSync(wf, "utf8"); } catch { /* not checked out */ }
+
+  if (!text) {
+    console.log("  skip  web.yml not readable; CI suite coverage not checked");
+  } else {
+    const suites = readdirSync(join(WEB, "test"))
+      .filter(f => f.endsWith(".test.mjs")).sort();
+    const missing = suites.filter(f => !text.includes(f));
+    t("every test suite is run by web.yml", missing.length === 0,
+      missing.join(", ") + " — add a step, or the suite only ever runs locally");
+    /* And the converse: a step naming a file that no longer exists fails the
+     * whole workflow on the next push, which is a worse way to find out. */
+    const named = [...text.matchAll(/web\/test\/([\w.-]+\.test\.mjs)/g)].map(m => m[1]);
+    const gone = [...new Set(named)].filter(f => !suites.includes(f));
+    t("web.yml names no suite that has been removed", gone.length === 0, gone.join(", "));
+  }
+}
+
 console.log(bad ? `\n${bad} FAILURES` : "\nall self-call checks passed");
 process.exit(bad ? 1 : 0);

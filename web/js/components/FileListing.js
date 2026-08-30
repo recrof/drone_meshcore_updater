@@ -1,36 +1,63 @@
 import { computed } from "../vue.js";
 import {
-  connected, entries, listError, path,
-  activateEntry, rename, remove, flashZip,
+  connected, deviceTransports, entries, listError, path,
+  activateEntry, rename, remove, flashFile, fileInfo, inspectFile,
 } from "../store.js";
 import { fmtSize, joinPath } from "../lib/format.js";
 import { isConfigPath } from "../lib/config-file.js";
 import { isLogPath } from "../lib/log-file.js";
+import { TRANSPORT, transportForName, transportsFromMask } from "../lib/firmware-image.js";
+
+/* Said in the tooltip of a disabled flash button. Names the transport the
+ * file wants, because "this updater cannot flash it" invites the reader to
+ * suspect the file. */
+const BLOCKED = {
+  [TRANSPORT.BLE]:
+    "this updater has no Bluetooth DFU transport, so it cannot send a .zip",
+  [TRANSPORT.WIFI]:
+    "this updater has no WiFi transport, so it cannot send a raw .bin — " +
+    "that route is built only for boards with a WiFi radio",
+};
 
 export default {
   name: "FileListing",
   setup() {
-    const rows = computed(() => entries.value.map(e => {
-      const full = joinPath(path.value, e.name);
-      const isDir = e.type === 1;
-      const isCfg = !isDir && isConfigPath(full);
-      const isLog = !isDir && isLogPath(full);
-      return {
-        ...e,
-        isDir,
-        /* .zip files get a "flash" action first — it's the primary reason
-         * files land on this device.
-         */
-        isZip: !isDir && /\.zip$/i.test(e.name),
-        isCfg,
-        isLog,
-        full,
-        hint: isDir ? "Folder"
-            : isCfg ? "Edit configuration"
-            : isLog ? "View log"
-            : "Download",
-      };
-    }));
+    const rows = computed(() => {
+      /* transportsFromMask(null) is [BLE]: every build ever shipped has had
+       * it, so firmware too old to answer fsxCaps still offers .zip. */
+      const have = deviceTransports.value ?? transportsFromMask(null);
+      return entries.value.map(e => {
+        const full = joinPath(path.value, e.name);
+        const isDir = e.type === 1;
+        const isCfg = !isDir && isConfigPath(full);
+        const isLog = !isDir && isLogPath(full);
+        /* Which radio this file would need, from its name alone — the device
+         * has not necessarily been asked about it, and may never be. */
+        const needs = isDir ? null : transportForName(e.name);
+        return {
+          ...e,
+          isDir,
+          /* Anything the device can have an opinion about: a .zip for the
+           * Bluetooth transport, a .bin for the WiFi one. Both get a "flash"
+           * action — it is the primary reason files land on this device — and
+           * both get "check", because "what is this file" is a useful answer
+           * even when the answer is that it cannot be sent. */
+          isFirmware: needs !== null,
+          needs,
+          /* Asked of the device at connect (fsxCaps) rather than inferred
+           * from the board, so a build without the WiFi transport says so
+           * itself instead of the client guessing from a table. */
+          canFlash: needs !== null && have.includes(needs),
+          isCfg,
+          isLog,
+          full,
+          hint: isDir ? "Folder"
+              : isCfg ? "Edit configuration"
+              : isLog ? "View log"
+              : "Download",
+        };
+      });
+    });
 
     const empty = computed(() => {
       if (!connected.value) return listError.value || "Connect to a device to browse files.";
@@ -41,7 +68,31 @@ export default {
 
     const activate = (row) => activateEntry(row.full, row.isDir);
 
-    return { rows, empty, fmtSize, activate, rename, remove, flashZip };
+    /* Why the flash button is greyed out, for its tooltip. Empty when it is
+     * not — a title on a live button is noise. */
+    const whyBlocked = (row) =>
+      row.canFlash ? "" : (BLOCKED[row.needs] ?? "");
+
+    /* One line describing what the device found, or null while nothing has
+     * been asked. Deliberately terse: the full reason is the tooltip, because
+     * a listing row is not the place for a paragraph. */
+    const verdict = (row) => {
+      const info = fileInfo[row.full];
+      if (!info || info.size !== row.size) return null;
+      if (info.pending) return { cls: "", text: "checking…" };
+      if (info.unavailable) return { cls: "warn", text: "could not check", full: info.unavailable };
+      const label = [info.name, info.version].filter(Boolean).join(" ");
+      if (info.flashable) {
+        return { cls: "ok", text: label ? `ok — ${label}` : "ok", full: info.reason };
+      }
+      return { cls: "err", text: info.reason || "not flashable", full: info.reason };
+    };
+
+    return {
+      rows, empty, fmtSize, activate, rename, remove, flashFile,
+      verdict, check: (row) => inspectFile(row.full, row.size),
+      whyBlocked,
+    };
   },
   template: /* html */ `
     <main>
@@ -58,11 +109,20 @@ export default {
                                       { cfg: row.isCfg, log: row.isLog }]"
                 :title="row.hint" @click="activate(row)">
               {{ row.name }}
+              <div v-if="verdict(row)" class="file-verdict" :class="verdict(row).cls"
+                   :title="verdict(row).full || ''">{{ verdict(row).text }}</div>
             </td>
             <td class="size">{{ row.isDir ? "" : fmtSize(row.size) }}</td>
             <td class="actions">
-              <button v-if="row.isZip" class="primary small"
-                      @click.stop="flashZip(row.full)">flash</button>
+              <!-- Shown disabled rather than hidden when this updater has
+                   no transport for the file. An absent button is
+                   indistinguishable from a bug, and the reason it is absent
+                   is the single most useful thing to say here. -->
+              <button v-if="row.isFirmware" class="primary small"
+                      :disabled="!row.canFlash" :title="whyBlocked(row)"
+                      @click.stop="flashFile(row.full)">flash</button>
+              <button v-if="row.isFirmware" class="small"
+                      @click.stop="check(row)">check</button>
               <button @click.stop="rename(row.full)">rename</button>
               <button class="danger" @click.stop="remove(row.full, row.isDir)">delete</button>
             </td>

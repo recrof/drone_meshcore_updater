@@ -1,11 +1,12 @@
 import { ref, computed, watch } from "../vue.js";
-import { smp, connected, log as appLog } from "../store.js";
+import { smp, connected, log as appLog, deviceBoard } from "../store.js";
 import { fmtSize } from "../lib/format.js";
+import {
+  loadIndex, entryForBoard, entriesWithDfu, assetUrl,
+} from "../lib/firmware-manifest.js";
 import {
   readUpdateImage, versionString, normalizeVersion, sameVersion,
 } from "../lib/mcuboot-image.js";
-
-const FIRMWARE_DIR = "firmware/";
 
 /* CBOR byte strings arrive as Uint8Array; compare by value, not identity. */
 function sameHash(a, b) {
@@ -13,7 +14,6 @@ function sameHash(a, b) {
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
 }
-const MANIFEST_URL = `${FIRMWARE_DIR}manifest.json`;
 
 /*
  * Update the updater over Bluetooth.
@@ -34,6 +34,15 @@ const MANIFEST_URL = `${FIRMWARE_DIR}manifest.json`;
  * off and on puts the old one back. Confirming automatically would throw that
  * away, so this component makes confirmation a separate, deliberate act and
  * says what happens if you skip it.
+ *
+ * The image is always the one staged for this device's board — there is no
+ * "upload a file you choose". Over Bluetooth that choice was the sharpest
+ * edge in the app: the right file is dfu_application.zip or
+ * zephyr.signed.bin, merged.hex is wrong and MCUboot cannot tell you so
+ * (it validates a signature, not an architecture), and the device this runs
+ * against is by definition one nobody can reach to recover. The index now
+ * carries an entry per board and the device reports which board it is, so
+ * the correct image is a lookup rather than a decision.
  */
 export default {
   name: "BleUpdate",
@@ -43,7 +52,9 @@ export default {
     const progress = ref(0);
     const slots = ref([]);
     const newest = ref(null);
-    const picker = ref(null);
+    /* Every board the release published, so the UI can say "this board is not
+     * among them" rather than the older, wronger "no build available". */
+    const publishedBoards = ref([]);
 
     /* The running image, once it is testing but not yet permanent. This is
      * what survives a reboot and is why the UI is state-driven rather than a
@@ -69,15 +80,62 @@ export default {
     const alreadyOnLatest = computed(() =>
       sameVersion(availableVersion.value, runningVersion.value));
 
-    const slotSummary = computed(() => {
-      if (!slots.value.length) return "";
-      if (slots.value.length === 1) {
-        return "only one image on the device — nothing is staged in the spare slot";
-      }
-      return staged.value?.pending
-        ? "an update is staged and will be swapped in on the next reboot"
-        : "the spare slot holds the previous image";
+    /* Is the offered image even for this board?
+     *
+     * MCUboot cannot answer this. It validates a signature, not an
+     * architecture, and every board this project builds for signs with the
+     * same key — so an nRF54L image pushed to an nRF52840 verifies, swaps in
+     * on reboot, and then does not boot. (Recoverable: the board's own USB
+     * bootloader is still there. Alarming all the same, after a multi-minute
+     * transfer.)
+     *
+     * Both halves are optional and each absence means something different, so
+     * they are distinguished rather than lumped into one falsy check: a
+     * manifest staged before board fields existed, or firmware predating
+     * os_mgmt info. Either way the answer is "cannot tell", which warns; only
+     * a positive mismatch blocks. */
+    const boardMismatch = computed(() => {
+      const want = newest.value?.board;
+      const have = deviceBoard.value;
+      if (!want || !have) return null;
+      return want === have ? null : { want, have };
     });
+    const boardUnknown = computed(() =>
+      !!newest.value && (!newest.value.board || !deviceBoard.value));
+
+    /* The device says which board it is, and the index has an entry per board,
+     * so the common case is now a *selection* rather than a refusal. This is
+     * only null when the release genuinely published nothing for this part —
+     * which is a different sentence, and it gets one. */
+    const noBuildForBoard = computed(() =>
+      !newest.value && !!deviceBoard.value && publishedBoards.value.length > 0);
+
+    /*
+     * One line saying where the device stands.
+     *
+     * This replaced a table of MCUboot slots — slot number, version, active,
+     * pending, confirmed. That is an accurate picture of what the bootloader
+     * is doing and it answers a question almost nobody has. What someone
+     * holding a repeater wants to know is whether the thing is up to date,
+     * and if not, what it would become. Slot state is still read (it is what
+     * `needsConfirm` and the identical-image check are computed from); it is
+     * just no longer the interface.
+     */
+    const statusLine = computed(() => {
+      if (!connected.value) return "";
+      if (!runningVersion.value) return "";
+      if (alreadyOnLatest.value) return `Up to date — running v${runningVersion.value}`;
+      if (availableVersion.value) {
+        return `Running v${runningVersion.value} · v${availableVersion.value} available`;
+      }
+      return `Running v${runningVersion.value}`;
+    });
+
+    /* What just happened, in one sentence. Set on a successful update and
+     * cleared when anything else starts, so the screen answers "did it work?"
+     * without the reader reconstructing it from a progress bar that has
+     * finished and a device that has gone away to reboot. */
+    const outcome = ref("");
 
     async function refreshState() {
       if (!connected.value) { slots.value = []; return; }
@@ -98,14 +156,28 @@ export default {
 
     async function loadManifest() {
       try {
-        const res = await fetch(MANIFEST_URL, { cache: "no-cache" });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const m = await res.json();
-        newest.value = m.dfu ? m : null;
+        const index = await loadIndex();
+        const withDfu = entriesWithDfu(index);
+        publishedBoards.value = withDfu.map(b => b.board);
+
+        /* Select the entry for the board the device reports. Falling back to
+         * "the only one there is" when the device does not report a board
+         * keeps firmware predating os_mgmt info updatable — the boardUnknown
+         * warning below still fires, so the choice is visible rather than
+         * silent. With several boards published and no way to tell them
+         * apart, there is no safe pick and we offer none. */
+        const forBoard = entryForBoard(index, deviceBoard.value);
+        newest.value = forBoard?.dfu ? forBoard
+                     : (!deviceBoard.value && withDfu.length === 1 ? withDfu[0] : null);
       } catch {
         newest.value = null;
+        publishedBoards.value = [];
       }
     }
+    /* The board arrives with the first state fetch, after the manifest has
+     * already been read once — so re-select when it does, or a device that
+     * reported late would be told there is nothing for it. */
+    watch(deviceBoard, () => { if (connected.value) loadManifest(); });
 
     /*
      * Read twice on connect. The firmware confirms a freshly swapped image
@@ -163,27 +235,28 @@ export default {
       appLog("marked for test — rebooting", "ok");
 
       await smp.osReset();
-      appLog("device rebooting into the new image. Reconnect, then Confirm.", "ok");
+      appLog("device rebooting into the new image", "ok");
+      outcome.value =
+        `Updated to v${normalizeVersion(spare.version) ?? "?"}. The device is restarting; ` +
+        `reconnect to check it came back. It confirms itself once it does.`;
     }
 
     async function updateNewest() {
+      outcome.value = "";
       try {
         await guard("uploading", async () => {
-          const url = FIRMWARE_DIR + newest.value.dfu;
+          /* Checked here as well as in the template's :disabled, because a
+           * disabled button is a hint and this is the actual guarantee. */
+          if (boardMismatch.value) {
+            throw new Error(
+              `this build is for ${boardMismatch.value.want} and the device is ` +
+              `${boardMismatch.value.have} — it would install and then fail to boot`);
+          }
+          const url = assetUrl(newest.value, newest.value.dfu);
           const res = await fetch(url, { cache: "no-cache" });
           if (!res.ok) throw new Error(`could not fetch ${url}: HTTP ${res.status}`);
           await apply(new Uint8Array(await res.arrayBuffer()), newest.value.dfu);
         });
-      } catch { /* reported */ }
-    }
-
-    async function updateCustom(e) {
-      const file = e.target.files?.[0];
-      e.target.value = "";
-      if (!file) return;
-      try {
-        await guard("uploading", async () =>
-          apply(new Uint8Array(await file.arrayBuffer()), file.name));
       } catch { /* reported */ }
     }
 
@@ -202,10 +275,14 @@ export default {
     }
 
     return {
-      connected, busy, error, progress, slots, newest, picker,
-      active, needsConfirm, staged, slotSummary, fmtSize,
-      availableVersion, runningVersion, alreadyOnLatest, normalizeVersion,
-      updateNewest, updateCustom, confirm, refreshState,
+      /* `slots`, `active` and `staged` are deliberately not exposed: they are
+       * how needsConfirm / alreadyOnLatest are computed, not something the
+       * template renders any more. */
+      connected, busy, error, progress, newest,
+      boardMismatch, boardUnknown, deviceBoard, publishedBoards, noBuildForBoard,
+      needsConfirm, statusLine, outcome, fmtSize,
+      availableVersion, runningVersion, alreadyOnLatest,
+      updateNewest, confirm, refreshState,
     };
   },
   template: /* html */ `
@@ -222,12 +299,11 @@ export default {
            happen — worth saying, since the manual button is then the only
            thing standing between the update and a revert. -->
       <div class="cfg-banner warn" v-else-if="needsConfirm">
-        <strong>This firmware is running on trial.</strong> It confirms itself
-        once a Bluetooth connection proves it works, so this should clear on its
-        own within a second or two. If it persists, confirm it here — otherwise
-        MCUboot puts the previous version back on the next reset.
+        <strong>This update is still on trial.</strong> It normally confirms
+        itself a second or two after connecting; if this stays, keep it — or the
+        device goes back to the previous version next time it restarts.
         <button class="small primary" :disabled="!!busy" @click="confirm">
-          {{ busy === "confirming" ? "Confirming…" : "Confirm this update" }}
+          {{ busy === "confirming" ? "Keeping…" : "Keep this update" }}
         </button>
         <button class="small" :disabled="!!busy" @click="refreshState">Re-check</button>
       </div>
@@ -236,37 +312,54 @@ export default {
         <!-- Uploading what is already running is refused by the device after
              the whole transfer, so say it before rather than after. -->
         <div class="cfg-banner" v-if="alreadyOnLatest">
-          Already running <strong>v{{ runningVersion }}</strong> — the available
-          build is the same version. Uploading it would be refused: the device
-          identifies images by hash, and cannot mark the running slot for test.
+          Already running <strong>v{{ runningVersion }}</strong>, which is the
+          newest published build. Nothing to do.
         </div>
 
         <div class="flash-step">
-          <button class="primary" :disabled="!!busy || !newest || alreadyOnLatest"
+          <button class="primary" :disabled="!!busy || !newest || alreadyOnLatest || !!boardMismatch"
                   @click="updateNewest">
             {{ busy === "uploading" ? "Uploading…" : "Update over Bluetooth" }}
           </button>
+          <!-- Version and size only. The release tag duplicates the version,
+               the running version is in the status line below, and the board
+               is only worth saying when it is *wrong* — which has its own
+               banner. -->
           <span class="flash-note" v-if="newest">
             <strong v-if="availableVersion">v{{ availableVersion }}</strong><template
-              v-if="availableVersion && newest.tag"> · </template><template
-              v-if="newest.tag">{{ newest.tag }}</template><template
-              v-if="newest.dfuBytes"> · {{ fmtSize(newest.dfuBytes) }}</template><template
-              v-if="runningVersion && !alreadyOnLatest">
-              · running v{{ runningVersion }}</template>
+              v-if="newest.dfuBytes"> · {{ fmtSize(newest.dfuBytes) }}</template>
           </span>
-          <span class="flash-note warn" v-else>no published build available</span>
+          <span class="flash-note warn" v-else-if="!noBuildForBoard">no published build available</span>
+          <span class="flash-note warn" v-else>
+            nothing published for <strong>{{ deviceBoard }}</strong>
+          </span>
         </div>
 
-        <div class="flash-step">
-          <label class="btn" :class="{ disabled: !!busy }">
-            Upload custom image…
-            <input type="file" accept=".zip,.bin" :disabled="!!busy" @change="updateCustom">
-          </label>
-          <span class="flash-note">
-            <code>dfu_application.zip</code> or <code>zephyr.signed.bin</code> —
-            not <code>merged.hex</code>
-          </span>
+        <!-- The index carries an entry per board, so "no build" now has two
+             distinct causes and they read very differently to someone holding
+             the device: nothing was released at all, or this particular part
+             was not among what was released. -->
+        <div class="flash-note warn" v-if="noBuildForBoard">
+          This release published {{ publishedBoards.join(", ") }} — but nothing for
+          <strong>{{ deviceBoard }}</strong>, which is what this device reports.
         </div>
+
+        <!-- A positive mismatch blocks; "cannot tell" only warns. MCUboot
+             checks the signature and not the architecture, and every board
+             here signs with the same key, so nothing downstream catches
+             this. -->
+        <div class="flash-note err" v-if="boardMismatch">
+          This build is for <strong>{{ boardMismatch.want }}</strong> and the device
+          reports <strong>{{ boardMismatch.have }}</strong>. It would verify, install,
+          and then fail to boot — recover with USB. Update blocked.
+        </div>
+        <div class="flash-note warn" v-else-if="boardUnknown">
+          Cannot tell whether this build matches the device
+          <template v-if="!deviceBoard">(this firmware does not report its board)</template>
+          <template v-else>(the published build does not say which board it is for)</template>.
+          Check before updating.
+        </div>
+
       </template>
 
       <div class="flash-progress" v-if="busy === 'uploading'">
@@ -275,16 +368,9 @@ export default {
       </div>
 
       <p class="cfg-status err" v-if="error">{{ error }}</p>
+      <div class="cfg-banner ok" v-if="outcome">{{ outcome }}</div>
 
-      <div class="upd-slots" v-if="slots.length">
-        <span v-for="s in slots" :key="s.slot" class="upd-slot">
-          slot {{ s.slot }}: v{{ normalizeVersion(s.version) }}<template v-if="s.active"> · running</template><template
-            v-if="s.pending"> · pending</template><template
-            v-if="s.active && !s.confirmed"> · unconfirmed</template><template
-            v-if="s.active && s.confirmed"> · confirmed</template>
-        </span>
-        <span class="upd-summary">{{ slotSummary }}</span>
-      </div>
+      <p class="upd-status" v-if="statusLine">{{ statusLine }}</p>
     </div>
   `,
 };

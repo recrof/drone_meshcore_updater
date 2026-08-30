@@ -98,10 +98,108 @@ export function serializeMapping(rules) {
     .join("|");
 }
 
-/* config.h: the nRF54L radio has fewer allowed TX levels than the nRF52840.
- * Anything not in this list is silently clipped by the SoftDevice.
+/* config.h: the union of every radio's BLE TX ladder, because one device
+ * schema serves four boards on two vendors' silicon and the ladders differ.
+ *
+ *   nRF54L     -40, -20, -16, -12, -8, -4, 0, 3, 6, 8
+ *   Espressif  -15, -12, -9, -6, -3, 0, 3, 6, 9, 12, 15, 18, 20
+ *
+ * **A level in this list is not necessarily reachable on the device in front
+ * of you.** An nRF part tops out at +8 and its SoftDevice clips silently;
+ * Espressif's driver rounds *down* to its nearest level, so a request of 8
+ * lands at 6. The firmware reads the selected level back out of the HCI
+ * response and logs `requested X -> adv Y`, warning when they differ, so the
+ * over-ask is reported rather than believed. Offering the union beats
+ * offering the intersection: capping the list at +8 would put the ESP32's top
+ * 12 dB out of reach of the only UI that sets this.
  */
-export const TX_POWER_LEVELS = [-40, -20, -16, -12, -8, -4, 0, 3, 6, 8];
+export const TX_POWER_LEVELS =
+  [-40, -20, -16, -15, -12, -9, -8, -6, -4, -3, 0, 3, 6, 8, 9, 12, 15, 18, 20];
+
+/* The ESP32's WiFi ladder, in dBm. `esp_wifi_set_max_tx_power()` takes
+ * quarter-dBm and rounds *down* to one of these, silently — its own docs give
+ * the mapping as {8,20,28,34,44,52,56,60,66,72,80} quarter-dBm. Offering the
+ * ladder rather than a free number means the value that comes back from the
+ * device is the value that was asked for. */
+export const WIFI_TX_POWER_LEVELS = [2, 5, 7, 8, 11, 13, 14, 15, 16, 18, 20];
+
+/* ---- per-platform pacing defaults -------------------------------------
+ *
+ * Mirrors updater/src/dfu_tuning.h, which is where the reasoning lives. The
+ * short version: `erase_pause_ms` is anchored to a write-completion callback
+ * from the *updater's* controller, and completion does not mean the same
+ * thing on every controller, so the same target needs different numbers
+ * depending on which board is doing the flashing.
+ *
+ * Keyed on the SoC family rather than the board, for the same reason the
+ * firmware is: two boards on one part share a controller and would otherwise
+ * be two copies of one measurement.
+ *
+ * `measured` records whether the *failure boundaries* were established on
+ * this platform, not whether the defaults were. Both platforms' defaults are
+ * measured working points; only the nRF has had the edges mapped, and the
+ * advisories below say less where less is known rather than restating the
+ * nRF's numbers as though they were general.
+ */
+export const TUNING_PLATFORMS = {
+  nordic: {
+    label: "Nordic nRF5x",
+    pkt_gap_ms: 4,
+    erase_pause_ms: 100,
+    measured: true,
+    /* Uniform pacing failed at 11 ms and at 15 ms, completed at 18, all at
+     * 244 B/packet. */
+    uniformFloorMs: 18,
+  },
+  espressif: {
+    label: "Espressif ESP32",
+    pkt_gap_ms: 7,
+    erase_pause_ms: 150,
+    measured: false,
+    uniformFloorMs: null,
+  },
+  /* The ESP32-C5 does NOT want the ESP32-S3's numbers — measured on hardware,
+   * 2026-08-30: erase_pause 100 (not 150) covers the target's page erase here,
+   * and the gap can come down a long way. See updater/src/dfu_tuning.h, which
+   * carries the measurement and the reason this ships 4 rather than the 2 that
+   * completed. Sharing a vendor is not sharing a controller's timing. */
+  espressif_c5: {
+    label: "Espressif ESP32-C5",
+    pkt_gap_ms: 4,
+    erase_pause_ms: 100,
+    measured: false,
+    uniformFloorMs: null,
+  },
+};
+
+/* Which platform is a board target on? Derived from the target string the
+ * device reports over os_mgmt ("xiao_esp32s3/esp32s3/procpu"), because that
+ * is already on the wire and a new part gets classified without a firmware
+ * change — an ESP32-C6 lands on `espressif` the first time one boots.
+ *
+ * Null for anything unrecognised, and for firmware too old to report a board
+ * at all. Callers treat null as `nordic`: board reporting predates none of
+ * the ESP32 work, so a device that cannot name itself is an nRF.
+ */
+export function platformFor(board) {
+  const s = String(board ?? "");
+  /* Before the general esp32 test, or the C5 inherits the S3's pacing — which
+   * is measurably wrong for it. Order matters here. */
+  if (/esp32c5/i.test(s)) return "espressif_c5";
+  if (/esp32/i.test(s)) return "espressif";
+  if (/nrf5/i.test(s)) return "nordic";
+  return null;
+}
+
+export const tuningFor = (board) => TUNING_PLATFORMS[platformFor(board) ?? "nordic"];
+
+/* The default for one field on one board. Fields without a `defByPlatform`
+ * are the same everywhere, which is most of them. */
+export function defFor(field, board) {
+  const per = field.defByPlatform;
+  if (!per) return field.def;
+  return tuningFor(board)[field.key] ?? field.def;
+}
 
 export const CONFIG_SCHEMA = [
   {
@@ -219,11 +317,33 @@ export const CONFIG_SCHEMA = [
     },
   },
   {
+    key: "wifi_ota",
+    label: "wifi_ota",
+    title: "Try WiFi/ElegantOTA targets",
+    type: "bool",
+    def: true,
+    desc: `MeshCore's ESP32 repeaters do not do Bluetooth DFU at all — they
+           raise a WiFi AP called MeshCore-OTA and take an upload over HTTP.
+           This lets the updater try that as well as Bluetooth, and has no
+           effect on hardware with no WiFi radio — which is every nRF board.
+           Rarely needs changing: flashing a named file picks the transport
+           from the file itself (.zip is Bluetooth, .bin is WiFi) and never
+           scans for the other, and auto-flash narrows the same way from the
+           mapping rules. This only decides the cases that remain genuinely
+           ambiguous.`,
+    note: (v) => (v
+      ? "only consulted when the updater cannot tell which transport a run needs"
+      : "Bluetooth only, whatever the hardware can do"),
+  },
+  {
     key: "pkt_gap_ms",
     label: "pkt_gap_ms",
     title: "Inter-packet gap",
     type: "int",
+    /* Per platform — see TUNING_PLATFORMS. `def` is the fallback used when
+     * the device has not said which board it is. */
     def: 4,
+    defByPlatform: true,
     min: 0,
     max: 1000,
     unit: "ms",
@@ -246,6 +366,7 @@ export const CONFIG_SCHEMA = [
     title: "Pause at each flash-page boundary",
     type: "int",
     def: 100,
+    defByPlatform: true,
     min: 0,
     max: 1000,
     unit: "ms",
@@ -254,11 +375,22 @@ export const CONFIG_SCHEMA = [
            packets meanwhile. This waits out that stall after the one packet per
            page that triggers it, so the other ~16 can go at full speed. 0
            disables it and paces every packet as if it were the expensive one,
-           which is correct but costs about half the throughput.`,
-    note: (v) => {
+           which is correct but costs about half the throughput. The value
+           needed is per-board: it is timed from a write-completion callback,
+           and completion means something different on each controller — the
+           nRF wants 100, the ESP32 wants 150 for the same target.`,
+    note: (v, board) => {
       const n = Number(v);
-      if (n === 0) return "uniform pacing — pkt_gap_ms must then be at least 18";
-      if (n < 90) return `${n} ms may not cover the ~100 ms page erase`;
+      const p = tuningFor(board);
+      if (n === 0) {
+        return p.uniformFloorMs
+          ? `uniform pacing — pkt_gap_ms must then be at least ${p.uniformFloorMs}`
+          : "uniform pacing — the floor for it has never been measured on this board";
+      }
+      if (n < p.erase_pause_ms * 0.9) {
+        return `${n} ms is below the ${p.erase_pause_ms} ms that works on ` +
+               `${p.label}, and may not cover the target's page erase`;
+      }
       return "erase-aware pacing: one expensive packet per 4 KB, the rest cheap";
     },
   },
@@ -301,14 +433,41 @@ export const CONFIG_SCHEMA = [
       : "20 B/packet — the peer's accumulator coalesces them to 240 B before flashing"),
   },
   {
-    key: "tx_power",
-    label: "tx_power",
-    title: "Transmit power",
+    key: "ble_tx_power",
+    label: "ble_tx_power",
+    title: "Bluetooth transmit power",
     type: "select",
     def: 8,
     options: TX_POWER_LEVELS.map(v => ({ value: v, label: `${v > 0 ? "+" : ""}${v} dBm` })),
-    desc: `Radio TX power. The nRF54L only implements the levels listed here;
-           any other value is silently clipped by the SoftDevice.`,
+    desc: `Bluetooth TX power, applied to advertising, scanning and every
+           connection. Only the levels listed here are implemented; the radio
+           rounds anything else to a neighbour, and the boot log prints what
+           it actually selected.
+
+           More is not always better. At very short range a strong signal
+           saturates the receiver and the link gets *worse*, so a target on
+           the same desk may need less power rather than more. Turn it down
+           before assuming the problem is distance.
+
+           Was called \`tx_power\`. The device still accepts the old name and
+           says so in its log, so an existing config.txt keeps working.`,
+  },
+
+  {
+    key: "wifi_tx_power",
+    label: "wifi_tx_power",
+    title: "WiFi transmit power",
+    type: "select",
+    def: 20,
+    options: WIFI_TX_POWER_LEVELS.map(v => ({ value: v, label: `+${v} dBm` })),
+    desc: `WiFi TX power for the ElegantOTA transport, applied once the
+           updater has joined the target's access point. The default is the
+           chip's own maximum, so leaving it alone changes nothing.
+
+           Only meaningful on a board with a WiFi radio — the nRF boards
+           ignore it. The same "more is not always better" caveat applies:
+           this radio and Bluetooth share one antenna, and a target a metre
+           away does not need 20 dBm.`,
   },
 
   {
@@ -359,8 +518,8 @@ export const CONFIG_SCHEMA = [
 /* Flat key → descriptor lookup. */
 export const FIELDS = Object.fromEntries(CONFIG_SCHEMA.map(f => [f.key, f]));
 
-export function defaults() {
-  return Object.fromEntries(CONFIG_SCHEMA.map(f => [f.key, f.def]));
+export function defaults(board = null) {
+  return Object.fromEntries(CONFIG_SCHEMA.map(f => [f.key, defFor(f, board)]));
 }
 
 /* config.c parse_bool(): only the first character is inspected. */
@@ -371,7 +530,7 @@ function parseBool(v) {
 /* Per-field validation, mirroring apply_kv()'s range checks. Returns an
  * error string, or null when the value would be accepted by the firmware.
  */
-export function validateField(field, value) {
+export function validateField(field, value, board = null) {
   if (field.type === "text") {
     const len = new TextEncoder().encode(String(value ?? "")).length;
     if (len > field.maxLength) {
@@ -399,7 +558,7 @@ export function validateField(field, value) {
   }
   if (n < field.min || n > field.max) {
     return `out of range ${field.min}…${field.max} — firmware would ignore it ` +
-           `and keep ${field.def}`;
+           `and keep ${defFor(field, board)}`;
   }
   return null;
 }
@@ -407,10 +566,11 @@ export function validateField(field, value) {
 /* Cross-field advisories: correct per-key, but a combination the measured
  * data says will bite. Non-blocking — these are warnings, not errors.
  */
-export function advisories(values) {
+export function advisories(values, board = null) {
   const out = [];
   const prn = Number(values.prn);
   const gap = Number(values.pkt_gap_ms);
+  const plat = tuningFor(board);
 
   /* Two regimes, and the failure mode differs between them.
    *
@@ -419,36 +579,52 @@ export function advisories(values) {
    * Either wait out that erase once per page, or price every packet as though
    * it were the one that triggers it.
    *
-   * Measured: uniform pacing failed at 11 ms and at 15 ms, completed at 18.
-   * Actual spacing runs ~2.7 ms above pkt_gap_ms (write-completion latency).
+   * The thresholds below split into two kinds, and it matters which is which:
+   *
+   *  - **Target properties** — the ~2.5 ms store, and so the ~3.5 ms floor
+   *    under the steady send rate — hold whatever board is doing the sending.
+   *    A slower controller cannot make the target's flash faster, so 3.5 ms is
+   *    a floor everywhere and is applied everywhere.
+   *  - **Anchored values** — anything timed from our own write-completion
+   *    callback — do not transfer, because completion does not mean the same
+   *    thing on every controller. Those scale off the platform's own
+   *    measured-good number instead of the nRF's.
    */
-  const UNIFORM_FLOOR_MS = 18;
-  const ERASE_MS = 100;
-  /* Traced on hardware: 2.78 ms/packet on the wire was rejected at the first
-   * page boundary, 3.49 ms completed the image. The steady rate has to stay
-   * clear of the target's own ~2.5 ms write rate, so the usable floor is 3.5. */
   const WRITE_RATE_MS = 3.5;
   const erasePause = Number(values.erase_pause_ms);
 
   if (erasePause === 0) {
-    /* The 18 ms floor was measured at 244 B, where each packet is its own
-     * store. Without high_mtu the target's accumulator coalesces ~12 packets
-     * into one 240 B store, so each packet costs a twelfth of the ring. */
-    const packetsPerStore = values.high_mtu ? 1 : 12;
-    const floor = UNIFORM_FLOOR_MS / packetsPerStore;
-    if (gap < floor) {
-      out.push(`pkt_gap_ms=${gap} with erase_pause_ms=0 paces every packet ` +
-               `uniformly, and ${gap} ms is below the ${floor.toFixed(1)} ms ` +
-               `floor at ${values.high_mtu ? "244" : "20"} B/packet. Overflowing ` +
-               `the target's pending-write ring fails the attempt with NO_MEM, ` +
-               `or stalls the packet write outright. Setting erase_pause_ms ` +
-               `instead is roughly twice as fast.`);
+    if (plat.uniformFloorMs === null) {
+      /* Saying "18" here would be inventing a measurement. The uniform-pacing
+       * floor was established on the nRF and nowhere else; on a controller
+       * that needed 50% more erase pause it is very unlikely to be smaller,
+       * and there is no basis for naming a number. */
+      out.push(`erase_pause_ms=0 paces every packet uniformly, and the floor ` +
+               `for that has never been measured on ${plat.label} — only on ` +
+               `the nRF, where it is 18 ms. Erase-aware pacing is both faster ` +
+               `and the only setting this board has been tested at.`);
+    } else {
+      /* The 18 ms floor was measured at 244 B, where each packet is its own
+       * store. Without high_mtu the target's accumulator coalesces ~12 packets
+       * into one 240 B store, so each packet costs a twelfth of the ring. */
+      const packetsPerStore = values.high_mtu ? 1 : 12;
+      const floor = plat.uniformFloorMs / packetsPerStore;
+      if (gap < floor) {
+        out.push(`pkt_gap_ms=${gap} with erase_pause_ms=0 paces every packet ` +
+                 `uniformly, and ${gap} ms is below the ${floor.toFixed(1)} ms ` +
+                 `floor at ${values.high_mtu ? "244" : "20"} B/packet. Overflowing ` +
+                 `the target's pending-write ring fails the attempt with NO_MEM, ` +
+                 `or stalls the packet write outright. Setting erase_pause_ms ` +
+                 `instead is roughly twice as fast.`);
+      }
     }
   } else {
-    if (erasePause < ERASE_MS * 0.9) {
-      out.push(`erase_pause_ms=${erasePause} may not cover the target's ` +
-               `~${ERASE_MS} ms page erase; the packets behind it would land ` +
-               `while the ring is still full.`);
+    if (erasePause < plat.erase_pause_ms * 0.9) {
+      out.push(`erase_pause_ms=${erasePause} is below the ${plat.erase_pause_ms} ms ` +
+               `that covers the target's ~100 ms page erase on ${plat.label}; the ` +
+               `packets behind it would land while the ring is still full. The ` +
+               `number is larger than the erase because it is timed from a ` +
+               `write-completion callback, not from the wire.`);
     }
     if (Number(values.erase_inflight) > 3) {
       out.push(`erase_inflight=${values.erase_inflight} is above the measured ` +
@@ -460,6 +636,51 @@ export function advisories(values) {
       out.push(`pkt_gap_ms=${gap} sends the cheap packets faster than the ` +
                `target writes them (~${WRITE_RATE_MS} ms per 244 B store), so ` +
                `the ring fills gradually across each page.`);
+    } else if (!plat.measured && gap < plat.pkt_gap_ms) {
+      /* Above the target's own floor, so not wrong — but on this platform the
+       * only thing known is the working point, and where it stops working has
+       * never been found. Say exactly that. */
+      out.push(`pkt_gap_ms=${gap} is below the ${plat.pkt_gap_ms} ms measured ` +
+               `good on ${plat.label}. Lower values are untested there rather ` +
+               `than known bad, and the failure would be a mid-image NO_MEM.`);
+    }
+  }
+
+  /* Auto-flash across two transports.
+   *
+   * Mirrors mapping_kind_mask() in dfu_runner.c, which does the same
+   * classification for real: a rule whose pattern ends .zip can only be a
+   * Bluetooth job, .bin can only be WiFi, and anything else could be either.
+   *
+   * The firmware is the authority — this only decides whether to say
+   * something. When the rules span both, auto-flash cannot know which kind of
+   * target it is looking for until it has found one, so every scan cycle has
+   * to try Bluetooth *and* attempt a WiFi association. On a board with one
+   * 2.4 GHz radio that is not two searches in parallel; it is two searches in
+   * turn, each slower for the other's presence.
+   */
+  const patterns = String(values.ble_firmware_mapping ?? "")
+    .split("|").map(r => r.split(":").slice(1).join(":").trim()).filter(Boolean);
+  if (patterns.length) {
+    const zip = patterns.some(p => /\.zip$/i.test(p));
+    const raw = patterns.some(p => /\.bin$/i.test(p));
+    const vague = patterns.filter(p => !/\.(zip|bin)$/i.test(p));
+
+    if (zip && raw) {
+      out.push(`ble_firmware_mapping names both .zip and .bin bundles, so ` +
+               `auto-flash has to look for a Bluetooth target and a WiFi one ` +
+               `on every cycle — it cannot tell which it needs until it finds ` +
+               `something. One radio serves both, so the two searches take ` +
+               `turns and each scan gets slower. Prefer one updater per ` +
+               `target family, or flash a specific file instead of ` +
+               `auto-flashing.`);
+    }
+    if (vague.length) {
+      out.push(`ble_firmware_mapping rule${vague.length > 1 ? "s" : ""} ` +
+               `${vague.map(p => `"${p}"`).join(", ")} do not end in .zip or ` +
+               `.bin, so the updater cannot tell which transport they need ` +
+               `and has to try both. Ending the pattern in an extension lets ` +
+               `it skip the one that cannot apply.`);
     }
   }
 
@@ -488,8 +709,8 @@ export function advisories(values) {
  *  ignored  keys present in the file whose value the firmware would reject
  *           (so the UI can say "this line is doing nothing")
  */
-export function parseConfig(text) {
-  const values = defaults();
+export function parseConfig(text, board = null) {
+  const values = defaults(board);
   const unknown = [];
   const ignored = [];
 
@@ -534,7 +755,7 @@ export function parseConfig(text) {
  */
 export function serializeConfig(values, unknown = []) {
   const lines = [
-    "# config.txt — xiao_nrf54_updater",
+    "# config.txt — drone_meshcore_updater",
     `# written by the web client ${new Date().toISOString().replace(/\.\d+Z$/, "Z")}`,
     "",
   ];

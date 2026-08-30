@@ -1,5 +1,5 @@
 import { ref, computed, watch } from "../vue.js";
-import { dfuStatus, dfuRate, openLogView } from "../store.js";
+import { dfuStatus, dfuRate, openLogView, stopDfu, stopping } from "../store.js";
 import { STATE } from "../lib/dfu-status.js";
 import Icon from "./Icon.js";
 
@@ -107,7 +107,7 @@ export default {
 
     return {
       status: s, show, determinate, barPercent, tone, detail, subject,
-      dismissed, openLog, logLabel, logTitle, STATE,
+      dismissed, openLog, logLabel, logTitle, STATE, stopDfu, stopping,
     };
   },
   template: /* html */ `
@@ -120,6 +120,12 @@ export default {
         <button class="icon-btn dfu-watch" @click="openLog"
                 :title="logTitle" aria-label="Open the device log">
           <Icon name="description"/><span class="label">{{ logLabel }}</span>
+        </button>
+        <button v-if="!status.terminal" class="icon-btn dfu-stop" @click="stopDfu"
+                :disabled="stopping"
+                title="Stop the run, clear the retry counter and end any cooldown"
+                aria-label="Stop">
+          <Icon name="stop_circle"/><span class="label">Stop</span>
         </button>
         <button v-if="status.terminal" class="dfu-dismiss" @click="dismissed = true"
                 title="Dismiss" aria-label="Dismiss">&times;</button>

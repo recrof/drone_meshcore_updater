@@ -33,6 +33,9 @@ export const STATE = {
   COOLDOWN: 8,
   DONE: 9,
   FAILED: 10,
+  /* Appended, not inserted — see the note in dfu_status.h. It happens
+     between DISCONNECTING and DONE despite the number. */
+  VERIFYING: 11,
 };
 
 /* enum dfu_status_result */
@@ -50,6 +53,7 @@ export const RESULT = {
   REMOTE_ERROR: 10,
   FS_ERROR: 11,
   RETRIES_EXHAUSTED: 12,
+  TARGET_REJECTED: 13,
 };
 
 /* Present tense, and phrased as what the device is doing rather than as the
@@ -66,6 +70,7 @@ export const STATE_LABEL = {
   [STATE.COOLDOWN]: "Waiting before the next attempt",
   [STATE.DONE]: "Complete",
   [STATE.FAILED]: "Failed",
+  [STATE.VERIFYING]: "Checking that the target is running the new firmware",
 };
 
 /* Each of these is a real dead end someone has to act on, so they name the
@@ -85,13 +90,22 @@ export const RESULT_LABEL = {
   [RESULT.REMOTE_ERROR]: "the target rejected the transfer",
   [RESULT.FS_ERROR]: "the bundle could not be read from flash",
   [RESULT.RETRIES_EXHAUSTED]: "every attempt failed",
+  [RESULT.TARGET_REJECTED]: "the whole image was delivered, but the target is " +
+    "still in its bootloader — it rejected the image, most likely on its own " +
+    "CRC check. Re-check that the bundle matches this target and try again.",
 };
 
 /* States in which the device is actively working. DONE and FAILED are sticky
  * — they stay until the next run — so "is a DFU happening" cannot be "is the
- * state non-idle". */
+ * state non-idle" either.
+ *
+ * Defined by exclusion rather than as a range. It was `>= SCANNING &&
+ * <= COOLDOWN`, which quietly assumed the working states are numerically below
+ * the terminal ones — and they are not, because new states are *appended* to
+ * keep the wire format stable. VERIFYING is 11, above FAILED, and the range
+ * form would have reported a running transfer as inactive. */
 export function isActive(state) {
-  return state >= STATE.SCANNING && state <= STATE.COOLDOWN;
+  return state !== STATE.IDLE && !isTerminal(state);
 }
 
 export function isTerminal(state) {

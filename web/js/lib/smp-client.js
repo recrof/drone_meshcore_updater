@@ -1,5 +1,5 @@
 /*
- * BLE transport + SMP framing for the XIAO nRF54 updater.
+ * BLE transport + SMP framing for the Drone MeshCore Updater.
  *
  * This module knows nothing about the DOM. It emits events instead of
  * touching UI:
@@ -126,8 +126,19 @@ export function describeSmpError(group, cmd, body) {
   const detail = specific ? `${specific} (${generic})` : generic;
   return `${detail} [group ${group}, cmd ${cmd}]`;
 }
-export const OS_ID  = { ECHO: 0, RESET: 5 };
-export const FSX_ID = { LIST: 0, MKDIR: 1, RMDIR: 2, MOVE: 3, STATVFS: 4, TRIGGER_DFU: 5 };
+export const OS_ID  = { ECHO: 0, RESET: 5, INFO: 7 };
+export const FSX_ID = {
+  LIST: 0, MKDIR: 1, RMDIR: 2, MOVE: 3, STATVFS: 4, TRIGGER_DFU: 5, STOP_DFU: 6,
+  INSPECT: 7, CAPS: 8,
+};
+
+/* enum fw_transport_id in updater/src/firmware_inspect.h, as a bitmask. */
+export const TRANSPORT_BIT = { BLE: 1, WIFI: 2 };
+
+/* enum fw_kind, same file. Numerically stable: these cross the wire. */
+export const FW_KIND = {
+  UNKNOWN: 0, NORDIC_ZIP: 1, NCS_ZIP: 2, ESP_APP: 3, ESP_MERGED: 4,
+};
 
 /* Chunk size for the stock-SMP upload fallback. */
 const SMP_UPLOAD_CHUNK = 800;
@@ -451,8 +462,35 @@ export class SmpClient extends EventTarget {
   fsxStatvfs(path) {
     return this.request(MGMT_OP.READ_REQ, GRP.FSX, FSX_ID.STATVFS, { path });
   }
+  /* What is this file, is it intact, and could this device flash it?
+   *
+   * Resolves to { kind, transport, ok, flashable, reason, bytes, devtype,
+   * name, version, chip }. The device reads the whole file to checksum it, so
+   * this is not free — call it when a file arrives or when the user asks
+   * about one, not while rendering a list. It answers MGMT_ERR_EBUSY (10)
+   * during a DFU, which the caller should treat as "ask later", not "bad
+   * file". */
+  fsxInspect(path) {
+    return this.request(MGMT_OP.READ_REQ, GRP.FSX, FSX_ID.INSPECT, { path });
+  }
+  /* Which transports this build has, as a bitmask of TRANSPORT_BIT.
+   *
+   * Asked rather than tabulated. The client used to carry its own copy of the
+   * firmware's transport table, kept honest by a test; a copy that cannot
+   * exist cannot drift. Firmware without this command answers with an error,
+   * which the caller reads as "Bluetooth only" — every build ever shipped has
+   * had BLE, and that assumption warns rather than falsely reassures. */
+  fsxCaps() {
+    return this.request(MGMT_OP.READ_REQ, GRP.FSX, FSX_ID.CAPS, {});
+  }
   fsxTriggerDfu(path) {
     return this.request(MGMT_OP.WRITE_REQ, GRP.FSX, FSX_ID.TRIGGER_DFU, { path });
+  }
+  /* Stop a run and clear the status back to IDLE. Resolves to
+   * `{ stopped: bool }` — false meaning nothing was running, which is a
+   * normal outcome and not an error, so callers never have to check first. */
+  fsxStopDfu() {
+    return this.request(MGMT_OP.WRITE_REQ, GRP.FSX, FSX_ID.STOP_DFU, {});
   }
   /* --- live log stream ------------------------------------------------
    *
@@ -554,6 +592,31 @@ export class SmpClient extends EventTarget {
       return;
     }
     this.dispatchEvent(new CustomEvent("dfustatus", { detail: { status } }));
+  }
+
+  /* Which board is this?
+   *
+   * `format: "i"` asks os_mgmt's info command for the hardware platform alone,
+   * and since Zephyr 4.3 that is the **full board target** — "xiao_ble/nrf52840",
+   * "xiao_nrf54lm20a/nrf54lm20a/cpuapp" — the same string the build knows itself
+   * by. No custom protocol, and nRF Connect Device Manager can read it too.
+   *
+   * This is what stops a cross-board update. MCUboot validates an image's
+   * signature, not its architecture, and every board here signs with the same
+   * key, so an image for the wrong part verifies, swaps in, and fails to boot.
+   * Nothing on the device side can catch that; the client has to.
+   *
+   * Returns null on firmware without CONFIG_MCUMGR_GRP_OS_INFO rather than
+   * throwing — that is an older build, not an error.
+   */
+  async osBoard() {
+    try {
+      const r = await this.request(MGMT_OP.READ_REQ, GRP.OS, OS_ID.INFO, { format: "i" });
+      const out = (r?.output ?? "").trim();
+      return out || null;
+    } catch {
+      return null;
+    }
   }
 
   /* Standard mcumgr OS group reset. Available whenever the firmware is built

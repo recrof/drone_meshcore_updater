@@ -1,8 +1,9 @@
 import { ref, reactive, computed, watch } from "../vue.js";
-import { loadConfig, saveConfig, log } from "../store.js";
+import { loadConfig, saveConfig, log, deviceBoard } from "../store.js";
 import {
   CONFIG_SCHEMA, CONFIG_PATH, CONFIG_MAX_BYTES,
-  validateField, advisories, serializeConfig, encodedSize, defaults,
+  validateField, advisories, serializeConfig, encodedSize, defaults, defFor,
+  tuningFor,
 } from "../lib/config-file.js";
 import MappingEditor from "./MappingEditor.js";
 
@@ -12,7 +13,13 @@ export default {
   props: { open: Boolean },
   emits: ["close"],
   setup(props, { emit }) {
-    const values   = reactive(defaults());
+    /* Two pacing defaults differ per SoC family, so every "what is the
+     * default" question in this dialog has to be asked of the board in front
+     * of us rather than of the schema. `board` is null until the device says
+     * — config-file.js treats that as the nRF, which is what a device too old
+     * to report a board can only be. */
+    const board    = computed(() => deviceBoard.value);
+    const values   = reactive(defaults(board.value));
     const unknown  = ref([]);
     const ignored  = ref([]);
     const loaded   = ref(null);      // pristine copy, for the dirty check
@@ -64,13 +71,13 @@ export default {
     const errors = computed(() => {
       const out = {};
       for (const f of CONFIG_SCHEMA) {
-        const msg = validateField(f, values[f.key]);
+        const msg = validateField(f, values[f.key], board.value);
         if (msg) out[f.key] = msg;
       }
       return out;
     });
     const hasErrors = computed(() => Object.keys(errors.value).length > 0);
-    const notes     = computed(() => advisories(values));
+    const notes     = computed(() => advisories(values, board.value));
 
     /* ---- serialized form + size budget ---- */
     const text = computed(() => serializeConfig(values, unknown.value));
@@ -81,9 +88,10 @@ export default {
       !loaded.value || CONFIG_SCHEMA.some(f => values[f.key] !== loaded.value[f.key]));
 
     const isModified = (f) => loaded.value && values[f.key] !== loaded.value[f.key];
-    const isDefault  = (f) => values[f.key] === f.def;
-    const resetField = (f) => { values[f.key] = f.def; };
-    const resetAll   = () => apply(defaults());
+    const fieldDef   = (f) => defFor(f, board.value);
+    const isDefault  = (f) => values[f.key] === fieldDef(f);
+    const resetField = (f) => { values[f.key] = fieldDef(f); };
+    const resetAll   = () => apply(defaults(board.value));
 
     /* A value outside the allowed set still has to be displayed. The nRF54L
      * implements only a handful of TX levels and the SoftDevice clips
@@ -101,14 +109,21 @@ export default {
             .sort((a, b) => a.value - b.value);
     };
 
-    const fieldNote = (f) => (typeof f.note === "function" ? f.note(values[f.key]) : null);
+    const fieldNote = (f) =>
+      (typeof f.note === "function" ? f.note(values[f.key], board.value) : null);
+
+    /* Named on the chip for the two keys whose default moves, so a value that
+     * looks wrong against the numbers in the notes can be read as "this is
+     * the ESP32's" rather than as a mistake. */
+    const platformLabel = (f) => (f.defByPlatform ? tuningFor(board.value).label : "");
 
     /* An empty-string default resets to nothing, and "default " reads as a
      * truncation. Say what the button does instead. */
     const defLabel = (f) => {
-      if (f.type === "bool") return `default ${f.def ? "on" : "off"}`;
-      if (f.def === "") return "clear";
-      return `default ${f.def}`;
+      const d = fieldDef(f);
+      if (f.type === "bool") return `default ${d ? "on" : "off"}`;
+      if (d === "") return "clear";
+      return `default ${d}`;
     };
 
     async function save() {
@@ -135,6 +150,7 @@ export default {
       values, unknown, ignored, exists, loading, saving, error, showRaw,
       errors, hasErrors, notes, text, size, overSize, dirty,
       isModified, isDefault, resetField, resetAll, optionsFor, fieldNote,
+      fieldDef, platformLabel,
       helpOpen, toggleHelp, allHelp, toggleAllHelp, defLabel,
       save, close, reload,
     };
@@ -197,7 +213,9 @@ export default {
 
               <div class="ctl">
                 <button class="cfg-def" :disabled="isDefault(f)" @click="resetField(f)"
-                        :title="'Reset to the firmware default (' + (f.def === '' ? 'empty' : f.def) + ')'">
+                        :title="'Reset to the firmware default for ' +
+                                (platformLabel(f) || 'this board') + ' (' +
+                                (fieldDef(f) === '' ? 'empty' : fieldDef(f)) + ')'">
                   {{ defLabel(f) }}
                 </button>
 
