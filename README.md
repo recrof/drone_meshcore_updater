@@ -1,13 +1,19 @@
-# xiao_nrf54_updater
+# Drone MeshCore Updater
 
-A standalone BLE DFU client that runs on a **Seeed XIAO nRF54LM20A** and flashes Nordic-format firmware bundles to *other* nRF52/nRF54 devices over Bluetooth.
+Carry a firmware update to a device you cannot reach.
 
+A standalone updater that runs on a **Seeed XIAO** (nRF54LM20A, nRF52840,
+ESP32-S3 or ESP32-C5), holds a library of firmware bundles, and flashes them into *other*
+devices over the air. It exists for MeshCore repeaters on rooftops, masts and hilltops —
+put it on a drone or in a pocket, get within radio range, and update.
+
+Today it speaks Nordic Legacy DFU over Bluetooth, which covers nRF52 targets.
 Drop firmware bundles onto it once, then flash targets in the field with no
 laptop — it is a phone, or nothing at all.
 
 ## Quick start (no toolchain needed)
 
-Everything below happens in **[the web client](https://recrof.github.io/xiao_nrf54_updater/)**.
+Everything below happens in **[the web client](https://recrof.github.io/drone_meshcore_updater/)**.
 It needs Chrome or Edge on desktop or Android — Firefox and Safari have neither
 Web Bluetooth nor WebUSB. Nothing to install; it is a PWA, so you can install
 it and it keeps working with no network.
@@ -19,19 +25,40 @@ Only needed once, or when updating the updater itself.
 1. Plug the XIAO into USB.
 2. Open the web client and press **Flash updater** — the first button, and the
    only one that works before anything is connected.
-3. **Connect probe**, pick the board from the browser's device chooser.
-4. **Flash newest**. It downloads the current release, writes it, reads every
-   byte back to verify, and resets the board.
+3. Pick your board. Each one is reached a different way, and the next step
+   changes with it:
 
-To flash a build of your own instead, use **Flash custom .hex** and pick
-`merged.hex`. Not `zephyr.hex` — that one has no bootloader under it and will
-not boot; the client refuses it and says so.
+   | board | what you do |
+   |---|---|
+   | XIAO nRF54LM20A | **Connect probe**, then pick it from the browser's chooser. Nothing to press on the board. |
+   | XIAO nRF52840 | Double-tap **RESET** (the orange LED pulses), then pick the serial port. |
+   | XIAO ESP32-S3 | Hold **BOOT**, tap **RESET**, release **BOOT**, then pick the serial port. |
+   | XIAO ESP32-C5 | As the ESP32-S3. Bluetooth only for now — see [notes/boards.md](notes/boards.md). |
+
+4. **Flash newest**. It downloads the current release, checks it against the
+   published digest, writes it, reads it back to verify, and restarts the
+   board.
+
+Chrome or Edge on desktop only — Firefox and Safari have neither WebUSB nor
+Web Serial, and no browser on iOS does.
+
+Nothing here can leave you stranded. The nRF54LM20A's probe is a separate chip
+that is always awake; the nRF52840's bootloader is never written by this and
+also takes a `.uf2` dropped onto the drive it exposes; the ESP32-S3's ROM
+loader is in silicon and cannot be erased. If a write fails, repeat the same
+steps.
+
+There is no "pick a file" option, on purpose: the ways to get it wrong all end
+with a board that needs rescuing, and the person likeliest to make the mistake
+is the one least likely to own a probe. To flash a build of your own, run
+`./build.sh` — every build restages `web/firmware/`, so your image *is* what
+**Flash newest** writes when you serve the client locally.
 
 ### 2. Put firmware bundles on it
 
 1. Everything from here is over Bluetooth, so the XIAO no longer needs a
    computer — only power. See [Powering it](#powering-it) below.
-2. Press **Connect** and pick `XIAO nRF54 updater`.
+2. Press **Connect** and pick `Drone MeshCore Updater`.
 3. **Upload** your Nordic DFU `.zip` bundles. They live on the 8 MB flash, so
    keep a library of them.
 
@@ -91,7 +118,7 @@ you are still setting things up.
 Repo root doubles as the **west workspace root** (zephcore-style). The application + `west.yml` live in `updater/`; after `west init -l updater && west update`, the NCS/Zephyr/modules trees appear as siblings of `updater/` at the repo root (all gitignored).
 
 ```
-xiao_nrf54_updater/                       ← git repo root == west workspace root
+drone_meshcore_updater/                        ← git repo root == west workspace root
   README.md
   build.sh                                # thin west wrapper
   .gitignore                              # ignores .west/, zephyr/, modules/, …
@@ -100,8 +127,11 @@ xiao_nrf54_updater/                       ← git repo root == west workspace ro
   web/                                    # the web client (Vue 3, no build step, PWA)
     js/lib/smp-client.js                  #   BLE/SMP transport, DOM-free
     js/lib/config-file.js                 #   config.txt schema, mirrored from config.c
-    js/lib/cmsis-dap.js                   #   WebUSB CMSIS-DAP, for flashing this board
+    js/lib/cmsis-dap.js                   #   WebUSB CMSIS-DAP, for the nRF54L board
     js/lib/nrf54l-flash.js                #   SWD + RRAM programming
+    js/lib/serial.js                      #   Web Serial + SLIP, shared by both serial flashers
+    js/lib/nordic-dfu-serial.js           #   Legacy DFU, for the nRF52840's bootloader
+    js/lib/esptool.js                     #   ESP32-S3 / ESP32-C5 ROM loader
     js/lib/log-file.js                    #   /lfs1/LOG.NNNN naming + parsing
     test/                                 #   dependency-free; several cross-check the firmware
   updater/                                # the application (manifest project)
@@ -150,8 +180,8 @@ Requires the Nordic Connect SDK v3.4.0 or later (earlier versions lack `nrf54lm2
 ### One-time setup
 
 ```bash
-git clone <this repo url> xiao_nrf54_updater
-cd xiao_nrf54_updater
+git clone <this repo url> drone_meshcore_updater
+cd drone_meshcore_updater
 
 # west init -l points at the manifest project directory (the one containing
 # west.yml), NOT at a git URL — no network fetch here, just marks this
@@ -183,6 +213,56 @@ Via the `build.sh` wrapper:
 ./build.sh menuconfig     # open Kconfig menuconfig
 ./build.sh clean          # rm -rf updater/build
 ```
+
+### Other boards
+
+It also builds for the **Seeed XIAO nRF52840** and the **XIAO ESP32S3**, and for
+the **Sense** variant of each. Set `BOARD`; every target gets its own build
+directory, so switching does not force a pristine rebuild:
+
+```bash
+BOARD=xiao_ble/nrf52840 ./build.sh              # -> updater/build_xiao_ble_nrf52840
+BOARD=xiao_ble/nrf52840/sense ./build.sh
+BOARD=xiao_esp32s3/esp32s3/procpu ./build.sh
+BOARD=xiao_esp32s3/esp32s3/procpu/sense ./build.sh
+```
+
+| | XIAO nRF54LM20A | XIAO nRF52840 | XIAO ESP32S3 |
+|---|---|---|---|
+| Flashing the updater | web client (CMSIS-DAP), or SWD | web client (serial DFU), or drag `merged.uf2` onto the drive a double-tap of RESET exposes | web client (ROM loader), or `./build.sh flash` |
+| Room for bundles | 8 MB QSPI, ~16 bundles | 2 MB QSPI, ~4 bundles | 4.3 MB internal, ~10 bundles |
+| MCUboot slot | 896 KB (31% used) | 368 KB (**80% used**) | 1792 KB (24% used) |
+| Status LED | RGB | RGB | one LED — failure blinks twice per cycle |
+| WiFi | no | no | yes (the point of it) |
+
+The **ESP32-S3 exists for ESP32 targets.** MeshCore's ESP32 repeaters do not do
+BLE DFU at all — they update through ElegantOTA, over a WiFi AP they raise on
+command — and no nRF part has WiFi, so no nRF updater can ever reach one. That
+transport is not written yet; what works on this board today is everything the
+nRF boards do.
+
+Building for it needs one extra step after `west update`, because WiFi and
+Bluetooth on ESP32 are closed binary blobs that the manifest does not carry:
+
+```bash
+west blobs fetch hal_espressif
+```
+
+`build.sh` handles the other Espressif-specific requirement itself — the build
+needs `esptool >= 5.0.2`, and if you have PlatformIO installed its own esptool
+4.x is first on `PATH` and fails at the very last step of the build. A private
+venv is created at `.venv-esptool/` and used only for Espressif boards.
+
+**The nRF52840 and ESP32-S3 builds are untested on hardware.** The nRF52840's
+MCUboot is chainloaded from the Adafruit UF2 bootloader that ships on the board,
+which stays put as the recovery path; the ESP32-S3's is a normal MCUboot at
+offset 0.
+
+Pushing an update for the wrong board over Bluetooth used to be a real foot-gun
+— MCUboot checks the signature, not the architecture. The firmware now reports
+its board target over `os_mgmt` and the web client refuses a mismatch, so this
+is handled. A release still stages only the nRF54L firmware, so the other two
+have to be built and flashed locally.
 
 To test a local build through the web client's **Flash newest** button instead
 of a probe, stage it where the client looks:
@@ -243,6 +323,7 @@ Sysbuild builds two images and nests them per domain, so there is no single
 | File | Purpose |
 |---|---|
 | `updater/build/merged.hex` | **The one to flash.** MCUboot + the signed application, built by `build.sh` |
+| `updater/build_*/merged.uf2` | Same thing as UF2, on boards whose bootloader takes it (the XIAO nRF52840) |
 | `updater/build/dfu_application.zip` | OTA bundle for updating the updater over BLE |
 | `updater/build/updater/zephyr/zephyr.signed.hex` | Application alone — links at `0x10000`, **does not boot without MCUboot under it** |
 | `updater/build/mcuboot/zephyr/zephyr.hex` | Bootloader alone |
@@ -290,7 +371,8 @@ identified regardless.
 - Verify the vendored `xiao_nrf54lm20a` board files against the eventual
   upstream ones and delete the local copy when they match. Three bugs have
   been found in them so far (RRAM write-buffer commit, LED polarity,
-  MCUboot slot alignment) — see the traps in [CLAUDE.md](CLAUDE.md).
+  MCUboot slot alignment) — see the trap index in [CLAUDE.md](CLAUDE.md), and
+  `notes/` for the full write-ups.
 - Exercise the rest of the web client against hardware: large-file upload,
   download, delete, rename. Only the config editor and the DFU trigger have
   been driven end to end.
@@ -330,7 +412,7 @@ The stock nRF Connect Device Manager Files tab is intentionally spartan — SMP'
 This project extends SMP with a small custom group — **`fsx_mgmt`** — that fills those gaps. It's a superset: `fs_mgmt` keeps working exactly as before, so nRF Connect Device Manager, AuTerm, and mcumgr CLI are unaffected. Clients that understand the extension get a real file manager on top — which
 is what the web client is.
 
-**Server side**: `updater/src/fsx_mgmt.{c,h}`. Registers as MGMT group **64** (`MGMT_GROUP_ID_PERUSER`) with six commands — `list`, `mkdir`, `rmdir`, `move`, `statvfs`, `trigger_dfu`. Wire format is CBOR, same as every other SMP group. See `fsx_mgmt.h` for the per-command request/response schemas.
+**Server side**: `updater/src/fsx_mgmt.{c,h}`. Registers as MGMT group **64** (`MGMT_GROUP_ID_PERUSER`) with seven commands — `list`, `mkdir`, `rmdir`, `move`, `statvfs`, `trigger_dfu`, `stop_dfu`. Wire format is CBOR, same as every other SMP group. See `fsx_mgmt.h` for the per-command request/response schemas.
 
 **Client side**: [`web/`](web/) — a small Vue 3 app that speaks both stock `fs_mgmt` (upload/download/delete) and our `fsx_mgmt` (browse/mkdir/rename), plus the `fsx_stream` fast-upload service and a `config.txt` editor. Uses the browser's Web Bluetooth API, no install, no accounts.
 
@@ -356,7 +438,7 @@ web/tools/build-single.mjs  bundles everything into one self-contained file
 - Chrome or Edge on Android / macOS / Windows / Linux (iOS Safari does not implement Web Bluetooth).
 - Web Bluetooth needs a secure context, so `file://` won't work. Use the GitHub Pages deployment (`https://<owner>.github.io/<repo>/`, published by [`.github/workflows/web.yml`](.github/workflows/web.yml) on every push to `main`), or serve `web/` over local HTTPS.
 - Prefer one file? `node web/tools/build-single.mjs` produces `web/dist/updater.html` with the CSS, JS, and Vue all inlined — no external requests. CI publishes the same file to `…/updater.html` and as a workflow artifact.
-- Click `Connect`, pick `XIAO nRF54 updater` from the browser's device picker, browse `/lfs1/`.
+- Click `Connect`, pick `Drone MeshCore Updater` from the browser's device picker, browse `/lfs1/`.
 
 **Editing the config**: the `Config…` button, or a click on `config.txt` in the listing, opens a form over `/lfs1/config.txt` showing every key with its description, its firmware default (click the chip to restore it), and live validation. Only the real `/lfs1/config.txt` opens the editor; a copy in another directory still downloads, since that isn't a file the firmware reads. The filename is always lowercase — uploading one named `CONFIG.TXT` is redirected to `config.txt` (and logged), because LittleFS is case-sensitive and the firmware would silently never read the uppercase one. Values the firmware would silently reject are blocked rather than written, and the encoded size is checked against the parser's 1023-byte buffer. Unknown keys in the file are preserved on save.
 
