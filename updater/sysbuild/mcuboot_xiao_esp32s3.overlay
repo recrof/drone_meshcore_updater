@@ -1,0 +1,26 @@
+/*
+ * Devicetree overlay for the MCUboot image on xiao_esp32s3.
+ *
+ * Selected by updater/sysbuild/CMakeLists.txt — sysbuild only ever looks for
+ * one file name per image, which cannot serve three boards with different
+ * flash.
+ *
+ * Same two jobs as its nRF counterparts: give the bootloader the same
+ * partition table the application uses, and link it into boot_partition.
+ *
+ * The second one is easy to think unnecessary here, because MCUboot's own
+ * boot/zephyr/app.overlay already sets `zephyr,code-partition = &boot_partition`.
+ * It does not apply: setting mcuboot_DTC_OVERLAY_FILE *replaces* that file,
+ * exactly as a board overlay replaces the application's app.overlay. Omitting
+ * the chosen node here would leave MCUboot inheriting the board's
+ * `zephyr,code-partition = &slot0_partition` and linking on top of the
+ * application — which builds cleanly and is caught only by merge_hex.py's
+ * overlap check.
+ */
+#include "../esp32s3_partitions.dtsi"
+
+/ {
+	chosen {
+		zephyr,code-partition = &boot_partition;
+	};
+};

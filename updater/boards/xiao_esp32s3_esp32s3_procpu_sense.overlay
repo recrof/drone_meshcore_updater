@@ -1,0 +1,15 @@
+/*
+ * The XIAO ESP32S3 Sense — the same board with a camera/microphone expansion.
+ *
+ * A variant does not inherit the base board's overlay: `xiao_esp32s3/esp32s3/procpu`
+ * finds xiao_esp32s3_esp32s3_procpu.overlay, and `.../procpu/sense` looks for
+ * this name and finds nothing without this file. Exactly the same trap as
+ * xiao_ble_sense.overlay, and worth the duplicate note because the symptom is
+ * not "no overlay": it is a devicetree with no MCUboot slots, no filesystem and
+ * no LED, reported as whichever of those the compiler reaches first.
+ *
+ * Here that was led.c's `#error "This board supplies no LED aliases"`, which is
+ * the one failure in that set that names its own cause. The others
+ * ("required nodelabel not found: slot0_partition") do not.
+ */
+#include "xiao_esp32s3_esp32s3_procpu.overlay"

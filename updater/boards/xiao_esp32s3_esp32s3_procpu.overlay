@@ -1,0 +1,57 @@
+/*
+ * Devicetree overlay for the Seeed XIAO ESP32S3.
+ *
+ * Third board, and the first that is not Nordic silicon. It exists for one
+ * reason: **MeshCore's ESP32 repeaters do not do BLE DFU at all.** They update
+ * through ElegantOTA — the repeater raises a WiFi AP and serves an upload
+ * form — and no nRF part has WiFi, so no nRF updater can ever reach one. An
+ * ESP32 updater is a prerequisite for supporting ESP32 targets, not a cheaper
+ * alternative to the nRF one.
+ *
+ * The S3 rather than the C6, despite the C6 having the better BLE story: this
+ * firmware has to hold a BLE host, a WiFi supplicant and a TCP/IP stack in two
+ * MCUboot slots, and the C6's 4 MB is tight for that. 8 MB of flash and 8 MB
+ * of PSRAM buys room to find out how big it really gets. See
+ * esp32s3_partitions.dtsi.
+ *
+ * What the board already provides and this file therefore does not:
+ *
+ *   - **The console.** `zephyr,console = &usb_serial` is the ESP32-S3's
+ *     USB-Serial-JTAG peripheral, which needs no USB device stack and is up
+ *     before main(). Unlike both nRF boards there is nothing to arrange.
+ *   - **The radios.** `&wifi` and `&esp32_bt_hci` are already `okay`.
+ *   - **The flash.** One internal SPI part, XIP-mapped — no external QSPI to
+ *     enable, and no `spi-nor` node.
+ *
+ * What it does do is replace the partition table (the board ships the 4 MB
+ * layout on an 8 MB part, with a 192 KB storage partition) and name the LED.
+ */
+
+#include "../common.dtsi"
+#include "../esp32s3_partitions.dtsi"
+
+/ {
+	chosen {
+		/* The application lives in slot0; MCUboot's own image overrides
+		 * this to boot_partition (sysbuild/mcuboot_xiao_esp32s3.overlay).
+		 * Already the board's default — restated because this overlay
+		 * replaces the board's table wholesale, and a `chosen` pointing
+		 * at a node that no longer exists is a confusing way to fail. */
+		zephyr,code-partition = &slot0_partition;
+	};
+
+	/*
+	 * One LED, not three. led.c has a separate renderer for this case and
+	 * encodes as blink patterns what it encodes as colour on the nRF
+	 * boards — see the comment there for why DONE_FAIL is the state that
+	 * had to change.
+	 *
+	 * `status-led` rather than aliasing red/green/blue at the same pin:
+	 * that would build and run and quietly report every terminal state as
+	 * the same steady glow. A distinct alias makes the board's shape a
+	 * fact the code can branch on.
+	 */
+	aliases {
+		status-led = &led0;
+	};
+};

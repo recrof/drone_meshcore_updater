@@ -1,0 +1,106 @@
+/*
+ * Flash partition table for the Seeed XIAO ESP32S3 (ESP32-S3-WROOM-1 N8R8).
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Shared by the application image and the MCUboot image, for the same reason
+ * rram_partitions.dtsi and nrf52840_partitions.dtsi are: sysbuild builds
+ * MCUboot as its own Zephyr image with its own devicetree, and one fragment is
+ * what stops the two disagreeing about where the slots are.
+ *
+ * ---- Why the vendor table is replaced ---------------------------------
+ *
+ * The board includes <espressif/partitions_0x0_amp.dtsi>, and two things about
+ * that are wrong for this application:
+ *
+ *   1. **It is the 4 MB layout on an 8 MB part.** partitions_0x0_amp.dtsi is a
+ *      one-line include of partitions_0x0_amp_4M.dtsi, so a stock build of
+ *      this board addresses half the flash it has. The module is an
+ *      ESP32-S3-WROOM-1 N8R8 — 8 MB flash, 8 MB PSRAM.
+ *   2. **Its storage partition is 192 KB.** Firmware bundles are 300-500 KB
+ *      each. A device that cannot hold one bundle is not an updater.
+ *
+ * It also reserves four partitions this build has no images for — appcpu and
+ * lpcore slots, 960 KB of them in the 8 MB variant. The S3's second core is
+ * not used here (Bluetooth runs on procpu through the HCI blob), and the
+ * low-power core has no image at all.
+ *
+ * The resulting layout:
+ *
+ *   0x000000    64K  boot_partition     MCUboot
+ *   0x010000    64K  sys_partition      vendor slot, kept — see below
+ *   0x020000  1792K  slot0_partition    image-0
+ *   0x1E0000  1792K  slot1_partition    image-1
+ *   0x3A0000    64K  storage_partition  settings
+ *   0x3B0000  4416K  lfs_partition      LittleFS — the firmware bundles
+ *
+ * **The slots are deliberately generous.** On the nRF boards the application
+ * is ~290 KB; here it also carries a WiFi supplicant, a TCP/IP stack and the
+ * Espressif BLE controller blob, so it is several times that. 1792 KB is sized
+ * to leave room for the ElegantOTA transport rather than to fit today's image,
+ * because growing a slot later moves every partition after it — and moving
+ * lfs_partition reformats every deployed device's bundle store.
+ *
+ * `sys_partition` is kept even though nothing here uses it. It backs
+ * ESP32_EFUSE_VIRTUAL_KEEP_IN_FLASH, a test-only mode, and dropping it would
+ * gain 64 KB out of 8 MB while making this table something other than "the
+ * vendor's table with the tail rearranged" — which is the property that makes
+ * it checkable at a glance.
+ *
+ * ---- The thing to know about this flash --------------------------------
+ *
+ * Unlike both nRF boards, **the filesystem is on the same part the code
+ * executes from.** The nRF54L has an external 8 MB PY25Q64 and the nRF52840 an
+ * external 2 MB P25Q16H; here there is one SPI flash, XIP-mapped, holding the
+ * bootloader, both slots and LittleFS. Writing it means the driver disables
+ * the instruction cache and runs from IRAM with interrupts off for the
+ * duration of each operation. See the note in
+ * boards/xiao_esp32s3_esp32s3_procpu.conf about what that does to a BLE link.
+ */
+
+&flash0 {
+	/* Whole-node replacement rather than per-label deletion: the vendor
+	 * fragment defines eleven partitions and we keep three of the names,
+	 * so deleting them one at a time reads as a list of things to keep in
+	 * sync with a file we do not control. */
+	/delete-node/ partitions;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		boot_partition: partition@0 {
+			label = "mcuboot";
+			reg = <0x00000000 DT_SIZE_K(64)>;
+		};
+
+		sys_partition: partition@10000 {
+			label = "sys";
+			reg = <0x00010000 DT_SIZE_K(64)>;
+		};
+
+		slot0_partition: partition@20000 {
+			label = "image-0";
+			reg = <0x00020000 DT_SIZE_K(1792)>;
+		};
+
+		slot1_partition: partition@1e0000 {
+			label = "image-1";
+			reg = <0x001e0000 DT_SIZE_K(1792)>;
+		};
+
+		storage_partition: partition@3a0000 {
+			label = "storage";
+			reg = <0x003a0000 DT_SIZE_K(64)>;
+		};
+
+		/* Everything left: the firmware bundles. 4416 KB is roughly ten
+		 * of them, against sixteen on the nRF54L's 8 MB external part
+		 * and four on the nRF52840's 2 MB one. */
+		lfs_partition: partition@3b0000 {
+			label = "littlefs_storage";
+			reg = <0x003b0000 DT_SIZE_K(4416)>;
+		};
+	};
+};
