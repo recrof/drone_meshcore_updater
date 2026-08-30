@@ -36,14 +36,27 @@ static struct fs_file_t s_file;
 static bool             s_file_open;
 
 /* ---- low-level LE readers -------------------------------------------- */
-static int read_at(uint32_t off, void *buf, uint32_t len)
+/* Read from an explicitly named handle.
+ *
+ * Parameterised rather than tied to `s_file` so the walk below can run over a
+ * caller's own handle. firmware_inspect.c needs exactly that: it validates a
+ * file that may not be the one a DFU is streaming from, and an inspection
+ * that repositioned the streaming archive's cursor would corrupt a transfer
+ * in a way nothing would attribute to it.
+ */
+int firmware_zip_read_at(struct fs_file_t *f, uint32_t off, void *buf, uint32_t len)
 {
-	int rc = fs_seek(&s_file, off, FS_SEEK_SET);
+	int rc = fs_seek(f, off, FS_SEEK_SET);
 	if (rc < 0) return rc;
-	rc = fs_read(&s_file, buf, len);
+	rc = fs_read(f, buf, len);
 	if (rc < 0) return rc;
 	if ((uint32_t)rc != len) return -EIO;
 	return 0;
+}
+
+static int read_at(uint32_t off, void *buf, uint32_t len)
+{
+	return firmware_zip_read_at(&s_file, off, buf, len);
 }
 
 static uint16_t rd_u16(const uint8_t *p) { return p[0] | ((uint16_t)p[1] << 8); }
@@ -60,38 +73,50 @@ static uint32_t rd_u32(const uint8_t *p)
  * Returns 0 on success, 1 on end-of-LFH-sequence (hit CD or unknown sig),
  * negative errno on IO error or unsupported compression.
  */
-static int zip_read_lfh(uint32_t cursor, struct zip_entry *out, uint32_t *next_cursor)
+int firmware_zip_next(struct fs_file_t *f, uint32_t cursor,
+		      struct zip_entry *out, uint32_t *next_cursor)
 {
 	/* LFH header is 30 bytes; read it in one shot. */
 	uint8_t hdr[30];
-	int rc = read_at(cursor, hdr, sizeof(hdr));
+	int rc = firmware_zip_read_at(f, cursor, hdr, sizeof(hdr));
 	if (rc < 0) return rc;
 
 	uint32_t sig = rd_u32(&hdr[0]);
 	if (sig == ZIP_CD_SIG) return 1;    /* end of LFHs */
 	if (sig != ZIP_LFH_SIG) return 1;   /* corrupt / unknown */
 
+	uint16_t flags    = rd_u16(&hdr[6]);
 	uint16_t method   = rd_u16(&hdr[8]);
+	uint32_t crc      = rd_u32(&hdr[14]);
 	uint32_t csize    = rd_u32(&hdr[18]);
 	uint32_t usize    = rd_u32(&hdr[22]);
 	uint16_t namelen  = rd_u16(&hdr[26]);
 	uint16_t extralen = rd_u16(&hdr[28]);
 
-	if (method != 0) {
-		LOG_ERR("entry uses compression method %u (only STORE=0 supported)",
-			method);
-		return -ENOTSUP;
-	}
+	/* Compression is *reported*, not rejected here. firmware_zip_open()
+	 * still refuses anything but STORE — see below — but an inspector has
+	 * to be able to walk an archive in order to say what is wrong with it,
+	 * and a walker that stops at the first unsupported entry can only ever
+	 * report "unreadable". */
+	out->method = method;
+	out->crc32  = crc;
+	/* Bit 3: sizes live in a trailing data descriptor, so the header's
+	 * copies are zero. Nothing that walks headers can read such an entry. */
+	out->streamed = (flags & 0x0008u) != 0;
 
-	/* Filename directly follows the header. */
+	/* Filename directly follows the header. `name_len` keeps the real
+	 * length after truncation, because a name too long to store is a fault
+	 * to report rather than one to silently accept. */
 	uint16_t nread = namelen;
 	if (nread >= sizeof(out->name)) nread = sizeof(out->name) - 1;
-	rc = read_at(cursor + 30, out->name, nread);
+	rc = firmware_zip_read_at(f, cursor + 30, out->name, nread);
 	if (rc < 0) return rc;
 	out->name[nread] = '\0';
+	out->name_len = namelen;
 
 	out->data_offset = cursor + 30 + namelen + extralen;
 	out->size        = usize;
+	out->comp_size   = csize;
 	*next_cursor     = out->data_offset + csize;
 	return 0;
 }
@@ -102,10 +127,24 @@ static int zip_find(const char *name, struct zip_entry *out)
 	uint32_t cursor = 0;
 	while (true) {
 		uint32_t next;
-		int rc = zip_read_lfh(cursor, out, &next);
+		int rc = firmware_zip_next(&s_file, cursor, out, &next);
 		if (rc < 0) return rc;
 		if (rc == 1) return -ENOENT;    /* end reached */
-		if (strcmp(out->name, name) == 0) return 0;
+		if (strcmp(out->name, name) == 0) {
+			/* The check that used to live in the walker. Kept on
+			 * this path because streaming is what cannot cope. */
+			if (out->method != 0) {
+				LOG_ERR("%s uses compression method %u "
+					"(only STORE=0 supported)", name, out->method);
+				return -ENOTSUP;
+			}
+			if (out->streamed) {
+				LOG_ERR("%s stores its size in a trailing "
+					"descriptor; header size is unusable", name);
+				return -ENOTSUP;
+			}
+			return 0;
+		}
 		cursor = next;
 	}
 }

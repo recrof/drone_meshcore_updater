@@ -47,6 +47,7 @@
  */
 
 #include <zephyr/kernel.h>
+#include "firmware_inspect.h"
 #include <zephyr/logging/log.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>
@@ -98,6 +99,12 @@ static struct bt_uuid_128 data_uuid = BT_UUID_INIT_128(
 #define RC_OPEN_FAILED    3
 #define RC_WRITE_FAILED   4
 #define RC_NO_SESSION     5   /* FINISH / DATA without a prior START */
+/* The name says the file could never be flashed by anything here — .uf2,
+ * .hex, .elf. Refused at START, which is the one moment a rejection costs the
+ * client nothing: the path and total size arrive before any payload does. The
+ * SMP fallback path has its own check in upload_hook.c; both are needed,
+ * because this service does not go through mcumgr's callbacks at all. */
+#define RC_UNSUPPORTED    6
 
 #define FSX_STREAM_PATH_MAX 128
 
@@ -256,6 +263,13 @@ static ssize_t on_ctrl_write(struct bt_conn *conn, const struct bt_gatt_attr *at
 		}
 		memcpy(s_sess.path, &p[2], name_len);
 		s_sess.path[name_len] = '\0';
+
+		const char *why = NULL;
+		if (!firmware_name_acceptable(s_sess.path, &why)) {
+			LOG_WRN("start rejected: %s — %s", s_sess.path, why);
+			reply_error(conn, RC_UNSUPPORTED);
+			break;
+		}
 		const uint8_t *sp = &p[2 + name_len];
 		s_sess.expected = (uint32_t)sp[0] | ((uint32_t)sp[1] << 8)
 				| ((uint32_t)sp[2] << 16) | ((uint32_t)sp[3] << 24);

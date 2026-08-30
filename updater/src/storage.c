@@ -25,7 +25,7 @@ LOG_MODULE_REGISTER(storage, LOG_LEVEL_INF);
 #define CONFIG_PATH MOUNT_POINT "/config.txt"
 
 static const char kDefaultConfig[] =
-	"# xiao_nrf54_updater config.txt\n"
+	"# drone_meshcore_updater config.txt\n"
 	"# Same key/value shape as the nRF52 project. See README for the full list.\n"
 	"\n"
 	"# BLE name filter for the target we flash (pipe-delimited OR).\n"
@@ -37,7 +37,8 @@ static const char kDefaultConfig[] =
 	"min_rssi=-75\n"
 	"retry_cooldown=5\n"
 	"wedge_cooldown=10\n"
-	"tx_power=8\n"
+	"ble_tx_power=8\n"
+	"wifi_tx_power=20\n"
 	"scan_timeout=0\n"
 	"scan_debug=0\n";
 

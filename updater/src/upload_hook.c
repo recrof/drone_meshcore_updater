@@ -25,6 +25,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include "app.h"
+#include "firmware_inspect.h"
 
 LOG_MODULE_REGISTER(upload_hook, LOG_LEVEL_INF);
 
@@ -98,15 +99,62 @@ static enum mgmt_cb_return fs_access_done_cb(uint32_t event,
 	return MGMT_CB_OK;
 }
 
+/* The other event, the one this file used to note and not use.
+ *
+ * MGMT_EVT_OP_FS_MGMT_FILE_ACCESS fires on every authorization check, which
+ * for an upload means before each chunk — so denying here refuses the file on
+ * its first chunk rather than after the whole transfer. That is the only
+ * moment a refusal is free on this path.
+ *
+ * It covers the *SMP* route only. The fast custom upload service is a plain
+ * GATT service and never reaches mcumgr's callbacks, so it carries the same
+ * check at its own START (fsx_stream.c). Two call sites for one rule is worth
+ * saying out loud: wiring only this one would leave the path the web client
+ * actually uses completely uncovered, while looking done.
+ */
+static enum mgmt_cb_return fs_access_cb(uint32_t event,
+					enum mgmt_cb_return prev_status,
+					int32_t *rc, uint16_t *group,
+					bool *abort_more, void *data,
+					size_t data_size)
+{
+	ARG_UNUSED(prev_status); ARG_UNUSED(abort_more); ARG_UNUSED(data_size);
+
+	if (event != MGMT_EVT_OP_FS_MGMT_FILE_ACCESS) {
+		return MGMT_CB_OK;
+	}
+
+	struct fs_mgmt_file_access *ev = data;
+	if (ev->access != FS_MGMT_FILE_ACCESS_WRITE) {
+		return MGMT_CB_OK;
+	}
+
+	const char *why = NULL;
+	if (firmware_name_acceptable(ev->filename, &why)) {
+		return MGMT_CB_OK;
+	}
+
+	LOG_WRN("refusing upload of %s — %s", ev->filename, why);
+	*rc = MGMT_ERR_ENOTSUP;
+	*group = MGMT_GROUP_ID_FS;
+	return MGMT_CB_ERROR_RC;
+}
+
 static struct mgmt_callback fs_cb = {
 	.callback = fs_access_done_cb,
 	.event_id = MGMT_EVT_OP_FS_MGMT_FILE_ACCESS_DONE,
 };
 
+static struct mgmt_callback fs_deny_cb = {
+	.callback = fs_access_cb,
+	.event_id = MGMT_EVT_OP_FS_MGMT_FILE_ACCESS,
+};
+
 static int register_fs_hook(void)
 {
 	mgmt_callback_register(&fs_cb);
-	LOG_INF("fs_mgmt upload hook registered");
+	mgmt_callback_register(&fs_deny_cb);
+	LOG_INF("fs_mgmt upload hooks registered");
 	return 0;
 }
 SYS_INIT(register_fs_hook, APPLICATION, 90);

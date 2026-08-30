@@ -65,6 +65,49 @@ enum fsx_mgmt_cmd {
 	 * running / done / fail.
 	 */
 	FSX_MGMT_ID_TRIGGER_DFU = 5,
+
+	/* STOP_DFU (write): end the run in progress and clear the status back
+	 * to IDLE.
+	 *
+	 *   req: {}                     (no fields)
+	 *   rsp: { "stopped": bool }    true if a run was actually ended
+	 *
+	 * `stopped: false` means nothing was running. That is not an error —
+	 * the sticky DONE/FAILED from the previous run was still cleared — so
+	 * a client may send this unconditionally whenever it wants a clean
+	 * slate, without first asking whether a run is in flight.
+	 */
+	FSX_MGMT_ID_STOP_DFU    = 6,
+
+	/* READ { path:tstr } — say what a file is, whether it is intact, and
+	 * whether this build could flash it.
+	 *
+	 *   rsp: { "kind":uint, "transport":uint, "ok":bool, "flashable":bool,
+	 *          "reason":tstr, "bytes":uint,
+	 *          "devtype":uint,            (legacy packages)
+	 *          "name":tstr, "version":tstr, "chip":tstr }   (ESP32 images)
+	 *
+	 * The client asks the same questions before uploading, because that is
+	 * the only place a bad file can be refused before the transfer is
+	 * spent. This is the authority afterwards: files also arrive over
+	 * plain SMP from nRF Connect Device Manager, which will never run the
+	 * web client's checks, and a file may predate them entirely.
+	 *
+	 * Reads the whole file to checksum it — roughly a second per 500 KB —
+	 * and returns MGMT_ERR_EBUSY while a DFU is running, because it
+	 * borrows the same archive handle the transfer is using.
+	 */
+	FSX_MGMT_ID_INSPECT     = 7,
+
+	/* READ {} — what this build can do.
+	 *
+	 *   rsp: { "transports":uint }   bitmask of enum fw_transport_id
+	 *
+	 * Exists so the client does not keep its own copy of the transport
+	 * table. It had one, kept honest by a test; asking removes the copy
+	 * instead of testing it, and a copy that cannot exist cannot drift.
+	 */
+	FSX_MGMT_ID_CAPS        = 8,
 };
 
 /* Directory entry type constants used in `list` response. */

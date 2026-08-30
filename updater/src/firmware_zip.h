@@ -39,8 +39,13 @@ enum fw_type {
  */
 struct zip_entry {
 	char     name[ZIP_NAME_MAX];
+	uint16_t name_len;       /* as stored, before truncation into `name` */
 	uint32_t data_offset;    /* absolute offset of the raw bytes */
 	uint32_t size;           /* uncompressed size, same as compressed for STORE */
+	uint32_t comp_size;      /* as stored; equal to `size` for STORE */
+	uint32_t crc32;          /* from the local file header */
+	uint16_t method;         /* 0 = STORE, which is all we can stream */
+	bool     streamed;       /* sizes are in a trailing descriptor, not the header */
 };
 
 /* Everything the DFU state machine needs to know about a firmware bundle. */
@@ -71,6 +76,27 @@ int firmware_zip_read(const struct zip_entry *entry, uint32_t offset,
 
 /* Release the archive file handle. Safe to call when nothing is open. */
 void firmware_zip_close(void);
+
+/* ---- primitives, for a second reader over its own handle ---------------
+ *
+ * firmware_inspect.c validates archives, which means walking one to the end
+ * and reporting what is wrong with it — including entries this module refuses
+ * to stream. It uses these rather than a second copy of the walker, and its
+ * own `struct fs_file_t` rather than the singleton above, so inspecting a
+ * file cannot move the cursor of an archive a DFU is streaming from.
+ */
+
+/* Read exactly `len` bytes at `off`. Returns 0, or negative errno (-EIO on a
+ * short read, which for a seekable file means past the end). */
+int firmware_zip_read_at(struct fs_file_t *f, uint32_t off, void *buf, uint32_t len);
+
+/* Read the local file header at `cursor`. Returns 0 and fills `out` and
+ * `next_cursor`; 1 at the end of the header sequence; negative errno on IO
+ * error. Unlike the streaming path this does NOT reject compressed or
+ * streamed entries — it reports them, so a caller can say which entry is the
+ * problem instead of only that there is one. */
+int firmware_zip_next(struct fs_file_t *f, uint32_t cursor,
+		      struct zip_entry *out, uint32_t *next_cursor);
 
 #ifdef __cplusplus
 }

@@ -6,7 +6,7 @@
  * peripheral to the browser, central to the DFU target — and that combination
  * is already proven: a browser has held its SMP link through an entire
  * transfer, and radio contention was measured and ruled out as a cause of
- * failure (see Trap 4 in CLAUDE.md).
+ * failure (see Trap 4 in notes/dfu-tuning.md).
  *
  * ---- Why not CONFIG_LOG_BACKEND_BLE -------------------------------------
  *
@@ -25,10 +25,18 @@
  *
  * ---- The constraint that shapes everything else -------------------------
  *
- * CONFIG_BT_BUF_ACL_TX_COUNT=3, CONFIG_BT_CONN_TX_MAX=3. **Three TX buffers,
- * shared between both links.** The DFU stream keeps one write outstanding and
- * already treats -ENOMEM TX-buffer retries as a starvation signature worth
- * warning about.
+ * On the nRF parts, CONFIG_BT_BUF_ACL_TX_COUNT=3 and CONFIG_BT_CONN_TX_MAX=3.
+ * **Three TX buffers, shared between both links.** The DFU stream keeps one
+ * write outstanding and already treats -ENOMEM TX-buffer retries as a
+ * starvation signature worth warning about.
+ *
+ * **This is not universal and must not be assumed.** The ESP32-S3 comes out at
+ * 10 of each, which is how the DFU pacing broke on that board: the client's
+ * one-write-outstanding discipline produces real back-pressure at 3 buffers
+ * and almost none at 10, so `pkt_gap_ms` alone had to carry pacing it had
+ * never had to carry before. See the ESP32-S3 section in notes/dfu-tuning.md.
+ * Ask the build, not this comment: grep BT_CONN_TX_MAX in the generated
+ * .config under updater/build.../updater/zephyr/ for the board in hand.
  *
  * So this backend must never take more than it needs, and there is a feedback
  * loop waiting for anyone who gets it wrong: the DFU client logs a warning
