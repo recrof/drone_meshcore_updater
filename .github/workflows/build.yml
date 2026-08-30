@@ -198,9 +198,38 @@ jobs:
 
           # Where the bootloader takes a .uf2, that — not the hex — is the
           # file a user without a probe can actually install, by dragging it
-          # onto the mass-storage device the board exposes.
-          if [ -f updater/build/merged.uf2 ]; then
-            cp updater/build/merged.uf2 out/${BASE}-merged.uf2
+          # onto the mass-storage device the board exposes. On the nRF52840 it
+          # is also the *recovery* path: its serial DFU is single-bank, so a
+          # failed transfer leaves no application at all.
+          #
+          # This is generated here rather than copied. build.sh's merge_uf2()
+          # does it locally, but CI runs `west build` directly and merge_hex.py
+          # writes straight into out/, so updater/build/merged.uf2 never exists
+          # on a runner. This step used to be `if [ -f ... ]; then cp; fi`,
+          # which meant it quietly copied nothing, every release, and the only
+          # symptom was a download link the web client never rendered — a
+          # missing affordance looks exactly like one that was never meant to
+          # exist. v1.5 shipped without it.
+          #
+          # Both facts come out of the build, as they do in build.sh: Zephyr
+          # already knows whether the board wants UF2 and which family ID its
+          # bootloader accepts. A wrong family ID is rejected by the
+          # bootloader; a missing one silently produces a file no bootloader
+          # will take.
+          if grep -q '^CONFIG_BUILD_OUTPUT_UF2=y' "${APP}/.config"; then
+            FAMILY=$(sed -n 's/^CONFIG_BUILD_OUTPUT_UF2_FAMILY_ID="\(.*\)"/\1/p' \
+                     "${APP}/.config")
+            if [ -z "${FAMILY}" ]; then
+              echo "::error::${{ matrix.slug }} wants UF2 but declares no family ID"
+              exit 1
+            fi
+            python3 zephyr/scripts/build/uf2conv.py "out/${BASE}-merged.hex" \
+              -f "${FAMILY}" -c -o "out/${BASE}-merged.uf2"
+            # Loud, not conditional: this board's drag-and-drop install and its
+            # only recovery route both depend on the file existing.
+            [ -s "out/${BASE}-merged.uf2" ] || {
+              echo "::error::uf2conv produced nothing for ${{ matrix.slug }}"; exit 1; }
+            echo "merged.uf2: $(wc -c < "out/${BASE}-merged.uf2") bytes, family ${FAMILY}"
           fi
 
           # The full board target, next to the artifacts it describes.
