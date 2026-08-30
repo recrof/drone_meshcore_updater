@@ -1,5 +1,9 @@
 /*
- * Application-level device-tree overlay.
+ * Devicetree overlay for the Seeed XIAO nRF54LM20A.
+ *
+ * Named for the board because a board overlay *replaces* app.overlay rather
+ * than adding to it — see common.dtsi, which this includes for the parts
+ * every board shares.
  *
  * Seeed's vendored board file defines the on-board PY25Q64H QSPI flash
  * (as `py25q64` on `spi00`) but ships it `status = "disabled"` with no
@@ -9,28 +13,19 @@
  * proper filesystem instead of a manually-written FAT12 image.
  */
 
-/ {
-	fstab {
-		compatible = "zephyr,fstab";
+#include "../common.dtsi"
 
-		lfs1: lfs1 {
-			compatible = "zephyr,fstab,littlefs";
-			/* Mount point intentionally matches the DT node label
-			 * `lfs1` — nRF Connect Device Manager defaults its
-			 * upload/download destination to `/<label>/`, so
-			 * keeping them aligned means the app's default paths
-			 * "just work" and users don't have to hand-type
-			 * `/lfs/` every time.
-			 */
-			mount-point = "/lfs1";
-			partition = <&lfs_partition>;
-			automount;
-			read-size = <16>;
-			prog-size = <16>;
-			cache-size = <64>;
-			lookahead-size = <32>;
-			block-cycles = <512>;
-		};
+/*
+ * led.c asks for the colours by name rather than by led0/led1/led2, because
+ * the numbering is not consistent between XIAOs: here led0 is blue, on
+ * xiao_ble led0 is red. Aliasing per board keeps that in the devicetree
+ * instead of in a comment nobody reads before swapping boards.
+ */
+/ {
+	aliases {
+		blue-led = &blue_led;
+		red-led = &red_led;
+		green-led = &green_led;
 	};
 };
 
@@ -84,4 +79,4 @@
  * Corrected MCUboot slot geometry. Shared with the bootloader image through
  * sysbuild/mcuboot.overlay — see that file for why it is not inline here.
  */
-#include "rram_partitions.dtsi"
+#include "../rram_partitions.dtsi"
