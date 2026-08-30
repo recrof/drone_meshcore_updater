@@ -1,0 +1,46 @@
+# Seeed XIAO ESP32C5 board configuration
+#
+# ---- THE ONE LINE THAT DEVIATES FROM UPSTREAM ---------------------------
+#
+# Upstream selects SOC_ESP32_C5_WROOM_1_N8R8. **That symbol does not exist in
+# the Zephyr tree this project pins** (NCS v3.4.0 -> Zephyr 4.4). Ours defines
+# exactly one C5 module variant, N8R4, in
+# zephyr/soc/espressif/esp32c5/Kconfig.soc — and the board port postdates it.
+#
+# Adding the symbol upstream-side is not an option: zephyr/ is west-managed and
+# gitignored, so a patch there is reverted by the next `west update` without a
+# word. Same reasoning as the -Dnrf_crypto_keys_housekeeping() workaround in
+# sysbuild/mcuboot_xiao_esp32s3.conf — keep the fix inside this repo.
+#
+# It is safe to select the N8R4 symbol, and the reason is that the symbol is
+# **cosmetic**. Its entire effect in that Kconfig.soc is:
+#
+#     config SOC_ESP32_C5_WROOM_1_N8R4
+#         bool
+#         select SOC_ESP32C5
+#
+#     config SOC_PART_NUMBER
+#         default "ESP32_C5_WROOM_1_N8R4" if SOC_ESP32_C5_WROOM_1_N8R4
+#
+# It selects the SoC and names a string. It drives no memory sizes: flash size
+# reaches Kconfig as CONFIG_FLASH_SIZE, computed from the devicetree
+# (`dt_node_reg_size_int` in Kconfig.defconfig), and PSRAM size reaches it as
+# CONFIG_ESP_SPIRAM_SIZE, computed from the psram0 node's `size` property
+# (Kconfig.spiram). Both are devicetree facts, and the .dts sets both to the 8
+# MB this board actually carries.
+#
+# **The one visible consequence** is that `CONFIG_SOC_PART_NUMBER` reads
+# "ESP32_C5_WROOM_1_N8R4" on a board fitted with an N8R8. Nothing in this
+# firmware reads it. It is wrong in a boot banner and right nowhere, which is
+# the cheapest of the available wrongnesses — the alternatives are a patched
+# west tree that silently reverts, or a hand-written SoC variant that then has
+# to be kept in step with Espressif's.
+#
+# **When the pinned tree gains SOC_ESP32_C5_WROOM_1_N8R8**, change the select
+# below to it and delete the &psram0 override in the .dts. Both, or the board
+# ends up with 8 MB of PSRAM declared twice and nobody the wiser.
+
+config BOARD_XIAO_ESP32C5
+	select SOC_ESP32_C5_WROOM_1_N8R4
+	select SOC_ESP32C5_HPCORE if BOARD_XIAO_ESP32C5_ESP32C5_HPCORE
+	select SOC_ESP32C5_LPCORE if BOARD_XIAO_ESP32C5_ESP32C5_LPCORE

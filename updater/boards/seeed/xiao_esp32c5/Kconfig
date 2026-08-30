@@ -1,0 +1,11 @@
+# Vendored from upstream Zephyr, verbatim.
+#
+# The LPCORE line is kept even though this port ships no LP-core image: it is
+# guarded by a symbol that is never set here, so it costs nothing, and keeping
+# the file identical to upstream's makes the next refresh a diff rather than a
+# merge.
+
+config HEAP_MEM_POOL_ADD_SIZE_BOARD
+	int
+	default 4096 if BOARD_XIAO_ESP32C5_ESP32C5_HPCORE
+	default 256 if BOARD_XIAO_ESP32C5_ESP32C5_LPCORE

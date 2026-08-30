@@ -1,0 +1,14 @@
+# Vendored from upstream Zephyr, verbatim.
+#
+# BOOT_SIGNATURE_TYPE_NONE is upstream's default and is NOT what this project
+# builds with — updater/sysbuild/sysbuild_xiao_esp32c5.conf overrides it to
+# RSA. Left as upstream wrote it so this file stays a straight copy; the
+# override belongs with the other sysbuild decisions, not in a board file.
+
+choice BOOTLOADER
+	default BOOTLOADER_MCUBOOT
+endchoice
+
+choice BOOT_SIGNATURE_TYPE
+	default BOOT_SIGNATURE_TYPE_NONE
+endchoice

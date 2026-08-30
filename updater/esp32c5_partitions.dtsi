@@ -1,0 +1,149 @@
+/*
+ * Flash partition table for the Seeed XIAO ESP32C5 (ESP32-C5-WROOM-1 N8R8).
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Shared by the application image and the MCUboot image, for the same reason
+ * every other *_partitions.dtsi in this directory is: sysbuild builds MCUboot
+ * as its own Zephyr image with its own devicetree, and one fragment is what
+ * stops the two disagreeing about where the slots are.
+ *
+ * ---- THE ONE THING THAT IS NOT LIKE THE ESP32-S3 ------------------------
+ *
+ * **The bootloader starts at 0x2000, not 0x0.** The C5's ROM reserves the
+ * first two flash sectors (8 KB) for the Key Manager, so the second-stage
+ * bootloader is loaded from 0x2000. On the S3 it is 0x0.
+ *
+ * This is the single most dangerous number in this file, because getting it
+ * wrong is invisible from end to end. `esp32c5_partitions.dtsi` and
+ * `esp32s3_partitions.dtsi` otherwise describe the same 8 MB layout, so the
+ * offset is exactly the sort of thing that gets copied across. The browser
+ * flasher writes each image at the offset it is *told*, and `SPI_FLASH_MD5`
+ * verifies what was written at the offset it was written to — so a bootloader
+ * staged at 0x0 flashes clean, reads back clean, and produces a board that
+ * does not boot, with its console already off. That is Trap 6's failure mode
+ * reached by a different road.
+ *
+ * The defence is not this comment. `PART_LAYOUT` in stage-firmware.mjs holds
+ * the offsets, and stage-firmware.test.mjs parses *this file* and fails if the
+ * two disagree. Change an offset here and the test tells you what else to
+ * change.
+ *
+ * ---- Why the vendor table is replaced -----------------------------------
+ *
+ * The board includes <espressif/partitions_0x2000_default_8M.dtsi>, whose
+ * front half is right and whose tail is not:
+ *
+ *   - **192 KB of storage.** Firmware bundles are 300-500 KB each. A device
+ *     that cannot hold one bundle is not an updater. This is the same reason
+ *     the S3's table was replaced.
+ *   - **3840 KB slots**, which with a 124 KB scratch and two 32 KB LP-core
+ *     slots leaves nothing for a filesystem. We do not build an LP-core image
+ *     and we do not swap through scratch (SWAP_USING_MOVE), so all three are
+ *     dead weight here.
+ *
+ *   - **A 56 KB bootloader slot**, which this project's MCUboot does not fit
+ *     in. See below; this is the one place the front half had to change too.
+ *
+ * The resulting layout:
+ *
+ *   0x002000   120K  boot_partition     MCUboot
+ *   0x020000  1792K  slot0_partition    image-0
+ *   0x1E0000  1792K  slot1_partition    image-1
+ *   0x3A0000    64K  storage_partition  settings
+ *   0x3B0000  4416K  lfs_partition      LittleFS — the firmware bundles
+ *
+ * **Identical to esp32s3_partitions.dtsi from slot0 onwards, deliberately.**
+ * Both parts run the same application with the same radios, so the slot sizing
+ * argument is the same one, and two Espressif boards whose tables agree past
+ * 0x20000 is a property worth being able to check by eye. The 56K bootloader
+ * is the only size that differs, and it differs because 0x2000 moved the
+ * start rather than because anything was re-judged.
+ *
+ * ---- Why the bootloader gets 120 KB and sys_partition is gone -----------
+ *
+ * **The vendor's 56 KB does not fit, and nothing tells you so.** This project's
+ * MCUboot links to 65,488 bytes here — RSA-2048 with PSA and mbedTLS, plus a
+ * console this board is the first Espressif one to keep — which is 8,144 bytes
+ * over. It was written as a hypothetical in the first draft of this file and
+ * turned out to be the actual measurement.
+ *
+ * **The build does not catch it.** On the nRF boards an oversized bootloader
+ * is a link error, because the image is linked against its partition. An
+ * Espressif image is assembled by `esptool elf2image` from segments and then
+ * written at an offset it is told separately, so nothing compares its length
+ * to the partition it is destined for. It builds, it flashes, and it silently
+ * runs 8 KB past the end of its own slot into whatever is next.
+ *
+ * So `sys_partition` is dropped and the bootloader takes 0x2000..0x20000.
+ * That partition backs ESP32_EFUSE_VIRTUAL_KEEP_IN_FLASH, a test-only mode
+ * nothing here enables; the only references to the label anywhere in the tree
+ * are two `default ... if $(dt_nodelabel_exists,sys_partition)` lines in
+ * soc/espressif/common/Kconfig.efuse, which simply stop applying. **This is
+ * the one place this table departs from the vendor's front half**, and the
+ * ESP32-S3's table keeps its own `sys_partition` precisely because there the
+ * bootloader starts at 0x0 and has 64 KB before it, which is enough.
+ *
+ * 120 KB against 65 KB used is 54%. The headroom is deliberate: MCUboot here
+ * grows with the signature type, and this board has a console.
+ *
+ * **If you ever shrink this back, check the built size — do not trust the
+ * build.** `ls -l` on the built `mcuboot/zephyr/zephyr.bin` against the
+ * `reg` below is the whole test, and stage-firmware.test.mjs now does it.
+ *
+ * ---- The thing to know about this flash ---------------------------------
+ *
+ * As on the ESP32-S3 and unlike both nRF boards, **the filesystem is on the
+ * same part the code executes from.** Writing it disables the instruction
+ * cache and runs from IRAM with interrupts off, under a live BLE link. See
+ * the note in boards/xiao_esp32c5_esp32c5_hpcore.conf.
+ */
+
+&flash0 {
+	/* Whole-node replacement rather than per-label deletion: the vendor
+	 * fragment defines nine partitions and we keep three of the names, so
+	 * deleting them one at a time reads as a list of things to keep in
+	 * sync with a file we do not control. */
+	/delete-node/ partitions;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		/*
+		 * 0x2000, not 0x0 — the ROM reserves the first 8 KB for the
+		 * Key Manager.
+		 *
+		 * 120 KB, not the vendor's 56 KB, and it absorbs what the
+		 * vendor table calls `sys_partition`. Our MCUboot is 65,488
+		 * bytes and would run 8 KB past a 56 KB slot with nothing
+		 * reporting it. See the header comment.
+		 */
+		boot_partition: partition@2000 {
+			label = "mcuboot";
+			reg = <0x00002000 DT_SIZE_K(120)>;
+		};
+
+		slot0_partition: partition@20000 {
+			label = "image-0";
+			reg = <0x00020000 DT_SIZE_K(1792)>;
+		};
+
+		slot1_partition: partition@1e0000 {
+			label = "image-1";
+			reg = <0x001e0000 DT_SIZE_K(1792)>;
+		};
+
+		storage_partition: partition@3a0000 {
+			label = "storage";
+			reg = <0x003a0000 DT_SIZE_K(64)>;
+		};
+
+		/* Everything left: the firmware bundles. */
+		lfs_partition: partition@3b0000 {
+			label = "littlefs_storage";
+			reg = <0x003b0000 DT_SIZE_K(4416)>;
+		};
+	};
+};

@@ -1,0 +1,50 @@
+/*
+ * Devicetree overlay for the Seeed XIAO ESP32C5.
+ *
+ * Fourth board, and the second Espressif one. It exists to be the *small*
+ * ESP32 updater: same dual-radio job as the XIAO ESP32-S3 — BLE Legacy DFU to
+ * nRF targets, WiFi/ElegantOTA to MeshCore's ESP32 repeaters — in the XIAO
+ * form factor, on a RISC-V core, with dual-band WiFi 6.
+ *
+ * What the board already provides and this file therefore does not:
+ *
+ *   - **The console.** `zephyr,console = &usb_serial` is the USB-Serial-JTAG
+ *     peripheral, up before main() and needing no USB device stack. Same as
+ *     the S3, and unlike either nRF board.
+ *   - **The radios.** `&wifi` and `&esp32_bt_hci` are already `okay`.
+ *   - **The flash.** One internal SPI part, MMU-mapped — no external QSPI to
+ *     enable and no `spi-nor` node.
+ *   - **The LED.** GPIO27, active-low, already a `gpio-leds` node.
+ *
+ * What it does do is replace the partition table and give the LED the alias
+ * this firmware looks for.
+ */
+
+#include "../common.dtsi"
+#include "../esp32c5_partitions.dtsi"
+
+/ {
+	chosen {
+		/* The application lives in slot0; MCUboot's own image overrides
+		 * this to boot_partition (sysbuild/mcuboot_xiao_esp32c5.overlay).
+		 * Already the board's default — restated because this overlay
+		 * replaces the board's table wholesale, and a `chosen` pointing
+		 * at a node that no longer exists is a confusing way to fail. */
+		zephyr,code-partition = &slot0_partition;
+	};
+
+	/*
+	 * One LED, so led.c's single-LED renderer — blink patterns where the
+	 * nRF boards use colour. Identical situation to the ESP32-S3.
+	 *
+	 * The board file already provides `led0`, which is Zephyr's own
+	 * convention and is what samples use. led.c deliberately does not look
+	 * for `led0`: it wants either the full red/green/blue set or an
+	 * explicit `status-led`, so that a board with one LED has *said* it has
+	 * one LED. Aliasing here rather than editing the vendored board file
+	 * keeps that file a straight copy of upstream's.
+	 */
+	aliases {
+		status-led = &yellow_led;
+	};
+};

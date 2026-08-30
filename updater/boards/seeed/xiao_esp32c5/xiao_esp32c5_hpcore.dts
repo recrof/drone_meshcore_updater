@@ -1,0 +1,148 @@
+/*
+ * SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Vendored from upstream Zephyr, with ONE deviation, marked below.
+ *
+ * Why this board is vendored at all: the upstream port postdates the Zephyr
+ * tree this project pins through NCS v3.4.0. Everything it depends on is
+ * already in that tree — the esp32c5 SoC, its dtsi, the pinctrl header, the
+ * seeed,xiao-gpio binding, and the C5 BLE/WiFi blobs in hal_espressif — so
+ * this is a backport of the board file only, not of SoC support.
+ *
+ * Only the HP core is here. Upstream also ships an LP-core .dts, defconfig and
+ * .yaml; this project has no LP-core image, so asking for
+ * `xiao_esp32c5/esp32c5/lpcore` fails at devicetree rather than producing
+ * something. That is the intended outcome and the reason the files were not
+ * copied.
+ */
+
+/dts-v1/;
+
+#include <espressif/esp32c5/esp32c5_wroom_n8r4.dtsi>
+#include "xiao_esp32c5-pinctrl.dtsi"
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <espressif/partitions_0x2000_default_8M.dtsi>
+#include "seeed_xiao_connector.dtsi"
+
+/*
+ * ---- THE DEVIATION ------------------------------------------------------
+ *
+ * Upstream includes esp32c5_wroom_n8r8.dtsi. The pinned tree has only the
+ * N8R4 variant, so we include that and correct the one thing it gets wrong
+ * for this module: the PSRAM size. Flash is already 8 MB in both variants.
+ *
+ * This is not cosmetic. CONFIG_ESP_SPIRAM_SIZE defaults from this property
+ * (Kconfig.spiram: `default $(dt_node_int_prop_int,...,size)`), and it in turn
+ * picks CONFIG_SPIRAM_TYPE — `SPIRAM_TYPE_ESPPSRAM64` depends on the size
+ * being exactly 8388608. Leaving it at 4 MB would configure half the PSRAM on
+ * a board whose WiFi and net buffers are deliberately placed there.
+ *
+ * See Kconfig.xiao_esp32c5 for why the variant symbol cannot simply be added.
+ * Delete this block at the same time as that select, never separately.
+ */
+&psram0 {
+	size = <DT_SIZE_M(8)>;
+};
+
+/ {
+	model = "Seeed XIAO ESP32C5 HP Core";
+	compatible = "seeed,xiao-esp32c5";
+
+	chosen {
+		zephyr,sram = &sramhp;
+		/*
+		 * usb_serial is the USB-Serial-JTAG peripheral, not a CDC ACM
+		 * class on the USB device stack — so, as on the ESP32-S3, the
+		 * console is up before main() and needs nothing arranged. It
+		 * also survives a CPU reset without re-enumerating, which is
+		 * what lets the browser flasher reset this part into download
+		 * mode on a port it is already holding.
+		 */
+		zephyr,console = &usb_serial;
+		zephyr,shell-uart = &usb_serial;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &slot0_partition;
+		zephyr,ieee802154 = &ieee802154;
+	};
+
+	leds: leds {
+		compatible = "gpio-leds";
+
+		yellow_led: led_0 {
+			gpios = <&gpio0 27 GPIO_ACTIVE_LOW>;
+			label = "User LED";
+		};
+	};
+
+	aliases {
+		led0 = &yellow_led;
+		watchdog0 = &wdt0;
+	};
+
+	gpio_keys {
+		compatible = "gpio-keys";
+
+		boot_button: button {
+			label = "Boot Button";
+			gpios = <&gpio0 28 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			zephyr,code = <INPUT_KEY_0>;
+		};
+	};
+};
+
+&trng0 {
+	status = "okay";
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+&wdt0 {
+	status = "okay";
+};
+
+&usb_serial {
+	status = "okay";
+};
+
+&adc0 {
+	status = "okay";
+};
+
+&i2c0 {
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_FAST>;
+	scl-gpios = <&gpio0 24 GPIO_OPEN_DRAIN>;
+	sda-gpios = <&gpio0 23 GPIO_OPEN_DRAIN>;
+	pinctrl-0 = <&i2c0_default>;
+	pinctrl-names = "default";
+};
+
+&spi2 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+	pinctrl-0 = <&spim2_default>;
+	pinctrl-names = "default";
+};
+
+&uart0 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-names = "default";
+};
+
+&wifi {
+	status = "okay";
+};
+
+&ieee802154 {
+	status = "okay";
+};
+
+&esp32_bt_hci {
+	status = "okay";
+};

@@ -1,0 +1,11 @@
+# Vendored from upstream Zephyr, verbatim.
+#
+# No `cpuclusters` key: the clusters come from the SoC's own soc.yml, so both
+# `xiao_esp32c5/esp32c5/hpcore` and `.../lpcore` resolve from this file alone.
+# Only hpcore has a .dts here — see the note in xiao_esp32c5_hpcore.dts.
+board:
+  name: xiao_esp32c5
+  full_name: XIAO ESP32C5
+  vendor: seeed
+  socs:
+  - name: esp32c5
