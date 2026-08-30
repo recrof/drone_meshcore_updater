@@ -10,16 +10,80 @@
  *   npm install --no-save jsdom
  *   node web/test/render.test.mjs web/dist/updater.html
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve, join } from "node:path";
+
+const WEB0 = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+/* --- round buttons vs the global tap-target floor ------------------------
+ *
+ * Runs before the jsdom gate below, because it needs no browser and must not
+ * be skipped along with the render tests.
+ *
+ * base.css floors every <button> at --minhit so a thumb has something to hit.
+ * **min-height beats height in the cascade**, so a button asking for
+ * `width: 17px; height: 17px; border-radius: 50%` is used at 17x36 and draws
+ * an ellipse. That is what happened to the config dialog's (i) button: it
+ * looked right in every rule you would think to read, and wrong on screen.
+ *
+ * Nothing at run time catches it, and the next round icon button will hit the
+ * same wall, so: any CSS rule that rounds a <button> to a circle must also
+ * neutralise the floor. */
+let cssBad = 0;
+{
+  const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, "");
+  const cssDir = join(WEB0, "css");
+  const css = readdirSync(cssDir).filter(f => f.endsWith(".css"))
+    .map(f => ({ f, text: strip(readFileSync(join(cssDir, f), "utf8")) }));
+
+  /* The guard is only meaningful while the floor exists. If base.css stops
+   * setting it, this test should be deleted rather than quietly passing. */
+  const floor = css.find(c => c.f === "base.css")?.text ?? "";
+  if (!/button[^{}]*\{[^{}]*min-height\s*:/.test(floor)) {
+    console.log("  FAIL base.css no longer floors button min-height — this guard is stale");
+    cssBad++;
+  }
+
+  /* Classes that appear on a <button> in any component template. */
+  const compDir = join(WEB0, "js", "components");
+  const buttonClasses = new Set();
+  for (const f of readdirSync(compDir).filter(f => f.endsWith(".js"))) {
+    const src = readFileSync(join(compDir, f), "utf8");
+    for (const m of src.matchAll(/<button\b[^>]*?\bclass="([^"]*)"/g)) {
+      for (const c of m[1].split(/\s+/)) if (c) buttonClasses.add(c);
+    }
+  }
+
+  /* Innermost blocks only: `[^{}]*` in the body cannot span a nested rule, so
+   * @media wrappers are stepped over rather than mis-parsed. */
+  for (const { f, text } of css) {
+    for (const m of text.matchAll(/([^{}]*)\{([^{}]*)\}/g)) {
+      const sel = m[1].trim(), body = m[2];
+      if (!/border-radius\s*:\s*50%/.test(body)) continue;
+      if (!/\bheight\s*:\s*[\d.]+px/.test(body)) continue;
+      const classes = (sel.match(/\.([A-Za-z0-9_-]+)/g) ?? []).map(s => s.slice(1));
+      const onButton = classes.filter(c => buttonClasses.has(c));
+      if (onButton.length === 0) continue;          // a span or a div — unaffected
+      const ok = /min-height\s*:/.test(body);
+      console.log(`${ok ? "  ok  " : "  FAIL"} ${f}: ${sel} is a round <button> ` +
+                  `(.${onButton.join(", .")})${ok ? " and clears min-height" : ""}`);
+      if (!ok) {
+        console.log("        add 'min-height: 0' — base.css's --minhit floor " +
+                    "overrides its height and makes it an ellipse");
+        cssBad++;
+      }
+    }
+  }
+}
 
 let JSDOM;
 try {
   ({ JSDOM } = await import("jsdom"));
 } catch {
   console.log("  skip  jsdom not installed (npm install --no-save jsdom)");
-  process.exit(0);
+  /* The CSS guard above still counts — it needs no browser. */
+  process.exit(cssBad ? 1 : 0);
 }
 
 const WEB = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -138,13 +202,32 @@ const dlg = app.querySelector("#cfg-overlay");
 const dlgText = dlg ? dlg.textContent.replace(/\s+/g, " ") : "";
 
 t("config dialog opens",     !!dlg);
-t("one row per schema key",  dlg?.querySelectorAll(".cfg-row").length === 14);
+
+/* Counted against the schema, not against a number written here. This used to
+ * be a literal 14, which meant adding a config key failed three assertions
+ * that had nothing to say about the key — the form is generated, so the only
+ * thing worth asserting is that it generated one of everything. */
+const { CONFIG_SCHEMA } = await import("../js/lib/config-file.js");
+const KEYS = CONFIG_SCHEMA.length;
+
+t(`one row per schema key (${KEYS})`,
+  dlg?.querySelectorAll(".cfg-row").length === KEYS,
+  String(dlg?.querySelectorAll(".cfg-row").length));
 t("sections rendered",       dlg?.querySelectorAll(".cfg-section").length >= 3);
-t("every row has a description", dlg?.querySelectorAll(".cfg-row .desc").length === 14);
-t("every row has a default chip", dlg?.querySelectorAll(".cfg-def").length === 14);
+t("every row has a description",
+  dlg?.querySelectorAll(".cfg-row .desc").length === KEYS,
+  String(dlg?.querySelectorAll(".cfg-row .desc").length));
+t("every row has a default chip",
+  dlg?.querySelectorAll(".cfg-def").length === KEYS,
+  String(dlg?.querySelectorAll(".cfg-def").length));
 t("ble_name is a text input", dlg?.querySelector("#cfg-ble_name")?.type === "text");
 t("high_mtu is a checkbox",   dlg?.querySelector("#cfg-high_mtu")?.type === "checkbox");
-t("tx_power is a select",     dlg?.querySelector("#cfg-tx_power")?.tagName === "SELECT");
+t("ble_tx_power is a select",  dlg?.querySelector("#cfg-ble_tx_power")?.tagName === "SELECT");
+t("wifi_tx_power is a select", dlg?.querySelector("#cfg-wifi_tx_power")?.tagName === "SELECT");
+/* The rename has to reach the DOM, not just the schema: a stale id here is a
+   control that renders and edits a key the firmware no longer reads. */
+t("the old tx_power key is gone from the form",
+  !dlg?.querySelector("#cfg-tx_power"));
 t("size budget shown",        /\/ 1023 B/.test(dlgText));
 
 /* --- per-key help is collapsed until asked for ------------------------- */
@@ -153,9 +236,11 @@ t("size budget shown",        /\/ 1023 B/.test(dlgText));
  * aria-controls target always exists) but must not be visible on open — the
  * whole point of the (i) is that the dialog opens as a settings screen. */
 const helpBlocks = [...(dlg?.querySelectorAll(".cfg-help") ?? [])];
-t("every row has a help block",   helpBlocks.length === 14);
+t("every row has a help block",   helpBlocks.length === KEYS,
+  String(helpBlocks.length));
 t("help hidden on open",          helpBlocks.every(h => h.style.display === "none"));
-t("every row has an (i) button",  dlg?.querySelectorAll(".cfg-info").length === 14);
+t("every row has an (i) button",  dlg?.querySelectorAll(".cfg-info").length === KEYS,
+  String(dlg?.querySelectorAll(".cfg-info").length));
 t("(i) reports collapsed state",
   [...dlg.querySelectorAll(".cfg-info")].every(b => b.getAttribute("aria-expanded") === "false"));
 
@@ -285,5 +370,137 @@ if (errors.length) {
   t("log viewer closes", !app.querySelector("#log-overlay"));
 }
 
-console.log(bad || errors.length ? "\nFAILED" : "\nall render tests passed");
-process.exit(bad || errors.length ? 1 : 0);
+/* --- appearance: mode + accent, and both remembered ---------------------
+ *
+ * The persistence is the part worth testing. Applying a colour is visible the
+ * instant you click it; a preference that silently fails to save looks
+ * identical until the next visit, which is the wrong place to find out.
+ *
+ * The menu's *closing* is worth testing for a different reason: a popup that
+ * only closes via its own button is one that sits over the controls you were
+ * reaching for, and nothing about that shows up as an error.
+ */
+{
+  const root = dom.window.document.documentElement;
+  const store = dom.window.localStorage;
+  const ctl = app.querySelector(".theme-ctl");
+  const click = (el) => el.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+  const settle = () => new Promise(r => setTimeout(r, 100));
+
+  t("header has the appearance controls", !!ctl);
+
+  const themeSrc = readFileSync(join(WEB, "js/lib/theme.js"), "utf8");
+  const ids = [...themeSrc.matchAll(/\{ id: "([a-z]+)"/g)].map(m => m[1]);
+  const tokens = readFileSync(join(WEB, "css/tokens.css"), "utf8");
+  const iconSrc = readFileSync(join(WEB, "js/components/Icon.js"), "utf8");
+
+  /* Every palette needs a `--pal-<id>` (the swatch paints itself with it) and
+     a `[data-palette="<id>"]` rule (or picking it leaves the accent on the
+     previous one — a control that appears to do nothing). */
+  for (const id of ids) {
+    t(`tokens.css selects the ${id} palette`, tokens.includes(`[data-palette="${id}"]`));
+    t(`tokens.css defines --pal-${id}`, tokens.includes(`--pal-${id}:`));
+  }
+  t("every palette token is defined in both modes",
+    ids.every(id => (tokens.match(new RegExp(`--pal-${id}:`, "g")) ?? []).length >= 3),
+    "each needs a light, a dark and a prefers-color-scheme value");
+
+  /* An icon name theme.js asks for and Icon.js does not have renders an empty
+     <path> — a button with nothing in it, and no error anywhere. */
+  const iconNames = [...themeSrc.matchAll(/: "([a-z_]+)",/g)].map(m => m[1])
+    .filter(n => /mode|palette/.test(n));
+  t("theme.js names three mode icons", iconNames.length === 3, iconNames.join(","));
+  for (const n of [...iconNames, "palette"]) {
+    t(`Icon.js has the ${n} glyph`, new RegExp(`\\b${n}:\\s*\n?\\s*"M`).test(iconSrc));
+  }
+
+  /* --- the mode button: Auto -> Light -> Dark -> Auto --- */
+  const mode = ctl?.querySelector("button.icon-only");
+  t("mode control is an icon button", !!mode?.querySelector("svg.icon"));
+  t("starts on Auto", /Appearance: Auto/.test(mode?.getAttribute("title") ?? ""),
+    mode?.getAttribute("title"));
+  /* `system` must *remove* the attribute, not set a third value: the media
+     query in tokens.css is the system answer. */
+  t("Auto sets no data-theme", root.dataset.theme === undefined, root.dataset.theme);
+
+  for (const [label, attr] of [["Light", "light"], ["Dark", "dark"], ["Auto", undefined]]) {
+    click(mode);
+    await settle();
+    t(`cycles to ${label}`,
+      new RegExp("Appearance: " + label).test(mode.getAttribute("title")),
+      mode.getAttribute("title"));
+    t(`...and data-theme is ${attr ?? "absent"}`, root.dataset.theme === attr,
+      String(root.dataset.theme));
+    t(`...and ${label} is remembered`,
+      store.getItem("dmu.theme.mode") === (attr ?? "system"),
+      store.getItem("dmu.theme.mode"));
+  }
+
+  /* --- the palette menu --- */
+  const palBtn = [...ctl.querySelectorAll("button.icon-only")][1];
+  t("palette control is a second icon button", !!palBtn?.querySelector("svg.icon"));
+  t("menu is closed to begin with", !ctl.querySelector(".theme-menu"));
+  t("...and says so", palBtn?.getAttribute("aria-expanded") === "false");
+
+  click(palBtn);
+  await settle();
+  const menu = ctl.querySelector(".theme-menu");
+  t("clicking it opens a menu", !!menu);
+  t("...and says so", palBtn?.getAttribute("aria-expanded") === "true");
+
+  const opts = [...(menu?.querySelectorAll(".theme-opt") ?? [])];
+  t("one row per palette", opts.length === ids.length, `${opts.length} vs ${ids.length}`);
+  t("rows are named", opts.every(o => (o.textContent ?? "").trim().length > 2));
+  t("exactly one row is checked",
+    opts.filter(o => o.getAttribute("aria-checked") === "true").length === 1);
+
+  /* Pick the last one: never the default, so a no-op would show. */
+  click(opts[opts.length - 1]);
+  await settle();
+  t("choosing sets data-palette",
+    root.dataset.palette === ids[ids.length - 1], root.dataset.palette);
+  t("...and remembers it",
+    store.getItem("dmu.theme.palette") === ids[ids.length - 1]);
+  t("...and closes the menu", !ctl.querySelector(".theme-menu"));
+
+  /* Escape, and a click anywhere else, both have to work — see the note above. */
+  click(palBtn); await settle();
+  t("menu reopens", !!ctl.querySelector(".theme-menu"));
+  dom.window.document.dispatchEvent(
+    new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await settle();
+  t("Escape closes it", !ctl.querySelector(".theme-menu"));
+
+  click(palBtn); await settle();
+  t("menu reopens again", !!ctl.querySelector(".theme-menu"));
+  /* jsdom has no PointerEvent constructor; a bubbling Event of the same type
+     reaches the document listener the same way a real one would. */
+  app.dispatchEvent(new dom.window.Event("pointerdown", { bubbles: true }));
+  await settle();
+  t("a click outside closes it", !ctl.querySelector(".theme-menu"));
+}
+
+/* --- the inline bootstrap in index.html must agree with theme.js ---------
+ *
+ * index.html carries a duplicate read-and-apply so the page does not paint
+ * light before the module loads. Duplication that cannot be removed gets
+ * checked instead: a key renamed in one file and not the other produces a
+ * white flash on every load and nothing else — no error, no failure, just a
+ * preference that appears to be ignored until the app finishes booting.
+ */
+{
+  const indexHtml = readFileSync(join(WEB, "index.html"), "utf8");
+  const themeSrc = readFileSync(join(WEB, "js/lib/theme.js"), "utf8");
+  const keys = [...themeSrc.matchAll(/= "(dmu\.theme\.[a-z]+)"/g)].map(m => m[1]);
+  t("theme.js declares two storage keys", keys.length === 2, keys.join(","));
+  for (const k of keys) {
+    t(`index.html bootstraps ${k}`, indexHtml.includes(k));
+  }
+  t("index.html sets data-theme", /dataset\.theme/.test(indexHtml));
+  t("index.html sets data-palette", /dataset\.palette/.test(indexHtml));
+  /* It must not throw where storage does. */
+  t("index.html guards storage access", /try\s*\{[\s\S]*catch/.test(indexHtml));
+}
+
+console.log(bad || errors.length || cssBad ? "\nFAILED" : "\nall render tests passed");
+process.exit(bad || errors.length || cssBad ? 1 : 0);

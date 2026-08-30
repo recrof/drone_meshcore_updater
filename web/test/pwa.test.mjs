@@ -62,59 +62,10 @@ t("firmware has a cache that survives activate",
 t("firmware is network-first, unlike the shell",
   /Firmware is network-first/.test(sw));
 
-/* --- the staged firmware manifest --------------------------------------
- *
- * manifest.json is generated, never committed, so there is no fixture to
- * compare against — instead hold the producer and the consumer together:
- * every key stage-firmware.mjs writes must be a key FlashDialog.js reads,
- * and every key the dialog depends on must be one the tool emits.
- */
-{
-  const { buildManifest, MANIFEST_KEYS } =
-    await import("../tools/stage-firmware.mjs");
-  const m = buildManifest(Buffer.from(":00000001FF\n"), { tag: "v1.23", file: "merged.hex" });
+/* The staged firmware manifest moved to its own suite when it grew a board
+ * dimension — see stage-firmware.test.mjs, which holds stage-firmware.mjs,
+ * firmware-manifest.js and both consuming components together. */
 
-  /* The hex fields are always written; the OTA ones only when a
-   * dfu_application.zip exists, since a release predating MCUboot has none. */
-  const REQUIRED = ["tag", "file", "bytes", "sha256", "published"];
-  t("manifest always writes the required keys",
-    REQUIRED.every(k => k in m), Object.keys(m).join(", "));
-  t("manifest writes no undeclared keys",
-    Object.keys(m).every(k => MANIFEST_KEYS.includes(k)));
-  t("every required key is declared",
-    REQUIRED.every(k => MANIFEST_KEYS.includes(k)));
-  t("manifest carries a sha256 of the image",
-    /^[0-9a-f]{64}$/.test(m.sha256), m.sha256);
-  t("manifest byte count matches the image", m.bytes === 12, String(m.bytes));
-  t("manifest timestamp is ISO-8601 Z",
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(m.published), m.published);
-
-  const dfu = buildManifest(Buffer.from("x"), { tag: "v1", file: "merged.hex" },
-                            { name: "dfu_application.zip", bytes: Buffer.from("yy") });
-  t("manifest records the OTA image separately from the hex",
-    dfu.dfu === "dfu_application.zip" && dfu.file === "merged.hex" && dfu.dfuBytes === 2);
-  t("the OTA fields are optional", !("dfu" in m));
-  /* The version is what the UI shows before downloading 280 KB, so it has to
-   * survive into the manifest. */
-  t("manifest carries the OTA image version",
-    buildManifest(Buffer.from("x"), { tag: "v1", file: "merged.hex" },
-                  { name: "d.zip", bytes: Buffer.from("y"), version: "1.0.0+2" })
-      .dfuVersion === "1.0.0+2");
-  t("manifest carries the hex image version",
-    buildManifest(Buffer.from("x"), { tag: "v1", file: "merged.hex", version: "1.0.0" })
-      .version === "1.0.0");
-
-  const dialog = readFileSync(join(WEB, "js/components/FlashDialog.js"), "utf8") +
-                 readFileSync(join(WEB, "js/components/BleUpdate.js"), "utf8");
-  /* `file` is dereferenced to build the URL and `sha256` gates the write, so
-   * those two are load-bearing rather than cosmetic. */
-  for (const key of ["file", "sha256", "tag", "bytes", "published", "dfu", "dfuVersion"]) {
-    t(`FlashDialog reads manifest.${key}`,
-      new RegExp(`newest(\\.value)?\\.${key}\\b`).test(dialog));
-  }
-  t("the dialog fetches firmware/manifest.json",
-    /firmware\/`?\s*\}?\s*manifest\.json|MANIFEST_URL/.test(dialog));
-}
 t("build-only directories are not precached",
   ![...precache].some(f => /^(dist|test|tools)\//.test(f)));
 

@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>XIAO nRF54 Update Manager</title>
-<meta name="description" content="Flash nRF52 / nRF54 targets over Bluetooth from a XIAO nRF54, with a config editor, log viewer and file manager.">
+<title>Drone MeshCore Updater</title>
+<meta name="description" content="Carry a firmware update to a MeshCore repeater you cannot reach — flash nRF5x targets over Bluetooth, with a config editor, log viewer and file manager.">
 <meta name="theme-color" content="#2e9e6b">
 <!-- The manifest is also what js/lib/pwa.js keys off to decide whether to
      register a service worker: build-single.mjs strips this line, so the
@@ -16,6 +16,26 @@
 <link rel="stylesheet" href="css/base.css">
 <link rel="stylesheet" href="css/layout.css">
 <link rel="stylesheet" href="css/config.css">
+<!-- Appearance, before the first paint.
+
+     js/lib/theme.js is the real implementation and does this again on mount;
+     this copy exists only because that file is an ES module, so it runs after
+     the document parses and the browser is free to paint the default light
+     background first. On a dark-themed device that is a white flash on every
+     load. Inline and synchronous is the only thing that beats it.
+
+     The duplicated strings are checked, not trusted: render.test.mjs asserts
+     that both storage keys and both attribute names appear in this file and in
+     theme.js. Kept deliberately dumb — it validates nothing and falls back to
+     doing nothing, because the module will fix up anything odd a moment later. -->
+<script>
+  try {
+    var m = localStorage.getItem("dmu.theme.mode");
+    var p = localStorage.getItem("dmu.theme.palette");
+    if (m === "light" || m === "dark") document.documentElement.dataset.theme = m;
+    if (p) document.documentElement.dataset.palette = p;
+  } catch (e) { /* storage can throw, not just be empty */ }
+</script>
 </head>
 <body>
 

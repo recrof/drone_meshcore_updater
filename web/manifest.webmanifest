@@ -1,7 +1,7 @@
 {
-  "name": "XIAO nRF54 updater",
-  "short_name": "nRF54 updater",
-  "description": "Flash nRF52 / nRF54 targets over Bluetooth from a XIAO nRF54, with a config editor, log viewer and file manager.",
+  "name": "Drone MeshCore Updater",
+  "short_name": "MeshCore Updater",
+  "description": "Carry a firmware update to a MeshCore repeater you cannot reach — flash nRF5x targets over Bluetooth, with a config editor, log viewer and file manager.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

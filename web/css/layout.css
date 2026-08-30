@@ -31,6 +31,51 @@ header.connected .dot {
   header.connected .dot { animation: none; }
 }
 
+/* --- appearance controls (ThemePicker) ------------------------- */
+.theme-ctl { display: flex; align-items: center; gap: 2px; position: relative; }
+
+/* Square icon buttons. base.css floors every button at --minhit for a thumb;
+   these keep that as the *target* and just lose the horizontal padding, so
+   they read as glyphs rather than as two more labelled actions. */
+.icon-only {
+  padding: 0; width: var(--minhit);
+  display: inline-flex; align-items: center; justify-content: center;
+  border-color: transparent; color: var(--muted);
+}
+.icon-only:hover:not(:disabled) { border-color: var(--line); color: var(--fg); }
+.icon-only[aria-expanded="true"] { border-color: var(--accent); color: var(--fg); }
+
+/* The palette menu. Anchored to .theme-ctl, right-aligned so it opens inward
+   from the header's right-hand side rather than off the edge. */
+.theme-menu {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 40;
+  min-width: 168px; padding: 4px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.22);
+  display: flex; flex-direction: column; gap: 1px;
+}
+.theme-opt {
+  display: flex; align-items: center; gap: 9px;
+  width: 100%; text-align: left; justify-content: flex-start;
+  border-color: transparent; border-radius: 5px; font-size: 13px;
+}
+.theme-opt:hover:not(:disabled) { background: var(--bg); border-color: transparent; }
+.theme-opt.on { color: var(--fg); font-weight: 500; }
+.theme-opt .opt-label { flex: 1; }
+/* A ring rather than a tick: a glyph inside 14px of arbitrary colour is
+   unreadable on at least one of the seven. */
+.theme-opt.on .swatch { box-shadow: 0 0 0 2px var(--card), 0 0 0 3px var(--fg); }
+
+/* Not a <button>, so base.css's --minhit floor does not apply and it can be a
+   real circle. The one in the menu row is decoration; the row is the target. */
+.theme-ctl .swatch {
+  --sw: var(--accent);
+  width: 14px; height: 14px; flex: none;
+  border-radius: 50%;
+  background: var(--sw);
+  border: 1px solid color-mix(in srgb, var(--fg) 22%, transparent);
+}
+
 /* --- toolbar --------------------------------------------------- */
 .toolbar {
   display: flex; gap: 6px; padding: 8px 14px;
@@ -122,6 +167,19 @@ header.connected .dot {
 }
 
 .dfu-watch { font-size: 12px; padding: 4px 10px; }
+
+/* Stop is a destructive-ish action sitting next to a neutral one, so it is
+ * tinted rather than left identical to "Log" — but not filled red: it is the
+ * button you want an anxious operator to press without hesitating, and the
+ * cost of pressing it by mistake is one re-trigger. */
+.dfu-stop { font-size: 12px; padding: 4px 10px; }
+.dfu-stop:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  color: var(--danger);
+}
+.dfu-stop:not(:disabled):hover {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
 .dfu-dismiss {
   background: none; border: 0; color: var(--muted);
   font-size: 18px; line-height: 1; padding: 0 4px; cursor: pointer;
@@ -145,6 +203,7 @@ header.connected .dot {
   /* The label is the first thing to go: the icon plus the banner it sits in
    * already say what the button opens. */
   .dfu-watch .label { display: none; }
+  .dfu-stop .label { display: none; }
   .dfu-subject { display: none; }
 }
 
@@ -294,3 +353,12 @@ header .update {
   border-color: var(--warn); color: var(--warn); font-size: 12px;
 }
 header .update:hover { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+
+/* The device's verdict on a firmware file, under its name in the listing.
+ * Its own line rather than a column: it is absent for most rows, and an empty
+ * column for every folder and log file is worse than a line that appears when
+ * there is something to say. */
+.file-verdict     { font-size: 11px; opacity: .75; margin-top: 2px; }
+.file-verdict.ok  { color: var(--accent); }
+.file-verdict.err { color: var(--danger); opacity: 1; }
+.file-verdict.warn{ color: var(--warn); }

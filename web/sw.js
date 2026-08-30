@@ -29,7 +29,10 @@
  *    reason the precache is versioned.
  */
 
-const CACHE = "xiao-nrf54-updater-v8";
+/* Bump on every shell change — the suffix is what invalidates the precache.
+ * Restarted at v1 with the rename: the old counter belonged to a name that
+ * no longer exists, and there were no deployed caches to keep continuity with. */
+const CACHE = "drone-meshcore-updater-v16";
 
 /*
  * The release firmware staged by CI at firmware/. Kept in its own cache,
@@ -40,7 +43,12 @@ const CACHE = "xiao-nrf54-updater-v8";
  * This is what makes "Flash newest" work with no network — which is the whole
  * premise of the tool being a PWA.
  */
-const FIRMWARE_CACHE = "xiao-nrf54-firmware";
+/* Renaming this key is not free once anyone is using the app: the activate
+ * handler below deletes every cache key it does not recognise, so a rename
+ * drops the cached firmware on upgrade, and it is only re-cached when the
+ * flash dialog is next opened *online*. Renamed here while the project had no
+ * users and nothing to lose; think twice about doing it again. */
+const FIRMWARE_CACHE = "drone-meshcore-updater-firmware";
 const FIRMWARE_PREFIX = new URL("firmware/", self.location.href).href;
 
 const PRECACHE = [
@@ -56,18 +64,27 @@ const PRECACHE = [
   "js/main.js",
   "js/App.js",
   "js/store.js",
+  "js/flash-run.js",
   "js/vue.js",
   "js/lib/cbor.js",
   "js/lib/cmsis-dap.js",
   "js/lib/config-file.js",
   "js/lib/dfu-status.js",
+  "js/lib/esptool.js",
+  "js/lib/firmware-image.js",
+  "js/lib/firmware-manifest.js",
   "js/lib/format.js",
   "js/lib/intel-hex.js",
   "js/lib/log-file.js",
   "js/lib/mcuboot-image.js",
+  "js/lib/md5.js",
+  "js/lib/nordic-dfu-serial.js",
   "js/lib/nrf54l-flash.js",
   "js/lib/pwa.js",
+  "js/lib/serial.js",
   "js/lib/smp-client.js",
+  "js/lib/theme.js",
+  "js/lib/usb-flashers.js",
   "js/components/AppHeader.js",
   "js/components/BleUpdate.js",
   "js/components/ConfigDialog.js",
@@ -80,7 +97,10 @@ const PRECACHE = [
   "js/components/LogPane.js",
   "js/components/LogViewer.js",
   "js/components/MappingEditor.js",
+  "js/components/ProbeFlash.js",
   "js/components/ProgressBar.js",
+  "js/components/ThemePicker.js",
+  "js/components/SerialFlash.js",
 
   "vendor/vue.esm-browser.prod.js",
 

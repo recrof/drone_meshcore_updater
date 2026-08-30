@@ -64,6 +64,25 @@
   background: transparent; color: var(--muted);
   font-family: var(--mono); font-size: 11px; font-style: italic; line-height: 1;
   align-self: center;
+  /* base.css floors every button at --minhit (36px, 44px on a coarse
+     pointer) for a thumb-sized tap target. **min-height beats height in the
+     cascade**, so without this line the used box is 17px wide by 36px tall
+     and the 50% radius draws an ellipse, not a circle. Any round icon button
+     added later will need the same line — see the guard in render.test.mjs. */
+  min-height: 0;
+  position: relative;
+}
+
+/* Giving the height back as a hit area rather than as pixels: an invisible
+   --minhit square centred on the 17px dot. The dot stays a marginal note that
+   does not compete with the control it explains, and the thumb still gets the
+   target base.css intends. Inside the button, so it cannot steal the click
+   from it; the only thing it overlaps is the 8px gap to the label, whose own
+   target is the whole label. */
+.cfg-info::before {
+  content: ""; position: absolute; left: 50%; top: 50%;
+  width: var(--minhit); height: var(--minhit);
+  transform: translate(-50%, -50%);
 }
 .cfg-info:hover { border-color: var(--accent); color: var(--accent); }
 .cfg-row.open .cfg-info {
@@ -132,6 +151,7 @@
 }
 .cfg-banner.warn { border-left-color: var(--warn); }
 .cfg-banner.err  { border-left-color: var(--danger); color: var(--fg); }
+.cfg-banner.ok   { border-left-color: var(--accent); }
 
 .cfg-raw { margin-top: 16px; }
 .cfg-extra {
@@ -202,6 +222,31 @@
   display: grid; place-items: center; padding: 24px;
 }
 
+/* Which board is being flashed. A segmented row rather than a <select>: there
+   are three of them, they are the whole reason this dialog has branches, and a
+   collapsed control would hide the fact that a choice was made at all. */
+.flash-boards {
+  display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0 10px;
+}
+.flash-board {
+  font-family: var(--sans); font-size: 12px;
+  padding: 5px 11px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--card); color: var(--muted); cursor: pointer;
+}
+.flash-board:hover:not(:disabled) { color: var(--fg); }
+.flash-board.on {
+  background: var(--accent); border-color: var(--accent); color: var(--accent-fg);
+}
+.flash-board:disabled { opacity: .5; cursor: default; }
+
+/* The button dance that puts a board in its bootloader. Numbered because the
+   order matters on both boards and neither is guessable. */
+.flash-steps {
+  margin: 0 0 4px; padding-left: 20px;
+  font-family: var(--sans); font-size: 12px; color: var(--muted); line-height: 1.6;
+}
+.flash-steps li { padding: 2px 0; }
+
 .flash-step {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 10px 0;
@@ -211,14 +256,9 @@
 .flash-ok { color: var(--accent); font-size: 11px; }
 
 .flash-note { color: var(--muted); font-size: 12px; }
+a.flash-note { color: var(--accent); }
 .flash-note.warn { color: var(--warn); }
 .flash-note.err  { color: var(--danger); }
-
-/* <label class=btn> wrapping a hidden file input — base.css hides
-   input[type=file] globally, so the label is the whole control. */
-label.btn { display: inline-block; cursor: pointer; }
-label.btn.disabled { opacity: 0.4; cursor: not-allowed; }
-label.btn:hover:not(.disabled) { border-color: var(--accent); }
 
 .flash-progress { display: flex; align-items: center; gap: 10px; padding: 6px 0 2px; }
 .flash-progress .bar {
@@ -370,10 +410,4 @@ label.btn:hover:not(.disabled) { border-color: var(--accent); }
 }
 
 .upd { padding-bottom: 4px; }
-.upd-slots {
-  display: flex; gap: 14px; flex-wrap: wrap;
-  margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line);
-  font-family: var(--mono); font-size: 11px; color: var(--muted);
-}
-.cfg-banner.warn button { margin-left: 8px; vertical-align: middle; }
-.upd-summary { flex-basis: 100%; font-family: var(--sans); font-style: italic; }
+.upd-status { margin: 6px 0 0; color: var(--muted); font-family: var(--sans); }
