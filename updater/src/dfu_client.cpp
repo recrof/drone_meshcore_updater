@@ -241,13 +241,34 @@ void disconnect_and_release(void)
 	if (s_link.conn == nullptr) {
 		return;
 	}
-	if (s_link.connected) {
-		bt_conn_disconnect(s_link.conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-		/* Give the link a moment to actually go away. Trap 3: a pending
-		 * ATT request can hold it open well past this, which is why
-		 * CONFIG_BT_MAX_CONN carries a slack slot. */
-		k_sem_take(&s_link.sem, K_SECONDS(2));
+
+	/*
+	 * **Unconditionally, not only when `connected` is set.**
+	 *
+	 * The guard used to be `if (s_link.connected)`, and the case it missed
+	 * is the one that wedges a target for good. On the connect-timeout path
+	 * `connected` is false *because the connection has not completed yet* —
+	 * but bt_conn_le_create() has an initiator running, and unref alone does
+	 * not stop it. If the peer answers a moment after our 10 s window we end
+	 * up in a connection nobody holds a handle to and nothing ever
+	 * terminates. The peer is then a peripheral in a link, so it stops
+	 * advertising, so the next scan cannot find it, so every retry fails at
+	 * the scan and the transfer can never be repaired short of power-cycling
+	 * a device that is on a roof.
+	 *
+	 * bt_conn_disconnect() on a connecting conn cancels the initiator, and
+	 * on one that is already gone it just returns an error worth ignoring.
+	 * Both are strictly better than skipping it.
+	 */
+	int rc = bt_conn_disconnect(s_link.conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+	if (rc && rc != -ENOTCONN) {
+		LOG_WRN("bt_conn_disconnect rc=%d", rc);
 	}
+	/* Give the link a moment to actually go away. Trap 3: a pending ATT
+	 * request can hold it open well past this, which is why
+	 * CONFIG_BT_MAX_CONN carries a slack slot. */
+	k_sem_take(&s_link.sem, K_SECONDS(2));
+
 	bt_conn_unref(s_link.conn);
 	s_link.conn = nullptr;
 	s_link.connected = false;

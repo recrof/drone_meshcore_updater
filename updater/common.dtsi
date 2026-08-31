@@ -32,7 +32,42 @@
 			automount;
 			read-size = <16>;
 			prog-size = <16>;
-			cache-size = <64>;
+			/*
+			 * The cache is the size of every device transfer
+			 * littlefs makes, so it sets how many SPI
+			 * transactions a firmware bundle costs — and the
+			 * per-transaction overhead dominates by a wide
+			 * margin over the bytes themselves.
+			 *
+			 * Zephyr's default is 64, and on the XIAO MG24 that
+			 * measured 6071 transactions for one 379 KB bundle:
+			 * 24 KB/s writing, 467 KB/s reading. At 256 the same
+			 * file writes at 95 KB/s and reads at 830 KB/s — 4x
+			 * and 1.8x, for 5 KB of RAM. 256 also happens to be
+			 * the flash's own program-page size on every board
+			 * here, so a write is one full page rather than four
+			 * partial ones.
+			 *
+			 * **512 was measured and is worse**, which is why
+			 * this is not simply "as big as fits": writing gains
+			 * nothing (95.7 vs 95.1 KB/s, inside the noise) and
+			 * reading falls back to 527 KB/s from 830.
+			 *
+			 * `read-size`/`prog-size` stay at 16. Unlike this
+			 * one they are recorded in the littlefs superblock,
+			 * so changing them is a format change that orphans
+			 * every filesystem already in the field.
+			 *
+			 * **CONFIG_FS_LITTLEFS_CACHE_SIZE in prj.conf must
+			 * match this number**, and it is a different number
+			 * in a different file: the DT property sizes the
+			 * transfers, the Kconfig sizes the heap they are
+			 * allocated from. Raising only this one builds and
+			 * boots and then fails every fs_open() with -ENOMEM,
+			 * which surfaces as `config.txt not present`.
+			 * littlefs-cache.test.mjs holds the two together.
+			 */
+			cache-size = <256>;
 			lookahead-size = <32>;
 			block-cycles = <512>;
 		};

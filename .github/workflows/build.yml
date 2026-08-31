@@ -64,6 +64,22 @@ jobs:
             low: "0x27000"    # under it sits the Adafruit UF2 bootloader
             slot0: "0x33000"
             limit: "0xf4000"  # uf2_boot_partition — overwriting it bricks USB
+          # The XIAO MG24 *is* a row here, unlike the Espressif boards, and the
+          # reason is only about the compiler: this is a Cortex-M33, so the ARM
+          # cross-compiler in Nordic's container builds it. What it does need is
+          # the Silabs radio blobs — see the `blobs:` key and the step that
+          # consumes it. Without them CONFIG_BT_SILABS_EFR32 is not selectable
+          # and Bluetooth silently does not exist in the image.
+          #
+          # Note the addresses: this part's flash is mapped at 0x08000000, not
+          # at 0. A row copied from either nRF board above would assert
+          # `lo == 0` against an image that legitimately starts 128 MB higher.
+          - board: xiao_mg24/efr32mg24b220f1536im48
+            slug: xiao_mg24
+            blobs: hal_silabs
+            low: "0x8000000"   # MCUboot links at the base of flash
+            slot0: "0x8010000"
+            limit: "0x817c000" # storage_partition
           # NOT here: xiao_esp32s3. This container is Nordic's and carries no
           # Xtensa toolchain, and the Espressif build additionally needs
           # `west blobs fetch hal_espressif`. Adding it means a second job with
@@ -165,8 +181,34 @@ jobs:
         # is otherwise multi-GB per run.
         run: west update --narrow -o=--depth=1
 
+      - name: Fetch vendor blobs
+        # Only the rows that declare one. `west blobs fetch` is a large
+        # download and every board here but the MG24 needs nothing, so this is
+        # keyed off the matrix rather than run unconditionally.
+        #
+        # It is not optional where it applies: `BT_SILABS_EFR32 depends on
+        # ZEPHYR_HAL_SILABS_MODULE_BLOBS`, and Kconfig drops an assignment
+        # whose dependencies are unmet without a word — so a missing fetch
+        # produces a build that succeeds and an image with no Bluetooth.
+        if: matrix.blobs != ''
+        run: west blobs fetch ${{ matrix.blobs }}
+
       - name: Build firmware
         run: west build -b ${{ matrix.board }} updater --build-dir updater/build
+
+      - name: Bluetooth is actually in the image
+        # The failure this catches is silent by construction: a dropped
+        # Kconfig (missing blobs, a renamed symbol) leaves a firmware that
+        # boots, advertises nothing, and reports no error anywhere. Ask the
+        # generated .config, never the fragment — the standing rule.
+        run: |
+          CFG=updater/build/updater/zephyr/.config
+          grep -q '^CONFIG_BT=y' "$CFG" || {
+            echo "::error::CONFIG_BT is not set in the built image"; exit 1; }
+          grep -q '^CONFIG_BT_CENTRAL=y' "$CFG" || {
+            echo "::error::CONFIG_BT_CENTRAL is not set — this device could not flash a target"
+            exit 1; }
+          echo "BT: $(grep -c '^CONFIG_BT' "$CFG") symbols set"
 
       - name: Stage release artifacts
         run: |
@@ -349,8 +391,34 @@ jobs:
         # locally for exactly this reason; here we just pin it.
         run: pipx install 'esptool>=5.0.2' || pip install --user 'esptool>=5.0.2'
 
+      - name: Fetch vendor blobs
+        # Only the rows that declare one. `west blobs fetch` is a large
+        # download and every board here but the MG24 needs nothing, so this is
+        # keyed off the matrix rather than run unconditionally.
+        #
+        # It is not optional where it applies: `BT_SILABS_EFR32 depends on
+        # ZEPHYR_HAL_SILABS_MODULE_BLOBS`, and Kconfig drops an assignment
+        # whose dependencies are unmet without a word — so a missing fetch
+        # produces a build that succeeds and an image with no Bluetooth.
+        if: matrix.blobs != ''
+        run: west blobs fetch ${{ matrix.blobs }}
+
       - name: Build firmware
         run: west build -b ${{ matrix.board }} updater --build-dir updater/build
+
+      - name: Bluetooth is actually in the image
+        # The failure this catches is silent by construction: a dropped
+        # Kconfig (missing blobs, a renamed symbol) leaves a firmware that
+        # boots, advertises nothing, and reports no error anywhere. Ask the
+        # generated .config, never the fragment — the standing rule.
+        run: |
+          CFG=updater/build/updater/zephyr/.config
+          grep -q '^CONFIG_BT=y' "$CFG" || {
+            echo "::error::CONFIG_BT is not set in the built image"; exit 1; }
+          grep -q '^CONFIG_BT_CENTRAL=y' "$CFG" || {
+            echo "::error::CONFIG_BT_CENTRAL is not set — this device could not flash a target"
+            exit 1; }
+          echo "BT: $(grep -c '^CONFIG_BT' "$CFG") symbols set"
 
       - name: Stage release artifacts
         run: |

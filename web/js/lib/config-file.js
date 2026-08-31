@@ -170,6 +170,18 @@ export const TUNING_PLATFORMS = {
     measured: false,
     uniformFloorMs: null,
   },
+  /* The XIAO MG24. Nordic's numbers, and **not because Silabs resembles
+   * Nordic** — because dfu_tuning.h's own rule is "start from the family whose
+   * CONFIG_BT_CONN_TX_MAX is closest", and this part's is 3, the same as both
+   * nRF parts, against Espressif's 10. `measured: false` is the honest state:
+   * nothing has been timed on this silicon yet. */
+  silabs: {
+    label: "Silabs EFR32",
+    pkt_gap_ms: 4,
+    erase_pause_ms: 100,
+    measured: false,
+    uniformFloorMs: null,
+  },
 };
 
 /* Which platform is a board target on? Derived from the target string the
@@ -188,6 +200,11 @@ export function platformFor(board) {
   if (/esp32c5/i.test(s)) return "espressif_c5";
   if (/esp32/i.test(s)) return "espressif";
   if (/nrf5/i.test(s)) return "nordic";
+  /* Matches the board name, not a SoC string: Zephyr's target here is
+   * "xiao_mg24/efr32mg24b220f1536im48", so either half would do — but a future
+   * Silabs board is far likelier to be another `mg`/`bg` part than to repeat
+   * this exact SoC. */
+  if (/mg24|efr32|efm32/i.test(s)) return "silabs";
   return null;
 }
 
@@ -276,6 +293,30 @@ export const CONFIG_SCHEMA = [
            consuming a DFU retry.`,
     note: (v) => (Number(v) === 0 ? "0 = scan forever" : null),
   },
+  {
+    key: "auto_flash",
+    label: "auto_flash",
+    title: "Flash automatically at power-on",
+    type: "bool",
+    def: false,
+    desc: `Start searching for a target the moment the radio comes up, with no
+           browser connected and nobody to press anything. This is the setting
+           that makes the device work at the far end of a flight: every other
+           way of starting a DFU needs a client in Bluetooth range of the
+           updater, which is the one thing it will not have.
+
+           It uses \`ble_firmware_mapping\` to decide which bundle goes to
+           which target, so it needs one — armed without a mapping, the device
+           logs an error at boot and flashes nothing rather than guessing.
+
+           Two consequences worth knowing before you fly it. The device is
+           armed from power-on, so it will flash any target its mapping
+           matches, including one you did not mean to be near. And with
+           \`scan_timeout\` at its default of 0 the search never gives up, so
+           the device stays busy — which means the Scan panel stays
+           unavailable until you press Stop.`,
+  },
+
   {
     key: "scan_debug",
     label: "scan_debug",
@@ -432,6 +473,28 @@ export const CONFIG_SCHEMA = [
       ? "244 B/packet — 8 pending slots hold ~1952 B across a page erase"
       : "20 B/packet — the peer's accumulator coalesces them to 240 B before flashing"),
   },
+  {
+    key: "ext_antenna",
+    label: "ext_antenna",
+    title: "Use the external antenna",
+    type: "bool",
+    def: false,
+    desc: `Point the antenna switch at the external connector instead of the
+           on-board antenna. Only some boards have such a switch — it is a
+           property of the board, not the radio — and on one that does not,
+           this setting is accepted and does nothing but say so in the log.
+
+           Off means the on-board antenna, which is what every board here
+           ships selecting and the only choice that works with nothing plugged
+           in. **Turning this on with no antenna attached makes the link
+           worse, not better.**
+
+           On the XIAO MG24, switching the path was measured at about 6 dB,
+           which in free space is roughly double the range. The device also
+           receives through the same switch, so a scan that reports weak
+           signal everywhere is worth re-running after changing this.`,
+  },
+
   {
     key: "ble_tx_power",
     label: "ble_tx_power",

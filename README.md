@@ -3,7 +3,7 @@
 Carry a firmware update to a device you cannot reach.
 
 A standalone updater that runs on a **Seeed XIAO** (nRF54LM20A, nRF52840,
-ESP32-S3 or ESP32-C5), holds a library of firmware bundles, and flashes them into *other*
+ESP32-S3, ESP32-C5 or MG24), holds a library of firmware bundles, and flashes them into *other*
 devices over the air. It exists for MeshCore repeaters on rooftops, masts and hilltops —
 put it on a drone or in a pocket, get within radio range, and update.
 
@@ -34,6 +34,7 @@ Only needed once, or when updating the updater itself.
    | XIAO nRF52840 | Double-tap **RESET** (the orange LED pulses), then pick the serial port. |
    | XIAO ESP32-S3 | Hold **BOOT**, tap **RESET**, release **BOOT**, then pick the serial port. |
    | XIAO ESP32-C5 | As the ESP32-S3. Bluetooth only for now — see [notes/boards.md](notes/boards.md). |
+   | XIAO MG24 | **Connect probe**, as the nRF54LM20A. Nothing to press on the board. |
 
 4. **Flash newest**. It downloads the current release, checks it against the
    published digest, writes it, reads it back to verify, and restarts the
@@ -216,24 +217,33 @@ Via the `build.sh` wrapper:
 
 ### Other boards
 
-It also builds for the **Seeed XIAO nRF52840** and the **XIAO ESP32S3**, and for
-the **Sense** variant of each. Set `BOARD`; every target gets its own build
-directory, so switching does not force a pristine rebuild:
+It also builds for the **XIAO nRF52840**, the **XIAO ESP32S3**, the
+**XIAO ESP32-C5** and the **XIAO MG24** — and for the **Sense** variant of the
+first two. Set `BOARD`; every target gets its own build directory, so switching
+does not force a pristine rebuild:
 
 ```bash
-BOARD=xiao_ble/nrf52840 ./build.sh              # -> updater/build_xiao_ble_nrf52840
-BOARD=xiao_ble/nrf52840/sense ./build.sh
-BOARD=xiao_esp32s3/esp32s3/procpu ./build.sh
-BOARD=xiao_esp32s3/esp32s3/procpu/sense ./build.sh
+./build.sh nrf52              # -> updater/build_xiao_ble_nrf52840
+./build.sh xiao_ble/nrf52840/sense
+./build.sh esp32s3
+./build.sh xiao_esp32s3/esp32s3/procpu/sense
+./build.sh esp32c5
+./build.sh mg24
 ```
 
-| | XIAO nRF54LM20A | XIAO nRF52840 | XIAO ESP32S3 |
-|---|---|---|---|
-| Flashing the updater | web client (CMSIS-DAP), or SWD | web client (serial DFU), or drag `merged.uf2` onto the drive a double-tap of RESET exposes | web client (ROM loader), or `./build.sh flash` |
-| Room for bundles | 8 MB QSPI, ~16 bundles | 2 MB QSPI, ~4 bundles | 4.3 MB internal, ~10 bundles |
-| MCUboot slot | 896 KB (31% used) | 368 KB (**80% used**) | 1792 KB (24% used) |
-| Status LED | RGB | RGB | one LED — failure blinks twice per cycle |
-| WiFi | no | no | yes (the point of it) |
+The MG24 needs its own blob fetch (`west blobs fetch hal_silabs`) for the
+Bluetooth link layer, and a non-stock OpenOCD to flash — `build.sh` finds the
+Arduino Silicon Labs core's copy on its own. The **MG24 Sense is the same board
+target**; there is no separate variant to build.
+
+| | XIAO nRF54LM20A | XIAO nRF52840 | XIAO ESP32S3 | XIAO MG24 |
+|---|---|---|---|---|
+| Flashing the updater | web client (CMSIS-DAP), or SWD | web client (serial DFU), or drag `merged.uf2` onto the drive a double-tap of RESET exposes | web client (ROM loader), or `./build.sh flash` | web client (CMSIS-DAP), or SWD |
+| Room for bundles | 8 MB QSPI, ~16 bundles | 2 MB QSPI, ~4 bundles | 4.3 MB internal, ~10 bundles | 4 MB SPI, ~10 bundles |
+| MCUboot slot | 896 KB (31% used) | 368 KB (**80% used**) | 1792 KB (24% used) | 728 KB (43% used) |
+| Status LED | RGB | RGB | one LED — failure blinks twice per cycle | one LED — same |
+| WiFi | no | no | yes (the point of it) | no |
+| Max BLE TX | +8 dBm | +8 dBm | +20 dBm | +20 dBm (build-time only) |
 
 The **ESP32-S3 exists for ESP32 targets.** MeshCore's ESP32 repeaters do not do
 BLE DFU at all — they update through ElegantOTA, over a WiFi AP they raise on
@@ -335,6 +345,18 @@ file a bug about.
 ## Config knobs
 
 The `config.txt` file on `/lfs1/` holds the scan filter, the retry policy, and the transfer tuning. It is reloaded on every retry attempt, so edits apply mid-run. Every key is documented in the web client's Config dialog, which is generated from the same schema the firmware parses; `web/js/lib/config-file.js` is the single list. On first boot the file is seeded with sensible defaults if absent.
+
+Two keys are worth knowing about before a flight. **`auto_flash`** starts a
+flash the moment the device has power, with no browser connected and nothing to
+press — this is the setting that makes the device work at the far end of a
+flight, since every other way of starting an update needs a client in Bluetooth
+range of the updater. It uses `ble_firmware_mapping` to decide which bundle
+goes to which target, so it needs one; armed without a mapping, the device says
+so at boot instead of quietly flashing nothing. **`ext_antenna`** points the
+antenna switch at the external connector on boards that have one — worth about
+6 dB on the XIAO MG24, in both directions — and is off by default, because with
+nothing plugged into the connector it makes the link worse rather than
+better.
 
 ### Cutting a release
 

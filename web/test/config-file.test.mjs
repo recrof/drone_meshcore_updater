@@ -28,6 +28,11 @@ const FIRMWARE_DEFAULTS = {
   scan_timeout: 0,
   scan_debug: false, wifi_ota: true, pkt_gap_ms: 4, erase_pause_ms: 100,
   erase_inflight: 0,
+  /* Both default off, and both for the same reason rather than by habit:
+   * auto_flash arms the device at power-on, and ext_antenna points the radio
+   * at a connector that may have nothing on it. A wrong default for either is
+   * a device that misbehaves in the field with a config.txt that looks fine. */
+  auto_flash: false, ext_antenna: false,
 };
 const d = defaults();
 t("schema has exactly the firmware keys",
@@ -35,6 +40,41 @@ t("schema has exactly the firmware keys",
   Object.keys(d).join(","));
 for (const [k, v] of Object.entries(FIRMWARE_DEFAULTS)) {
   t(`default ${k} = ${JSON.stringify(v)}`, d[k] === v, `got ${JSON.stringify(d[k])}`);
+}
+
+/* --- every schema key is one the firmware actually dispatches on ---------
+ *
+ * The table above is a *transcription* of apply_defaults(), which means it
+ * agrees with config.c only for as long as someone keeps it agreeing. The
+ * failure that slips through transcription is the one where the client grows
+ * a key the firmware has never heard of: the editor offers it, validates it,
+ * writes it into config.txt, the upload succeeds, and config.c's final
+ * `else` logs it at LOG_DBG and drops it. Nothing anywhere says a word, and
+ * the setting simply has no effect — which on `auto_flash` or `ext_antenna`
+ * means a device that is not armed and an antenna that did not move.
+ *
+ * So read config.c and ask it, rather than trusting the table.
+ */
+{
+  const src = readFileSync(new URL("../../updater/src/config.c", import.meta.url), "utf8");
+  const handled = new Set([...src.matchAll(/strcmp\(key,\s*"([a-z0-9_]+)"\)/g)].map(m => m[1]));
+
+  t("config.c dispatches on some keys at all", handled.size > 5, `${handled.size} found`);
+
+  const missing = Object.keys(FIELDS).filter(k => !handled.has(k));
+  t("every schema key is handled by config.c apply_kv()",
+    missing.length === 0,
+    `client offers but firmware ignores: ${missing.join(",")}`);
+
+  /* And the other direction, allowing for deliberate aliases. A firmware key
+   * with no schema entry is not broken — it just cannot be set from the UI,
+   * which for a real knob is a bug and for an alias is the intent. Naming
+   * them here means a new one has to be a decision. */
+  const ALIASES = new Set(["tx_power"]);
+  const unoffered = [...handled].filter(k => !FIELDS[k] && !ALIASES.has(k));
+  t("every firmware key is offered by the client (aliases excepted)",
+    unoffered.length === 0,
+    `firmware accepts but client never writes: ${unoffered.join(",")}`);
 }
 
 /* --- per-platform pacing, against updater/src/dfu_tuning.h ----------------
@@ -59,6 +99,7 @@ for (const [k, v] of Object.entries(FIRMWARE_DEFAULTS)) {
     CONFIG_SOC_SERIES_ESP32C5: "espressif_c5",
     CONFIG_SOC_FAMILY_ESPRESSIF_ESP32: "espressif",
     CONFIG_SOC_FAMILY_NORDIC_NRF: "nordic",
+    CONFIG_SOC_FAMILY_SILABS_S2: "silabs",
   };
   const src = new URL("../../updater/src/dfu_tuning.h", import.meta.url);
   let header = null;

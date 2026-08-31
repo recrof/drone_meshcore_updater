@@ -1,4 +1,5 @@
 import { ref, reactive, computed, watch } from "../vue.js";
+import { onEscape } from "../lib/dialog.js";
 import { loadConfig, saveConfig, log, deviceBoard } from "../store.js";
 import {
   CONFIG_SCHEMA, CONFIG_PATH, CONFIG_MAX_BYTES,
@@ -13,6 +14,9 @@ export default {
   props: { open: Boolean },
   emits: ["close"],
   setup(props, { emit }) {
+    /* Routed through close(), not emit("close"): that is where the
+     * unsaved-changes confirm lives. */
+    onEscape(() => props.open, () => close());
     /* Two pacing defaults differ per SoC family, so every "what is the
      * default" question in this dialog has to be asked of the board in front
      * of us rather than of the schema. `board` is null until the device says

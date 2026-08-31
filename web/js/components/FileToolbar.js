@@ -1,7 +1,7 @@
 import { ref, computed } from "../vue.js";
 import {
   connected, refresh, uploadFiles, openConfig, autoFlash, reboot, openFlash,
-  openLogView, dfuActive,
+  openLogView, dfuActive, openScanner,
 } from "../store.js";
 import Icon from "./Icon.js";
 
@@ -45,9 +45,18 @@ export default {
       ? "A DFU is running — open the device log to watch it"
       : "View the device log");
 
+    /* Disabled during a run, and the tooltip has to say why: the scanner and
+     * the transfer want the same radio, and on the ESP32 parts that is
+     * literally one radio for both Bluetooth and WiFi. An unexplained grey
+     * button is indistinguishable from a broken one. */
+    const scanTitle = computed(() => dfuActive.value
+      ? "Not while an update is running — the scan needs the same radio"
+      : "See what devices this updater can hear, and how strongly");
+
     return {
       connected, refresh, picker, onPick, openConfig, autoFlash, reboot,
-      openFlash, openLogView, flashTitle, dfuActive, logTitle,
+      openFlash, openLogView, flashTitle, dfuActive, logTitle, openScanner,
+      scanTitle,
     };
   },
   template: /* html */ `
@@ -81,6 +90,13 @@ export default {
               :disabled="!connected" @click="openLogView('', dfuActive)"
               :title="logTitle" aria-label="Device log">
         <Icon name="description"/><span class="label">Log</span>
+      </button>
+      <!-- Next to Log because it answers the same kind of question — why did
+           that not work — and before Reboot, which is the thing you reach for
+           after diagnosing rather than instead of it. -->
+      <button class="icon-btn" :disabled="!connected || dfuActive"
+              @click="openScanner" :title="scanTitle" aria-label="Scan">
+        <Icon name="radar"/><span class="label">Scan</span>
       </button>
       <button class="icon-btn" :disabled="!connected" @click="reboot"
               title="Reboot the updater" aria-label="Reboot">

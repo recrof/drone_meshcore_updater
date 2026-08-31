@@ -20,8 +20,15 @@
  * bundle by matching the peer's advertised name against the rules in
  * `ble_firmware_mapping` (see firmware_map.h). The bundle is resolved once,
  * from the first target found, and reused for every retry in that run.
+ *
+ * `pin` NULL or "" selects the usual search. Otherwise it names one specific
+ * peer — the operator picked it out of a scan — and the run reaches that peer
+ * or fails, with `ble_name` and `min_rssi` not applied. The string is opaque
+ * here and is parsed by whichever transport claims it; see dfu_transport.h.
+ * A pinned run uses a single transport, since a pin belongs to one of them or
+ * to none.
  */
-int dfu_runner_start(const char *zip_path);
+int dfu_runner_start(const char *zip_path, const char *pin);
 
 /* True if a DFU sequence is currently active. */
 bool dfu_runner_busy(void);

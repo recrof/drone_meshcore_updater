@@ -58,3 +58,37 @@ button.small {
 }
 
 input[type=file] { display: none; }
+
+/* --- IconCycle -------------------------------------------------
+   A stack of related glyphs playing as a loop. All frames are rendered and
+   only opacity moves, so there is no JS timer running behind a page that is
+   often mid-transfer. See js/components/IconCycle.js. */
+.icon-cycle { position: relative; display: inline-block; vertical-align: middle; }
+.icon-cycle .icon { position: absolute; inset: 0; opacity: 0; }
+/* At rest the complete glyph shows — a stopped scanner should look like an
+   idle radio, not like a signal frozen at one bar. */
+.icon-cycle .icon:last-child { opacity: 1; }
+
+.icon-cycle.playing .icon {
+  opacity: 0;
+  animation-iteration-count: infinite;
+  /* steps(1) so each frame is held and then replaced. Cross-fading two
+     line-art glyphs at 20px just looks like a smudge. */
+  animation-timing-function: steps(1, end);
+  animation-delay: calc(var(--i) * var(--cycle-step));
+}
+/* One keyframe set per frame count: a custom property cannot set a keyframe
+   percentage, so the visible fraction has to be written out. Only these two
+   lengths are used; any other renders static, which is the right failure. */
+.icon-cycle.cycle-2.playing { --cycle-step: 0.45s; }
+.icon-cycle.cycle-2.playing .icon { animation-name: cyc2; animation-duration: 0.9s; }
+@keyframes cyc2 { 0%, 49.9% { opacity: 1; } 50%, 100% { opacity: 0; } }
+
+.icon-cycle.cycle-3.playing { --cycle-step: 0.4s; }
+.icon-cycle.cycle-3.playing .icon { animation-name: cyc3; animation-duration: 1.2s; }
+@keyframes cyc3 { 0%, 33.2% { opacity: 1; } 33.3%, 100% { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .icon-cycle.playing .icon { animation: none; opacity: 0; }
+  .icon-cycle.playing .icon:last-child { opacity: 1; }
+}

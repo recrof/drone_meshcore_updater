@@ -129,8 +129,45 @@ export function describeSmpError(group, cmd, body) {
 export const OS_ID  = { ECHO: 0, RESET: 5, INFO: 7 };
 export const FSX_ID = {
   LIST: 0, MKDIR: 1, RMDIR: 2, MOVE: 3, STATVFS: 4, TRIGGER_DFU: 5, STOP_DFU: 6,
-  INSPECT: 7, CAPS: 8,
+  INSPECT: 7, CAPS: 8, SCAN: 9,
 };
+
+/* Link quality bands, in dBm. The thresholds are the operator-facing point of
+ * the scanner, so they live here rather than in a component: they are quoted
+ * in the panel's legend, drive the meter's colour, and are asserted by
+ * scanner.test.mjs. `min` is inclusive.
+ *
+ * These describe a *DFU*, not a connection. Legacy DFU streams a few hundred
+ * KB with no resume (a loss costs the whole image), so the bar is set where a
+ * transfer completes first time rather than where a link merely establishes —
+ * which is why -75 is already the bottom of "workable" and not, as a phone
+ * would report it, still perfectly good. */
+export const RSSI_BANDS = [
+  { id: "excellent", min: -70,       label: "Excellent", icon: "signal_cellular_alt" },
+  { id: "good",      min: -75,       label: "Good",      icon: "signal_cellular_alt_2_bar" },
+  { id: "poor",      min: -Infinity, label: "Poor",      icon: "signal_cellular_alt_1_bar" },
+];
+
+/* enum survey_kind in updater/src/survey.h. Numerically stable: on the wire. */
+export const SURVEY_KIND = { BLE: 1, WIFI: 2 };
+
+/* SURVEY_F_* in the same header. One bitfield rather than two optional keys,
+ * because the two radios have different interesting properties and a client
+ * renders one extra column per tab. */
+export const SURVEY_FLAG = { DFU: 1, SECURE: 2, MATCH: 4 };
+
+/* Which band an RSSI falls in. Anything that is not a number reads as the
+ * weakest band rather than throwing: a row with no sighting yet must still
+ * render, and the safe direction to be wrong is pessimistic.
+ *
+ * `Number(dbm)` alone is not that test — `Number(null)` and `Number("")` are
+ * both 0, which is finite, above every threshold, and would paint a device
+ * nobody has heard from as an excellent signal. */
+export function rssiBand(dbm) {
+  const weakest = RSSI_BANDS[RSSI_BANDS.length - 1];
+  if (typeof dbm !== "number" || !Number.isFinite(dbm)) return weakest;
+  return RSSI_BANDS.find((b) => dbm >= b.min) ?? weakest;
+}
 
 /* enum fw_transport_id in updater/src/firmware_inspect.h, as a bitmask. */
 export const TRANSPORT_BIT = { BLE: 1, WIFI: 2 };
@@ -483,8 +520,55 @@ export class SmpClient extends EventTarget {
   fsxCaps() {
     return this.request(MGMT_OP.READ_REQ, GRP.FSX, FSX_ID.CAPS, {});
   }
-  fsxTriggerDfu(path) {
-    return this.request(MGMT_OP.WRITE_REQ, GRP.FSX, FSX_ID.TRIGGER_DFU, { path });
+  /* Start a run. `addr` is optional and switches to manual mode: reach that
+   * exact peer instead of taking whatever passes `ble_name` and `min_rssi`.
+   * Pass an `addr` back verbatim from fsxScan() — the string format is the
+   * firmware's own, and reformatting it here would be a second place for the
+   * two to disagree. */
+  fsxTriggerDfu(path, addr = "") {
+    const req = { path };
+    if (addr) req.addr = addr;
+    return this.request(MGMT_OP.WRITE_REQ, GRP.FSX, FSX_ID.TRIGGER_DFU, req);
+  }
+  /* Survey the air. Resolves to
+   * `{ kind, kinds, scanning, total, truncated,
+   *    entries: [{ id, name, rssi, best, n, ch, fl }] }`.
+   *
+   * `kind` selects the radio (SURVEY_KIND). `kinds` comes back as the bitmask
+   * of radios this build has, so the WiFi tab is offered where a WiFi radio
+   * exists rather than from a board table kept here — the same reasoning as
+   * fsxCaps(). Only one survey runs at a time and none during a DFU.
+   *
+   * A write, because asking is what starts the radio. Calling it repeatedly
+   * with `on: true` is how a client keeps the survey alive — the firmware
+   * stops one that nobody has polled for a few seconds, so an abandoned tab
+   * cannot leave the radio scanning. Call once with `on: false` when done.
+   *
+   * Answers MGMT_ERR_EBUSY (10) while a DFU owns the radio. */
+  fsxScan(on = true, kind = SURVEY_KIND.BLE, off = 0, count = 12, reset = false) {
+    return this.request(MGMT_OP.WRITE_REQ, GRP.FSX, FSX_ID.SCAN,
+                        { on, kind, off, count, reset });
+  }
+  /* Every entry the survey holds, following `truncated` across pages.
+   *
+   * The firmware caps a response at what fits one SMP buffer, so a busy room
+   * needs more than one round trip. Only the first request arms the scan;
+   * the rest are pure reads of the same table. */
+  async fsxScanAll(on = true, kind = SURVEY_KIND.BLE, reset = false) {
+    /* Only the first request may carry `reset`. The follow-ups below are
+     * pages of the same table, and a reset on one of them would empty it
+     * halfway through reading it. */
+    const first = await this.fsxScan(on, kind, 0, 12, reset);
+    const entries = [...(first.entries ?? [])];
+    let guard = 8;
+    while (first.truncated && entries.length < (first.total ?? 0) && guard-- > 0) {
+      const more = await this.fsxScan(true, kind, entries.length, 12, false);
+      const got = more.entries ?? [];
+      if (!got.length) break;
+      entries.push(...got);
+      if (!more.truncated) break;
+    }
+    return { ...first, entries };
   }
   /* Stop a run and clear the status back to IDLE. Resolves to
    * `{ stopped: bool }` — false meaning nothing was running, which is a

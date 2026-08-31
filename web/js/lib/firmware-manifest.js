@@ -95,6 +95,7 @@ export const BOARD_LABELS = {
   xiao_ble: "XIAO nRF52840",
   xiao_esp32s3: "XIAO ESP32-S3",
   xiao_esp32c5: "XIAO ESP32-C5",
+  xiao_mg24: "XIAO MG24",
 };
 
 export const boardName = (target) => String(target ?? "").split("/")[0];

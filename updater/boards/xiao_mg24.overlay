@@ -1,0 +1,331 @@
+/*
+ * Devicetree overlay for the Seeed XIAO MG24 (and MG24 Sense — same silicon,
+ * same flash, same updater).
+ *
+ * Named for the board because a board overlay *replaces* app.overlay rather
+ * than adding to it — see common.dtsi, which this includes for the parts every
+ * board shares. The file name is the board's SHORT build string (the SoC
+ * qualifier is dropped when a board hosts exactly one SoC), which is why this
+ * is `xiao_mg24.overlay` and not `xiao_mg24_efr32mg24b220f1536im48.overlay`.
+ */
+
+#include <zephyr/dt-bindings/pinctrl/silabs/xg24-pinctrl.h>
+#include <zephyr/dt-bindings/dma/silabs/xg24-dma.h>
+
+#include "../common.dtsi"
+
+/ {
+	aliases {
+		/*
+		 * One LED, so led.c compiles its mono renderer: the colour
+		 * distinctions become blink patterns, and DONE_FAIL becomes a
+		 * repeating double flash rather than "red". See the header of
+		 * src/led.c for the whole table.
+		 *
+		 * Polarity is already right in the board file — `gpioa 7
+		 * GPIO_ACTIVE_LOW` — unlike Seeed's vendored nRF54L files,
+		 * which declare all three of theirs active-high and are wrong
+		 * about it. Checked rather than assumed, because that mistake
+		 * has been in this tree before.
+		 */
+		status-led = &led0;
+	};
+};
+
+/*
+ * The external 4 MB SPI flash, which upstream's devicetree does not mention.
+ *
+ * **Its absence from the board file is a statement about the file, never about
+ * the board**, and this is the second time that has caught someone here: the
+ * nRF54L's PY25Q64H *is* declared upstream but ships `status = "disabled"`,
+ * and the first assessment of this board read "no jedec,spi-nor node" as "no
+ * external flash" and shelved the port over it. There is 4 MB of it.
+ *
+ * From the board schematic (U8 = P25Q32SH-UXH-IR, Puya, 32 Mbit — the same
+ * family as the nRF54L's part):
+ *
+ *     CS   PA06   `PA06/FLASH_CS`, 100 K pull-up to 3V3
+ *     SCK  PA00   `PA00/A17/D17/SCK1`
+ *     MOSI PB00   `PB00/A15/D15/MOSI1`  -> flash DI (IO0)
+ *     MISO PB01   `PB01/A16/D16/MISO1`  <- flash DO (IO1)
+ *
+ * WP and HOLD are strapped to VCC, so the part is wired for single/dual SPI
+ * and not quad. Nothing here depends on the width.
+ *
+ * ---- Why eusart1 and not eusart0 ---------------------------------------
+ *
+ * `eusart0` is already spoken for: the board file routes it to PA3/PA4/PA5
+ * with CS on PC7, which is the XIAO *header* SPI — D8/D9/D10 and D7, the pins
+ * on the edge connector. That is the bus a user's own peripheral goes on, and
+ * it is a different bus from this one. Mistaking the two is easy and would
+ * present as a flash that never probes while a header device works fine.
+ *
+ * `eusart1` is declared `silabs,eusart-spi` by the SoC dtsi and re-declared
+ * `silabs,eusart-uart` by the board file, on PC6/PC7 — but never enabled. We
+ * take it back to SPI here. `usart0` (PA8/PA9) stays the console: it is wired
+ * to the on-board SAMD11, which is what makes this board watchable over USB-C.
+ *
+ * Series 2 DBUS routing is fully flexible, so all three signals can be routed
+ * from eusart1 to these pins; the macros come from Zephyr's own
+ * dt-bindings/pinctrl/silabs/xg24-pinctrl.h.
+ */
+&pinctrl {
+	eusart1_flash: eusart1_flash {
+		group0 {
+			/* SCLK on PA00, MOSI on PB00. */
+			pins = <EUSART1_SCLK_PA0>, <EUSART1_TX_PB0>;
+			drive-push-pull;
+			output-high;
+		};
+
+		group1 {
+			/* MISO on PB01. */
+			pins = <EUSART1_RX_PB1>;
+			input-enable;
+			silabs,input-filter;
+		};
+	};
+};
+
+&eusart1 {
+	compatible = "silabs,eusart-spi";
+	/*
+	 * The board file declared this an eusart-uart and gave it a
+	 * `current-speed`. Changing the compatible does not remove the
+	 * property, and silabs,eusart-spi.yaml does not declare it, so the
+	 * build stops with "'current-speed' appears in /soc/eusart@500a0000 ...
+	 * but is not declared in 'properties:'". A good error, and the only
+	 * leftover: `pinctrl-0` is overridden below rather than deleted.
+	 */
+	/delete-property/ current-speed;
+
+	/*
+	 * Move the bytes with the LDMA rather than the CPU.
+	 *
+	 * **Both halves of this are load-bearing and only one of them is a
+	 * Kconfig.** spi_silabs_eusart.c wraps its DMA channel initialiser in
+	 * `COND_CODE_1(DT_INST_NODE_HAS_PROP(index, dmas), ...)`, so with
+	 * CONFIG_SPI_SILABS_EUSART_DMA=y and no `dmas` here the driver builds
+	 * clean, leaves dma_dev NULL, and `spi_silabs_eusart_is_dma_enabled()`
+	 * quietly answers false — every transfer still goes down the polling
+	 * path. Same shape as the standing rule about prj.conf: ask the
+	 * behaviour, not the request.
+	 *
+	 * The polling path is one byte per loop iteration, spinning on
+	 * EUSART_STATUS_TXC — transmit *complete*, the shift register fully
+	 * drained — after each one before loading the next. No pipelining, and
+	 * the FIFOs go unused.
+	 *
+	 * **DMA is worth having here only because `cache-size` is 256.** That
+	 * is not a guess; it is the one result in this whole investigation that
+	 * inverted. Measured on this board, littlefs read / write in KB/s:
+	 *
+	 *                 polling        DMA
+	 *   cache  64     467 / 23.6   347 / 24.7     <- DMA LOSES
+	 *   cache 256     526 / 87.6   830 / 95.1     <- shipped
+	 *   cache 512     537 / 85.2   527 / 95.7
+	 *
+	 * At a 64-byte cache, setting up two DMA channels costs more than
+	 * shifting 64 bytes saves, so DMA made reads 26% *slower*. The
+	 * crossover is somewhere between 256 B and 1 KB per transfer. So this
+	 * property and common.dtsi's `cache-size` are one decision in two
+	 * files, and reverting either alone gives back most of the gain.
+	 *
+	 * Note what this is NOT: it is not the fix for the slow bus. That was
+	 * `clock-frequency` above, and DMA on its own — at the 1 MHz the board
+	 * was accidentally running — measured 4% slower than polling, because
+	 * at 8 us per byte nothing else is visible.
+	 *
+	 * tx first, then rx, matching Zephyr's own
+	 * tests/drivers/spi/spi_loopback/boards/xg24_rb4187c.overlay — the
+	 * names are what the driver looks up, but the pairs must agree with
+	 * them or the TX channel is armed with the RX signal.
+	 */
+	dmas = <&dma0 DMA_REQSEL_EUSART1TXFL>,
+	       <&dma0 DMA_REQSEL_EUSART1RXFL>;
+	dma-names = "tx", "rx";
+
+	/*
+	 * The bus clock — and **without this line it is 1 MHz**, not the
+	 * 16 MHz the flash node below asks for.
+	 *
+	 * `spi-max-frequency` on the *child* is only one of two ceilings.
+	 * spi_silabs_eusart.c takes
+	 *
+	 *     spi_frequency = MIN(eusart_cfg->clock_frequency, spi_frequency);
+	 *     if (config->frequency)
+	 *             spi_frequency = MIN(config->frequency, spi_frequency);
+	 *
+	 * where `eusart_cfg->clock_frequency` is
+	 * `DT_INST_PROP_OR(n, clock_frequency, 1000000)` — a property of the
+	 * *controller* node, defaulting to 1 MHz. A child asking for 16 MHz
+	 * therefore gets the MIN of the two, and 1 MHz wins. Silabs' own
+	 * boards all set it (xg24_rb418xc.dtsi, xgm240_rb431xa.dtsi:
+	 * `clock-frequency = <DT_FREQ_M(10)>`); ours did not, and nothing
+	 * anywhere said so.
+	 *
+	 * It was worth 16x on raw reads: 262 KB of flash_read() in 4096-byte
+	 * chunks went from 2151 ms to 135 ms, which is 97% of the theoretical
+	 * 16 MHz line rate. End to end it is what took the flash-confirmation
+	 * dialog from ~8 s to under a second.
+	 *
+	 * The measurement to trust is the arithmetic, not the intent: at
+	 * 122 KB/s the bus was moving ~1 Mbit/s, which is exactly one bit per
+	 * clock at 1 MHz. **A throughput that lands on a suspiciously round
+	 * number is a configured limit, not a hardware one.**
+	 *
+	 * 16 rather than higher because it is now the flash node's
+	 * `spi-max-frequency` that binds, and raising both was measured to
+	 * change nothing: at DT_FREQ_M(32) every figure above is identical to
+	 * the last millisecond, because what remains is per-transaction
+	 * overhead rather than shifting time. A faster clock would buy noise
+	 * and risk corrupted reads, which is the failure mode this project
+	 * least wants (Trap 1).
+	 */
+	clock-frequency = <DT_FREQ_M(16)>;
+	#address-cells = <1>;
+	#size-cells = <0>;
+	cs-gpios = <&gpioa 6 GPIO_ACTIVE_LOW>;
+	pinctrl-0 = <&eusart1_flash>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	p25q32: p25q32sh@0 {
+		compatible = "jedec,spi-nor";
+		status = "okay";
+		reg = <0>;
+		/*
+		 * The part is rated to 104 MHz; this is the bus talking, not
+		 * the flash. 16 MHz is a deliberately unambitious number — a
+		 * marginal SPI clock fails as corrupted reads rather than as
+		 * an error, and this project already knows what a silently
+		 * truncated image costs (Trap 1).
+		 *
+		 * **This is a ceiling, not the clock.** The controller node
+		 * has a second one, `clock-frequency`, and the driver takes
+		 * the MIN — see the long comment there. This number alone
+		 * bought a 1 MHz bus for as long as that one was missing.
+		 * Measured: raising both to 32 MHz changes nothing, because
+		 * the remaining cost is per-transaction.
+		 */
+		spi-max-frequency = <16000000>;
+		/* 4 MB, in bits, as the binding asks. */
+		size = <33554432>;
+
+		/*
+		 * `jedec-id` is deliberately absent, not forgotten.
+		 *
+		 * prj.conf sets CONFIG_SPI_NOR_SFDP_RUNTIME=y, and under it
+		 * spi_nor.c compiles the devicetree-vs-device ID comparison
+		 * *out* (`#ifndef CONFIG_SPI_NOR_SFDP_RUNTIME` around the
+		 * memcmp) and derives geometry from the chip's own SFDP
+		 * tables instead. So a value here would be checked by nothing
+		 * — and an unverified constant that nothing checks is exactly
+		 * the sort of fact this project keeps getting bitten by.
+		 * Write it down when the device has been asked, not before.
+		 *
+		 * `has-dpd` is likewise left off for now. The part supports
+		 * it (Seeed's own deep-sleep note tells you to send 0xB9, the
+		 * SPI NOR Deep Power-Down opcode) but it only matters under
+		 * PM, which this firmware does not use, and a wrong
+		 * release-from-DPD delay presents as a flash that is simply
+		 * dead. Nothing to gain here, something to lose.
+		 */
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			lfs_partition: partition@0 {
+				label = "littlefs_storage";
+				reg = <0x00000000 DT_SIZE_M(4)>;
+			};
+		};
+	};
+};
+
+/*
+ * The LDMA controller, which the SoC dtsi ships disabled. Enabling the driver
+ * and naming the channels above is not enough on its own — with dma0 disabled
+ * the DEVICE_DT_GET() in the SPI driver's channel initialiser resolves to a
+ * device that never registers, and the transfer fails at run time rather than
+ * at build time. Two of its eight channels are used.
+ */
+&dma0 {
+	status = "okay";
+};
+
+/*
+ * PA07 is the status LED, and two drivers want it.
+ *
+ * The board file gives it to `led0` (gpio-leds) *and* to `pwm_led0` via
+ * TIMER0_CC0_PA7, with timer0 and its pwm child both `status = "okay"`. Only
+ * one of those can own the pin: the PWM driver applies its pinctrl state at
+ * init and routes PA07 to the timer output, after which led.c's gpio_pin_set()
+ * writes land on a pin the peripheral is driving.
+ *
+ * We use the GPIO one, so the timer goes. It is not the system clock — that is
+ * `sysrtc0`, which stays — so nothing else depends on it.
+ */
+&timer0 {
+	status = "disabled";
+};
+
+/*
+ * Corrected MCUboot slot geometry. Shared with the bootloader image through
+ * sysbuild/mcuboot_xiao_mg24.overlay — see that file for why it is not inline
+ * here.
+ */
+#include "../mg24_partitions.dtsi"
+
+/*
+ * The antenna-path switch.
+ *
+ * The board file drives PB04 low and PB05 high, as two `gpio-hog`s with no
+ * comment. Seeed's own Arduino variant names them and says nothing more:
+ *
+ *     PB4, // RF switch - 26
+ *     PB5  // RF switch enable - 27
+ *
+ * So which way PB04 points is a fact about the RF layout that no file in
+ * either tree states. It was measured rather than reasoned about: the board
+ * advertising at a fixed distance from a host running a passive scan, three
+ * alternating rounds of ~100 advertising reports each.
+ *
+ *     PB04 low  (the board file's default)   mean RSSI  -41.6  -43.3  -44.0
+ *     PB04 high                              mean RSSI  -37.8  -35.4  -38.7
+ *
+ * Consistent in every round and worth about 6 dB, which in free space is
+ * roughly double the range. TX and RX share the path, so the receive side
+ * gains the same — the symptom that prompted this was the scanner reporting
+ * worse RSSI than an ESP32 with the same antenna.
+ *
+ * **Interleave any repeat of that measurement.** Between two sittings the
+ * same firmware measured -37.3 and -44.2 with nothing changed but the room,
+ * which is larger than the effect being looked for; within one sitting the
+ * spread is about 2.6 dB. Alternating the two positions is what makes the
+ * comparison mean anything.
+ *
+ * `rf_sw_enable` (PB05, high) is left exactly as the board file has it. Only
+ * the selection is ours; the switch still has to be powered.
+ *
+ * ---- Which level is which antenna -------------------------------------
+ *
+ * `GPIO_ACTIVE_HIGH` here declares that **driving PB04 high selects the
+ * external connector**, and antenna.c never speaks in levels — it asks for
+ * "external" or "on-board" and this flag translates. The inference is that
+ * the board ships selecting its own antenna (low, per the hog) because that
+ * is the only choice that works out of the box, so the other position is the
+ * connector; it is consistent with high measuring *better* on a unit that had
+ * an external antenna attached, which a disconnected connector could not do.
+ *
+ * **That is an inference from two measurements, not a datasheet fact.** If a
+ * board turns up where `ext_antenna=1` makes the signal worse with an antenna
+ * fitted, this flag is the thing that is wrong — invert it here rather than
+ * anywhere in the C.
+ */
+/ {
+	zephyr,user {
+		antenna-gpios = <&gpiob 4 GPIO_ACTIVE_HIGH>;
+	};
+};

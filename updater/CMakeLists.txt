@@ -24,7 +24,10 @@ target_sources(app PRIVATE
   src/log_stream.c
   src/selfconfirm.c
   src/config.c
+  src/antenna.c
   src/ble_scanner.c
+  src/survey.c
+  src/pin_addr.c
   src/firmware_zip.c
   src/firmware_inspect.c
   src/md5.c
@@ -52,5 +55,11 @@ target_include_directories(app PRIVATE src)
 # No nRF part has WiFi, so gating on the Kconfig rather than on a board name
 # means a future WiFi-capable board picks it up without an edit here.
 if(CONFIG_WIFI)
-  target_sources(app PRIVATE src/transport_wifi_elegantota.c)
+  target_sources(app PRIVATE
+    src/transport_wifi_elegantota.c
+    # The WiFi half of the scanner. Gated with the transport rather than
+    # separately: both need the same radio and the same net_mgmt API, so a
+    # board that has one always has the other.
+    src/wifi_survey.c
+  )
 endif()

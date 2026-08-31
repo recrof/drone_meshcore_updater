@@ -6,8 +6,8 @@
  * Web Bluetooth stack. State that the UI renders is mirrored into refs here.
  */
 
-import { reactive, ref, computed } from "./vue.js";
-import { SmpClient } from "./lib/smp-client.js";
+import { reactive, ref, computed, watch } from "./vue.js";
+import { SmpClient, SURVEY_KIND } from "./lib/smp-client.js";
 import { registerServiceWorker, applyUpdate } from "./lib/pwa.js";
 import { fmtSize, fmtRate, timestamp, joinPath } from "./lib/format.js";
 import {
@@ -95,6 +95,11 @@ smp.addEventListener("disconnected", () => {
   deviceTransports.value = null;
   dfuStatus.value = idleStatus();
   dfuRate.value = 0;
+  /* Stops the poll timer as well as the panel. Without this the interval
+   * keeps firing against a dead link forever — harmless per tick, but it is
+   * the poll that would otherwise silently keep running for the rest of the
+   * session. */
+  closeScanner();
 });
 /* Smoothing factor for the transfer-rate estimate. Samples arrive a few times
  * a second and an unsmoothed rate flickers by several KB/s between them,
@@ -207,7 +212,20 @@ export async function connect() {
   }
 }
 
-export function disconnect() { smp.disconnect(); }
+export async function disconnect() {
+  /* The survey is stopped *before* the link goes, not left to the device's
+   * idle timeout. closeScanner() sends that stop over the very link this
+   * function is about to drop, so the order is the whole point — after
+   * smp.disconnect() there is nothing to send it on.
+   *
+   * The firmware no longer depends on this (a disconnect that leaves a scan
+   * running used to leave the device unable to advertise, and it now borrows
+   * the radio back), but it is still the honest order: it frees the radio
+   * immediately rather than seconds later, and it means the common case never
+   * exercises the recovery path at all. */
+  await closeScanner();
+  smp.disconnect();
+}
 
 /* ---- browsing --------------------------------------------------------- */
 export async function refresh() {
@@ -396,6 +414,202 @@ export async function stopDfu() {
 export function openConfig() { configOpen.value = true; }
 export function openFlash() { flashOpen.value = true; }
 
+/* ---- the scanner -------------------------------------------------------
+ *
+ * A survey of what the updater's radios can hear, with signal strength. It
+ * exists because "the update failed" and "there is nothing to update" look
+ * identical from here, and so do a deaf antenna and an absent target.
+ *
+ * Two radios, one at a time — see updater/src/survey.h, which owns that rule.
+ * The device says which kinds it has (`kinds`), so the WiFi tab appears only
+ * where there is a WiFi radio.
+ *
+ * The firmware stops a survey nobody has polled for a few seconds, so this
+ * poll loop is not a refresh — it is what keeps the scan alive. Closing the
+ * panel therefore ends the scan by ceasing to ask, and the explicit stop is
+ * just the tidy version of that.
+ */
+export const scannerOpen  = ref(false);
+export const scanEntries  = ref([]);
+export const scanning     = ref(false);
+export const scanError    = ref("");
+export const scanKind     = ref(SURVEY_KIND.BLE);
+/* Live updates, on by default — watching the number move while an antenna is
+ * aimed is the main thing this screen is for. Turning it off freezes the list
+ * so a row can be clicked without it moving. */
+export const scanAuto     = ref(true);
+/* True from the moment Refresh is pressed until the settle poll lands. It is
+ * what stops the button being hammered, and what lets the table say it is
+ * rebuilding rather than showing an empty list that reads as "nothing here". */
+export const scanRefreshing = ref(false);
+/* Bitmask of survey kinds the device has a radio for; null until it answers. */
+export const scanKinds    = ref(null);
+
+/* 2.5 s, up from 1.5.
+ *
+ * The faster rate made the panel unusable for its second job: rows re-sorted
+ * under the pointer between a decision and a click, so aiming at a device and
+ * pressing Flash hit whichever row had drifted into that spot. Signal is worth
+ * watching continuously; a list you are about to click is not.
+ *
+ * It also has to stay comfortably under the firmware's idle timeout — polling
+ * IS the keep-alive (survey.h), so a period longer than that would stop the
+ * scan between refreshes. The Bluetooth watchdog is 6 s. */
+const SCAN_POLL_MS = 2500;
+/* One extra poll after a manual refresh, so a single press produces results
+ * rather than arming an empty survey the operator then has to press again. */
+const SCAN_SETTLE_MS = 1500;
+let scanTimer = null;
+let scanSettleTimer = null;
+/* The in-flight request itself, not a boolean: a reset has to *wait* for a
+ * poll that is already talking to the device, where a periodic tick is right
+ * to drop. A flag can only express the second. */
+let scanInFlight = null;
+
+async function pollScan({ reset = false } = {}) {
+  if (!connected.value || !scannerOpen.value) return;
+
+  /* One request at a time. A slow round trip must not queue a second poll
+   * behind it — on a busy link that compounds into a backlog the device
+   * answers long after the panel has closed.
+   *
+   * A reset is the exception and must not be dropped: dropping it leaves the
+   * device's table intact, so the settle poll that follows returns the very
+   * history the refresh was meant to clear. It waits its turn instead. */
+  if (scanInFlight) {
+    if (!reset) return;
+    await scanInFlight.catch(() => {});
+  }
+
+  const run = (async () => {
+    const r = await smp.fsxScanAll(true, scanKind.value, reset);
+    scanEntries.value = r.entries ?? [];
+    scanning.value = !!r.scanning;
+    if (typeof r.kinds === "number") scanKinds.value = r.kinds;
+    scanError.value = "";
+  })();
+
+  scanInFlight = run;
+  try {
+    await run;
+  } catch (e) {
+    /* Both refusals are expected states, not faults, and neither should read
+     * as an error the operator could act on by retrying. */
+    scanning.value = false;
+    scanEntries.value = [];
+    scanError.value = /busy/i.test(e.message)
+      ? "The radio is busy with a transfer — scanning resumes when it finishes."
+      : /notsup|not supported/i.test(e.message)
+      ? "This board has no radio of that kind."
+      : e.message;
+  } finally {
+    if (scanInFlight === run) scanInFlight = null;
+  }
+}
+
+/* Switching tabs. The device throws its table away when the kind changes —
+ * the two surveys hold different things — so this does too rather than
+ * leaving stale rows on screen while the first sweep of the other radio
+ * runs. */
+export function setScanKind(kind) {
+  if (scanKind.value === kind) return;
+  if (scanSettleTimer) { clearTimeout(scanSettleTimer); scanSettleTimer = null; }
+  scanKind.value = kind;
+  scanEntries.value = [];
+  scanning.value = false;
+  scanError.value = "";
+  refreshScan();
+}
+
+/* A run starting closes the scanner, from wherever it was started.
+ *
+ * The device refuses to scan during a DFU (survey.h) and the runner stops any
+ * survey when it begins, so leaving the panel open would show a frozen list
+ * quietly filling with "the radio is busy" — an accurate message that reads
+ * as a malfunction. Watching `dfuActive` rather than closing at each trigger
+ * site covers the ones that are not this client: an auto-flash, a run
+ * triggered from another browser, or one the device started on its own.
+ */
+watch(dfuActive, (active) => {
+  if (active && scannerOpen.value) {
+    log("scan stopped — the radio is needed for the update", "warn");
+    closeScanner();
+  }
+});
+
+/* One sweep, on demand.
+ *
+ * Three things have to happen here and each fixes a way the button looked
+ * broken:
+ *
+ *   1. **The table is emptied on screen straight away.** Otherwise the old
+ *      rows sit there for the whole settle delay and the press appears to do
+ *      nothing for a second or two.
+ *   2. **The device is told to reset**, not merely polled. A survey that is
+ *      still running keeps its table by design — `best` and the sighting
+ *      counts are accumulated history — so without this the refresh returns
+ *      everything heard since the survey started, including devices long gone,
+ *      each showing the signal it had when it was last heard. Nothing ages
+ *      out, so that only gets worse the longer the panel is open.
+ *   3. **A pending settle poll is cancelled.** Pressing twice in quick
+ *      succession otherwise leaves the first press's timer to land after the
+ *      second press cleared the table, refilling it with the earlier sweep.
+ */
+export function refreshScan() {
+  if (scanSettleTimer) { clearTimeout(scanSettleTimer); scanSettleTimer = null; }
+  scanEntries.value = [];
+  scanError.value = "";
+  scanRefreshing.value = true;
+
+  pollScan({ reset: true });
+  scanSettleTimer = setTimeout(async () => {
+    scanSettleTimer = null;
+    await pollScan();
+    scanRefreshing.value = false;
+  }, SCAN_SETTLE_MS);
+}
+
+export function setScanAuto(on) {
+  scanAuto.value = on;
+  if (on) {
+    if (!scanTimer) scanTimer = setInterval(pollScan, SCAN_POLL_MS);
+    pollScan();
+  } else if (scanTimer) {
+    clearInterval(scanTimer);
+    scanTimer = null;
+    /* The survey is left running: its own idle timeout ends it a few seconds
+     * later, which is what freezes the list. Stopping it here would be
+     * indistinguishable to the operator and would throw away the table. */
+  }
+}
+
+export function openScanner() {
+  scannerOpen.value = true;
+  scanEntries.value = [];
+  scanError.value = "";
+  scanning.value = false;
+  pollScan();
+  if (scanAuto.value && !scanTimer) {
+    scanTimer = setInterval(pollScan, SCAN_POLL_MS);
+  }
+}
+
+export function closeScanner() {
+  const wasOpen = scannerOpen.value;
+  scannerOpen.value = false;
+  if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
+  if (scanSettleTimer) { clearTimeout(scanSettleTimer); scanSettleTimer = null; }
+  scanRefreshing.value = false;
+  scanning.value = false;
+  /* Best-effort, and only if something was actually started: the firmware's
+   * idle timeout is the real guarantee, and this request is exactly the kind
+   * that fails when a link has just dropped — which is one of the ways this
+   * function gets called. */
+  return (wasOpen && connected.value)
+    ? smp.fsxScan(false, scanKind.value).catch(() => {})
+    : Promise.resolve();
+}
+
 /* Opening with no path shows the newest log file; `live` opens the stream
  * instead of any file at all. */
 export function openLogView(path = "", live = false) {
@@ -449,6 +663,37 @@ export function activateEntry(fullpath, isDir) {
  * rather than omitting the key, so the request shape doesn't depend on how
  * the decoder treats a missing field.
  */
+/* Flash one named file at one specific peer, chosen from the scanner.
+ *
+ * Deliberately not routed through flashFile(): that one asks the device to
+ * pick a target using `ble_name` and `min_rssi`, and the entire point here is
+ * that the operator has overruled both. The confirm therefore says which
+ * device, not which rules.
+ */
+export async function flashToTarget(fullpath, addr, label) {
+  const name = fullpath.split("/").pop();
+  const who = label || addr;
+  if (!confirm(`Flash "${name}" to ${who}?\n\n` +
+               `The updater will look for this exact device — the name filter ` +
+               `and minimum-signal setting do not apply — connect, and start ` +
+               `the Legacy DFU sequence.\n\n` +
+               `Progress appears here as it happens; the device log has the detail.`)) {
+    return false;
+  }
+  try {
+    await smp.fsxTriggerDfu(fullpath, addr);
+    log(`DFU triggered: ${name} -> ${who}`, "ok");
+    /* The run owns the radio from here, so the survey is over whether we say
+     * so or not. Closing the panel makes that visible instead of leaving a
+     * frozen list that quietly fills with "radio is busy". */
+    closeScanner();
+    return true;
+  } catch (e) {
+    log(`DFU trigger: ${e.message}`, "err");
+    return false;
+  }
+}
+
 export async function autoFlash() {
   if (!confirm(`Auto-flash the next matching target?\n\n` +
                `The updater will scan for a BLE peer, match its advertised name ` +

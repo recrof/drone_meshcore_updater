@@ -254,10 +254,37 @@ t("no board is published and then disowned",
   t("BleUpdate still reads image state", /imgState\(\)/.test(ble));
 }
 
+/* --- the two ways out ---------------------------------------------------
+ *
+ * Both are exercised against the real component, because the guard that makes
+ * them safe lives in its close() and a test that stubbed it would be checking
+ * nothing. The header ✕ and the footer Close are the same action; Escape is
+ * the third, and it went missing on every dialog here until a fifth one
+ * arrived without it and made the omission visible.
+ */
+t("the header carries a ✕ as well as a footer Close",
+  [...dlg().querySelectorAll(".cfg-head button")].some(b => b.textContent.includes("✕")));
+
+d.dispatchEvent(new w.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+await wait(300);
+t("Escape closes the dialog", !app.querySelector("#flash-overlay"));
+
+/* Reopened, so the footer button is checked too rather than assumed
+ * equivalent. */
+click(btn);
+await wait(300);
+t("it reopens after Escape", !!dlg());
+
 const close = [...dlg().querySelectorAll(".cfg-foot button")].find(b => /Close/.test(b.textContent));
 click(close);
 await wait(300);
 t("dialog closes", !app.querySelector("#flash-overlay"));
+
+/* Escape with nothing open must not throw — the listener is on `document`
+ * for the component's whole life, not just while the dialog is up. */
+d.dispatchEvent(new w.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+await wait(120);
+t("Escape with no dialog open is harmless", !app.querySelector("#flash-overlay"));
 
 if (errors.length) {
   console.log("\n--- console/window errors ---");

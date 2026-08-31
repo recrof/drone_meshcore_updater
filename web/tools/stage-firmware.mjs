@@ -86,6 +86,23 @@ export const USB_METHODS = {
    * a single-file artifact at all — see `parts` below. */
   xiao_esp32s3: "esptool",
   xiao_esp32c5: "esptool",
+
+  /* Also SWD through an on-board SAMD11 CMSIS-DAP probe — the same
+   * arrangement as the nRF54L XIAO, and the same method string, because this
+   * table describes **how the board is reached**, not how its flash is
+   * programmed. Everything the method governs is identical: WebUSB, a merged
+   * hex, no buttons to press, no bootloader to enter.
+   *
+   * The flash controller underneath is not identical, and that difference is
+   * dispatched on the *board* inside ProbeFlash.js. It has to be, and the
+   * reason is sharper than "different vendors": **the MG24 answers the same
+   * DPIDR as the nRF54L**, 0x6ba02477, which is a generic Cortex-M debug port
+   * ID and not a part number. So the nRF54L back end's identity check passes
+   * on this board and it would go on to write nRF RRAM-controller registers
+   * (0x5004e500) into EFR32 address space. A wrong back end here is not a
+   * failed flash, it is an arbitrary poke at a live peripheral, which is why
+   * ProbeFlash.js refuses an unknown board rather than defaulting. */
+  xiao_mg24: "cmsis-dap",
 };
 
 /*

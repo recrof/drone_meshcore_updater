@@ -40,6 +40,12 @@
   --muted:   #667069;
   --warn:    #a86b00;
   --danger:  #a3423a;
+  /* Status green, and deliberately NOT --accent.
+     --accent is a preference with seven settings, one of which is red; a
+     signal meter that paints "excellent" in the user's chosen red, next to a
+     "poor" that is also red, would be worse than having no colour at all. A
+     status colour has to mean the same thing whatever the palette. */
+  --ok:      #2e7d55;
 
   --pal-green:  #2e9e6b;
   --pal-blue:   #2b6fc2;
@@ -73,6 +79,7 @@
     --muted:   #7f8b85;
     --warn:    #d99a2a;
     --danger:  #e07871;
+    --ok:      #4cc38a;
 
     --pal-green:  #58cf94;
     --pal-blue:   #6bb2f2;
@@ -96,6 +103,7 @@
   --muted:   #7f8b85;
   --warn:    #d99a2a;
   --danger:  #e07871;
+  --ok:      #4cc38a;
 
   --pal-green:  #58cf94;
   --pal-blue:   #6bb2f2;
@@ -116,6 +124,7 @@
   --muted:   #667069;
   --warn:    #a86b00;
   --danger:  #a3423a;
+  --ok:      #2e7d55;
 
   --pal-green:  #2e9e6b;
   --pal-blue:   #2b6fc2;

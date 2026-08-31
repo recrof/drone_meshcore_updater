@@ -1,5 +1,6 @@
 import { ref, computed, watch, onUnmounted } from "../vue.js";
-import { Nrf54lFlasher, EXPECTED_DPIDR } from "../lib/nrf54l-flash.js";
+import Icon from "./Icon.js";
+import { probeTargetFor } from "../lib/probe-targets.js";
 import { parseIntelHex, totalBytes, lowAddress, highAddress } from "../lib/intel-hex.js";
 import { fmtSize } from "../lib/format.js";
 import { assetUrl } from "../lib/firmware-manifest.js";
@@ -14,22 +15,32 @@ import { useFlashRun, fetchChecked } from "../flash-run.js";
  *
  * It stays visibly different from the two serial flashers, because it is: the
  * probe is a separate piece of silicon that is always awake, so attaching to
- * it is its own step with its own diagnosis (DPIDR identifies the part,
- * APPROTECT is recoverable from here and from no other GUI tool this hardware
- * has). The serial flashers have nothing to attach *to* until the user has
- * put the target in bootloader mode, so they are one button.
+ * it is its own step with its own diagnosis (APPROTECT is recoverable from
+ * here and from no other GUI tool this hardware has). The serial flashers have
+ * nothing to attach *to* until the user has put the target in bootloader mode,
+ * so they are one button.
+ *
+ * ---- Two boards, and the DPIDR does not tell them apart -----------------
+ *
+ * The XIAO nRF54LM20A and the XIAO MG24 both arrive here: same probe, same
+ * API, same merged hex, same "nothing to press". Their flash controllers are
+ * completely different, and **they answer the same DPIDR** (0x6ba02477 is a
+ * generic ARM debug-port ID). So the algorithm is selected from the board the
+ * manifest names, in probe-targets.js, and this component refuses a board it
+ * has no profile for rather than falling back to one — the fallback would
+ * write one part's flash-controller registers into the other's peripheral
+ * space. See that file for the whole argument.
+ *
+ * The DPIDR is still shown and still checked, because "no SWD response" and
+ * "something answered but it is not what we expect" are different problems.
+ * It just is not what decides anything.
  */
-
-/* Partition geometry, from updater/rram_partitions.dtsi. Used only to check
- * an image before writing it; the device remains the authority. */
-const RRAM_SIZE = 2036 * 1024;
-const SLOT0 = 0x10000;
-const STORAGE = 0x1d1000;
 
 const hex8 = (n) => (n >>> 0).toString(16).padStart(8, "0");
 
 export default {
   name: "ProbeFlash",
+  components: { Icon },
   props: {
     entry: { type: Object, default: null },   // the manifest entry for this board
     blocked: { type: String, default: "" },   // non-empty = why we must not run
@@ -43,9 +54,20 @@ export default {
     const dpidr = ref(0);
     const protectedPart = ref(false);
 
+    /* The profile for the board this entry is for, or null. Everything below
+     * that touches hardware goes through it. */
+    const target = computed(() => probeTargetFor(props.entry?.board));
+    const partName = computed(() => target.value?.flasher.PART ?? "");
+    const expectedDpidr = computed(() => target.value?.flasher.EXPECTED_DPIDR ?? 0);
+    /* Only the nRF54L has an unlock path (CTRL-AP). Asked of the class rather
+     * than of a board list, so a part that gains one gets the button by
+     * implementing massErase() and not by being remembered here. */
+    const canUnlock = computed(() => !!target.value?.flasher.CAN_UNLOCK);
+
     const attached = computed(() => !!flasher.value && dpidr.value !== 0);
-    const recognised = computed(() => dpidr.value === EXPECTED_DPIDR);
-    const ready = computed(() => attached.value && !busy.value && !props.blocked);
+    const recognised = computed(() => dpidr.value === expectedDpidr.value);
+    const ready = computed(() =>
+      attached.value && !busy.value && !props.blocked && !!target.value);
 
     /*
      * Returns { fatal: [], warn: [] }. Fatal aborts the write.
@@ -56,21 +78,28 @@ export default {
      * chosen by one person.
      */
     function inspect(chunks) {
+      const g = target.value.geometry;
       const lo = lowAddress(chunks), hi = highAddress(chunks);
       const fatal = [], warn = [];
 
-      if (lo !== 0) {
-        fatal.push(`starts at 0x${hex8(lo)}, not 0 — no reset vector. The staged image ` +
-                   `looks bootloader-relative (a zephyr.hex rather than a merged.hex); ` +
-                   `the device would not boot from it. This is a build or staging fault, ` +
-                   `not something to retry.`);
+      /* `g.base` is not decoration. The nRF54L maps its program memory at 0
+       * and the EFR32 at 0x08000000, so "starts at 0" is the *correct* image
+       * on one board and the wrong one on the other — which makes this check
+       * also a check that the right board's image is in front of us. */
+      if (lo !== g.base) {
+        fatal.push(`starts at 0x${hex8(lo)}, not 0x${hex8(g.base)} — no reset vector. ` +
+                   `The staged image looks bootloader-relative (a zephyr.hex rather ` +
+                   `than a merged.hex), or built for a different board; the device ` +
+                   `would not boot from it. This is a build or staging fault, not ` +
+                   `something to retry.`);
       }
-      if (hi >= RRAM_SIZE) {
-        fatal.push(`runs to 0x${hex8(hi)}, past the end of the ${fmtSize(RRAM_SIZE)} RRAM.`);
-      } else if (hi >= STORAGE) {
-        warn.push(`overlaps storage_partition at 0x${hex8(STORAGE)} — settings will be overwritten.`);
+      if (hi >= g.base + g.size) {
+        fatal.push(`runs to 0x${hex8(hi)}, past the end of the ${fmtSize(g.size)} ${g.memory}.`);
+      } else if (hi >= g.base + g.storage) {
+        warn.push(`overlaps storage_partition at 0x${hex8(g.base + g.storage)} — ` +
+                  `settings will be overwritten.`);
       }
-      if (lo === 0 && hi < SLOT0) {
+      if (lo === g.base && hi < g.base + g.slot0) {
         warn.push("bootloader only, no application — the device will boot MCUboot and stop there.");
       }
       return { fatal, warn };
@@ -118,7 +147,16 @@ export default {
     async function connect() {
       try {
         await guard("connecting", async () => {
-          const f = await Nrf54lFlasher.connect(log);
+          if (!target.value) {
+            /* Refuse rather than default. See the header, and probe-targets.js. */
+            throw new Error(
+              `no flash algorithm for board '${props.entry?.board ?? "(none)"}'. ` +
+              `This client can write ${Object.values(
+                (await import("../lib/probe-targets.js")).PROBE_TARGETS)
+                .map(t => t.label).join(" and ")} over a probe.`);
+          }
+          log(`target: ${partName.value}`);
+          const f = await target.value.flasher.connect(log);
           flasher.value = f;
           dpidr.value = await f.attach();
           protectedPart.value = await f.isProtected();
@@ -144,6 +182,7 @@ export default {
     }
 
     async function massErase() {
+      if (!canUnlock.value) return;
       if (!confirm("Mass erase?\n\nThis destroys everything in the chip's internal " +
                    "memory — firmware and settings — and unlocks the debug port. " +
                    "Files on the external flash (/lfs1) are not touched.")) return;
@@ -163,8 +202,9 @@ export default {
     onUnmounted(() => { if (flasher.value) flasher.value.close(); });
 
     return {
-      EXPECTED_DPIDR, busy, error, lines, progress,
+      busy, error, lines, progress,
       dpidr, protectedPart, attached, recognised, ready,
+      target, partName, expectedDpidr, canUnlock,
       connect, disconnect, flashNewest, massErase,
       hex: hex8, fmtSize,
     };
@@ -178,16 +218,16 @@ export default {
       <template v-else>
         <span class="flash-ok">▲</span>
         <span class="mono">DPIDR 0x{{ hex(dpidr) }}</span>
-        <span class="flash-note" v-if="recognised">nRF54L</span>
+        <span class="flash-note" v-if="recognised">{{ partName }}</span>
         <span class="flash-note warn" v-else>
-          unrecognised part — expected 0x{{ hex(EXPECTED_DPIDR) }}
+          unrecognised debug port — expected 0x{{ hex(expectedDpidr) }}
         </span>
         <span class="grow"></span>
         <button class="small" :disabled="!!busy" @click="disconnect">Release</button>
       </template>
     </div>
 
-    <div class="cfg-banner err" v-if="protectedPart">
+    <div class="cfg-banner err" v-if="protectedPart && canUnlock">
       The debug port answers but memory access is blocked (APPROTECT).
       A mass erase is the only way in, and it wipes the chip.
       <button class="small danger" :disabled="!!busy" @click="massErase">
@@ -198,7 +238,7 @@ export default {
     <div class="cfg-section-sub">Write</div>
     <div class="flash-step">
       <button class="primary" :disabled="!ready || !entry" @click="flashNewest">
-        {{ busy === "flashing" ? "Flashing…" : "Flash newest" }}
+        <Icon name="bolt_boost" :size="18"/>{{ busy === "flashing" ? "Flashing…" : "Flash newest" }}
       </button>
       <span class="flash-note" v-if="entry">
         <strong v-if="entry.version">v{{ entry.version }}</strong><template
@@ -207,8 +247,12 @@ export default {
       </span>
     </div>
 
-    <div class="flash-step" v-if="!attached || blocked">
+    <div class="flash-step" v-if="!attached || blocked || !target">
       <span class="flash-note err" v-if="blocked">{{ blocked }}</span>
+      <span class="flash-note err" v-else-if="!target">
+        This client has no flash algorithm for {{ entry ? entry.board : "this board" }},
+        so it cannot be written over the probe. Bluetooth is unaffected.
+      </span>
       <span class="flash-note" v-else>connect the probe first</span>
     </div>
 

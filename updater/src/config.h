@@ -125,6 +125,51 @@ struct app_config {
 	 */
 	bool     scan_debug;
 
+	/* Start an auto-flash as soon as the radio is up, with no client and
+	 * nobody to press anything.
+	 *
+	 * This is the drone case in one key. Until now every DFU began with a
+	 * TRIGGER_DFU write from the web client, which means a browser had to
+	 * be in Bluetooth range of the updater — and the whole point of the
+	 * device is to go somewhere a browser cannot follow. With this set,
+	 * power-on is the trigger: scan, match ble_firmware_mapping, flash,
+	 * retry per `retries`.
+	 *
+	 * **It needs ble_firmware_mapping**, because auto-flash chooses the
+	 * bundle by target name and an empty mapping gives it nothing to
+	 * choose from. Set without one, the run is refused and main() says so
+	 * at boot rather than leaving a device that looks armed and is not.
+	 *
+	 * Off by default. It arms the device the moment it has power, and a
+	 * default that flashes whatever it finds is not a default anyone
+	 * should get by accident.
+	 *
+	 * Consequence worth knowing: with the default scan_timeout of 0 the
+	 * search never ends, so the device stays dfu_runner_busy() until it
+	 * succeeds or is stopped. Surveys refuse to start while that is true
+	 * (see survey.h), so the scanner panel will be unavailable until you
+	 * press Stop. That is the correct trade for an unattended device and
+	 * the UI explains it rather than just greying out.
+	 */
+	bool     auto_flash;
+
+	/* Select the external antenna connector rather than the on-board one.
+	 *
+	 * Only meaningful on hardware with an antenna switch, which is a
+	 * property of the *board*, not the SoC: the board's devicetree
+	 * declares `antenna-gpios` under `zephyr,user` and boards that do not
+	 * have one compile antenna.c's body away entirely. Setting this on
+	 * such a board logs once and changes nothing — the same contract
+	 * ble_tx_power has on the MG24, and for the same reason: a key that
+	 * silently does nothing is worse than one that says so.
+	 *
+	 * False = on-board antenna, which is what every board here ships
+	 * selecting and the only choice that works with nothing plugged in.
+	 * Switching to `external` with no antenna attached will make the link
+	 * *worse*, not better, so this is opt-in.
+	 */
+	bool     ext_antenna;
+
 	/* Try the WiFi/ElegantOTA transport as well as BLE.
 	 *
 	 * On by default, but it is not free: a scan cycle that finds no BLE

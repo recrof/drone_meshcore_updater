@@ -33,25 +33,73 @@ const INHERITED = new Set([
   "toString", "valueOf", "hasOwnProperty", "constructor",
 ]);
 
+/* Base classes that are built in rather than imported from a sibling. A name
+ * not here and not importable from js/lib/ fails, on purpose — see
+ * withBases(). */
+const GLOBAL_BASES = new Set(["EventTarget", "Error", "Array", "Object"]);
+
 const files = readdirSync(LIB).filter(f => f.endsWith(".js"));
 t("found modules to check", files.length > 0, files.join(", "));
+
+/* What one file declares on `this`, ignoring inheritance. */
+function declaredInFile(src) {
+  const out = new Set();
+  /* Method and getter definitions: `foo(`, `async foo(`, `get foo(`,
+   * `static foo(` at class-body indentation. */
+  for (const m of src.matchAll(/^\s{2,4}(?:static\s+)?(?:async\s+)?(?:get\s+|set\s+)?([A-Za-z_$][\w$]*)\s*\(/gm)) {
+    out.add(m[1]);
+  }
+  /* Properties assigned anywhere, including arrow functions stored on the
+   * instance (`this._onLogValue = (e) => ...`), and class fields
+   * (`static PART = ...`, `#x = ...`). */
+  for (const m of src.matchAll(/\bthis\.([A-Za-z_$][\w$]*)\s*=/g)) out.add(m[1]);
+  for (const m of src.matchAll(/^\s{2,4}(?:static\s+)?([A-Za-z_$][\w$]*)\s*=/gm)) out.add(m[1]);
+  return out;
+}
+
+/*
+ * Follow `class A extends B` into the file B is imported from.
+ *
+ * Added when swd-target.js appeared: nrf54l-flash.js and efr32-flash.js are
+ * both subclasses now, and without this every inherited call — writeWord,
+ * selectAp, writeSameWord — reads as missing. That is the *right* direction
+ * for this check to fail in, so it failed rather than quietly passing, but a
+ * base class is not an error.
+ *
+ * **An unresolvable base is a failure, not a skip.** The whole value of this
+ * file is that it cannot pass vacuously; silently treating an unknown parent
+ * as "declares everything" would turn a real typo in a subclass into a green
+ * run.
+ */
+function withBases(file, seen = new Set()) {
+  if (seen.has(file)) return new Set();          // cycles cannot happen, but
+  seen.add(file);
+  const src = readFileSync(join(LIB, file), "utf8");
+  const declared = declaredInFile(src);
+
+  for (const m of src.matchAll(/\bclass\s+[A-Za-z_$][\w$]*\s+extends\s+([A-Za-z_$][\w$]*)/g)) {
+    const base = m[1];
+    /* Where does `base` come from? Only a sibling in js/lib/ is followable;
+     * anything else (a global like EventTarget, or a cross-directory import)
+     * has to be declared safe by name. */
+    const imp = [...src.matchAll(/import\s*\{([^}]*)\}\s*from\s*"\.\/([\w.-]+\.js)"/g)]
+      .find(i => i[1].split(",").map(x => x.trim().split(/\s+as\s+/).pop()).includes(base));
+    if (imp) {
+      for (const n of withBases(imp[2], seen)) declared.add(n);
+    } else if (!GLOBAL_BASES.has(base)) {
+      t(`${file}: base class ${base} is resolvable`, false,
+        "not imported from a sibling in js/lib/, and not a known global — " +
+        "this check would otherwise pass vacuously");
+    }
+  }
+  return declared;
+}
 
 for (const file of files) {
   const src = readFileSync(join(LIB, file), "utf8");
   if (!/\bclass\s+\w/.test(src)) continue;      // plain-function modules
 
-  const declared = new Set(INHERITED);
-
-  /* Method and getter definitions: `foo(`, `async foo(`, `get foo(`,
-   * `static foo(` at class-body indentation. */
-  for (const m of src.matchAll(/^\s{2,4}(?:static\s+)?(?:async\s+)?(?:get\s+|set\s+)?([A-Za-z_$][\w$]*)\s*\(/gm)) {
-    declared.add(m[1]);
-  }
-  /* Properties assigned anywhere, including arrow functions stored on the
-   * instance (`this._onLogValue = (e) => ...`). */
-  for (const m of src.matchAll(/\bthis\.([A-Za-z_$][\w$]*)\s*=/g)) {
-    declared.add(m[1]);
-  }
+  const declared = new Set([...INHERITED, ...withBases(file)]);
 
   /* Call sites: `this.foo(` and `this.foo?.(`. */
   const called = new Map();
@@ -106,6 +154,43 @@ for (const file of files) {
     const named = [...text.matchAll(/web\/test\/([\w.-]+\.test\.mjs)/g)].map(m => m[1]);
     const gone = [...new Set(named)].filter(f => !suites.includes(f));
     t("web.yml names no suite that has been removed", gone.length === 0, gone.join(", "));
+  }
+}
+
+/* --- no backtick inside a component template ---------------------------
+ *
+ * Every component here writes its markup as
+ *
+ *     template: /* html *\/ `  ...  `
+ *
+ * so a stray backtick in the markup — nearly always inside an HTML comment
+ * quoting a prop or a variable name — closes the literal early. The result is
+ * a SyntaxError naming whatever word happened to follow it, which points at a
+ * line of prose and says nothing about the real cause.
+ *
+ * This has now been introduced three separate times by someone writing an
+ * explanatory comment, which is exactly the kind of mistake worth spending a
+ * test on rather than a convention. AppHeader.js already carries a warning in
+ * prose; this is the version that fails the build.
+ */
+{
+  const dir = join(WEB, "js", "components");
+  const open = /template:\s*\/\* html \*\/\s*`/;
+  for (const f of readdirSync(dir).filter((n) => n.endsWith(".js")).sort()) {
+    const src = readFileSync(join(dir, f), "utf8");
+    const m = open.exec(src);
+    if (!m) continue;
+    const body = src.slice(m.index + m[0].length);
+    const end = body.indexOf("\n  `,");
+    if (end < 0) {
+      t(`${f}: template literal is terminated`, false, "no closing backtick found");
+      continue;
+    }
+    const inner = body.slice(0, end);
+    const at = inner.indexOf("`");
+    t(`${f}: no backtick inside its template`, at < 0,
+      at < 0 ? "" : "near: " + inner.slice(Math.max(0, at - 50), at + 20)
+                      .replace(/\s+/g, " "));
   }
 }
 

@@ -1,4 +1,5 @@
 import { ref, computed, watch } from "../vue.js";
+import Icon from "./Icon.js";
 import { SerialLink } from "../lib/serial.js";
 import { NordicSerialDfu, touchReset, APP_START, DFU_BAUD } from "../lib/nordic-dfu-serial.js";
 import { EspRomLoader, enterDownloadMode, USB_JTAG_SERIAL, chipForBoard } from "../lib/esptool.js";
@@ -41,6 +42,7 @@ import { useFlashRun, fetchChecked, consoleTracer } from "../flash-run.js";
  */
 export default {
   name: "SerialFlash",
+  components: { Icon },
   props: {
     entry: { type: Object, required: true },
     blocked: { type: String, default: "" },
@@ -262,7 +264,7 @@ export default {
 
     <div class="flash-step">
       <button class="primary" :disabled="!ready" @click="flash">
-        {{ busy === "flashing" ? "Flashing…" : "Flash newest" }}
+        <Icon name="bolt_boost" :size="18"/>{{ busy === "flashing" ? "Flashing…" : "Flash newest" }}
       </button>
       <span class="flash-note">
         <strong v-if="entry.version || entry.dfuVersion">v{{ entry.version || entry.dfuVersion }}</strong><template

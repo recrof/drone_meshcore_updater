@@ -7,6 +7,7 @@ import { fmtSize, joinPath } from "../lib/format.js";
 import { isConfigPath } from "../lib/config-file.js";
 import { isLogPath } from "../lib/log-file.js";
 import { TRANSPORT, transportForName, transportsFromMask } from "../lib/firmware-image.js";
+import Icon from "./Icon.js";
 
 /* Said in the tooltip of a disabled flash button. Names the transport the
  * file wants, because "this updater cannot flash it" invites the reader to
@@ -21,6 +22,7 @@ const BLOCKED = {
 
 export default {
   name: "FileListing",
+  components: { Icon },
   setup() {
     const rows = computed(() => {
       /* transportsFromMask(null) is [BLE]: every build ever shipped has had
@@ -120,11 +122,29 @@ export default {
                    is the single most useful thing to say here. -->
               <button v-if="row.isFirmware" class="primary small"
                       :disabled="!row.canFlash" :title="whyBlocked(row)"
-                      @click.stop="flashFile(row.full)">flash</button>
+                      @click.stop="flashFile(row.full)">
+                <Icon name="bolt_boost" :size="16"/>flash
+              </button>
               <button v-if="row.isFirmware" class="small"
-                      @click.stop="check(row)">check</button>
-              <button @click.stop="rename(row.full)">rename</button>
-              <button class="danger" @click.stop="remove(row.full, row.isDir)">delete</button>
+                      @click.stop="check(row)">
+                <Icon name="search_check_2" :size="16"/>check
+              </button>
+              <!-- Icon-only, unlike flash/check beside them. These two are
+                   universal file operations with settled glyphs, so a label
+                   buys nothing; flash and check are this project's own verbs
+                   and would be a guessing game as pictures. The accessible
+                   name is on aria-label, and the tooltip repeats the file so
+                   a mis-aimed click is recoverable before it happens. -->
+              <button class="icon-only" :title="'Rename ' + row.name"
+                      :aria-label="'Rename ' + row.name"
+                      @click.stop="rename(row.full)">
+                <Icon name="drive_file_rename" :size="18"/>
+              </button>
+              <button class="icon-only danger" :title="'Delete ' + row.name"
+                      :aria-label="'Delete ' + row.name"
+                      @click.stop="remove(row.full, row.isDir)">
+                <Icon name="trash" :size="18"/>
+              </button>
             </td>
           </tr>
         </tbody>

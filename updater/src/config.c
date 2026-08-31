@@ -75,6 +75,13 @@ static void apply_defaults(struct app_config *c)
 	c->wifi_tx_power  = 20;
 	c->scan_timeout   = 0;
 	c->scan_debug     = false;
+	/* Off: this arms the device at power-on, which nobody should get by
+	 * accident. See config.h. */
+	c->auto_flash     = false;
+	/* The on-board antenna — every board here ships selecting it, and it
+	 * is the only choice that works with nothing plugged into the
+	 * connector. */
+	c->ext_antenna    = false;
 	/* On: the ESP32 board exists to reach ElegantOTA targets, so making
 	 * that the thing you have to switch on would be backwards. Costs
 	 * nothing on a board with no WiFi radio. */
@@ -171,6 +178,22 @@ static void apply_kv(struct app_config *c, const char *key, const char *val)
 		if (n >= 0 && n <= 65535) c->scan_timeout = (uint16_t)n;
 	} else if (!strcmp(key, "scan_debug")) {
 		c->scan_debug = parse_bool(val);
+	} else if (!strcmp(key, "auto_flash")) {
+		c->auto_flash = parse_bool(val);
+	} else if (!strcmp(key, "ext_antenna")) {
+		/* Accepts the words as well as 0/1, because "internal" and
+		 * "external" are what this switch is called everywhere else —
+		 * on the board, in the schematic, and in the sentence the
+		 * operator is thinking. parse_bool() looks at the first
+		 * character only, so "external" reads as false without this
+		 * and would silently mean the opposite of what it says. */
+		if (!strcmp(val, "external") || !strcmp(val, "ext")) {
+			c->ext_antenna = true;
+		} else if (!strcmp(val, "internal") || !strcmp(val, "int")) {
+			c->ext_antenna = false;
+		} else {
+			c->ext_antenna = parse_bool(val);
+		}
 	} else if (!strcmp(key, "wifi_ota")) {
 		c->wifi_ota = parse_bool(val);
 	} else if (!strcmp(key, "pkt_gap_ms")) {

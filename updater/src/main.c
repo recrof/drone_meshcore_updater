@@ -31,6 +31,9 @@
 #include "selfconfirm.h"
 #include "config.h"
 #include "ble_tx_power.h"
+#include "antenna.h"
+#include "dfu_runner.h"
+#include "ble_scanner.h"
 
 LOG_MODULE_REGISTER(app, LOG_LEVEL_INF);
 
@@ -82,6 +85,68 @@ static const struct bt_data sd[] = {
 static const struct bt_le_conn_param s_fast_param =
 	BT_LE_CONN_PARAM_INIT(6, 12, 0, 400);
 
+/* ---- Advertising, and why starting it is a retry loop --------------------
+ *
+ * One bt_le_adv_start() at boot and one more per disconnect used to be the
+ * whole of it. Both are attempts that can fail, and a failure meant the device
+ * was never discoverable again — no retry, no second chance, and a log line
+ * that scrolled away. On a repeater-carrying updater the recovery for that is
+ * a power cycle, which is the one thing the operator cannot do.
+ *
+ * It is not a hypothetical failure. Restarting a *connectable* advertiser
+ * makes the host put the identity address back with HCI LE Set Random Address,
+ * which the controller refuses while a scan is enabled — so on every board
+ * here except the MG24 (which has extended advertising, and a per-set address
+ * command that is allowed), a client disconnecting while the scanner panel was
+ * open left the device silent. See ble_scanner_with_radio_paused().
+ *
+ * Hence: a work item that reschedules itself until it succeeds, and one
+ * attempt per pass with the radio borrowed back off whatever is scanning.
+ * Nothing here gives up, on purpose — every reason advertising fails is
+ * transient, and the failure mode of trying too long is a log line.
+ */
+#define ADV_RETRY_MS 1000
+
+static int adv_start_raw(void)
+{
+	int rc = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad),
+				 sd, ARRAY_SIZE(sd));
+	return rc == -EALREADY ? 0 : rc;
+}
+
+static void adv_restart_fn(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(s_adv_restart, adv_restart_fn);
+/* So a retry that takes a while is one warning and one recovery line, rather
+ * than one of each per second for the length of a DFU. */
+static bool s_adv_failing;
+
+static void adv_restart_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	/* Try it plainly first. The pause costs a running scan a blind
+	 * interval, and on a controller that does not need it (extended
+	 * advertising) it would be paid on every disconnect for nothing. */
+	int rc = adv_start_raw();
+	if (rc != 0) {
+		rc = ble_scanner_with_radio_paused(adv_start_raw);
+	}
+
+	if (rc == 0) {
+		if (s_adv_failing) {
+			LOG_INF("advertising again");
+			s_adv_failing = false;
+		}
+		return;
+	}
+	if (!s_adv_failing) {
+		LOG_WRN("adv start rc=%d — retrying every %d ms until it takes",
+			rc, ADV_RETRY_MS);
+		s_adv_failing = true;
+	}
+	k_work_reschedule(&s_adv_restart, K_MSEC(ADV_RETRY_MS));
+}
+
 static void on_connected(struct bt_conn *conn, uint8_t err)
 {
 	if (err) {
@@ -114,6 +179,14 @@ static void on_connected(struct bt_conn *conn, uint8_t err)
 	    info.role != BT_CONN_ROLE_PERIPHERAL) {
 		return;
 	}
+	/* Peripheral only, which is why it is below the role check: a central
+	 * link is our DFU target and says nothing about whether we are
+	 * discoverable. A connectable advertiser stops of its own accord when
+	 * a peer connects, and on_disconnected() schedules a fresh attempt, so
+	 * a pending retry here would only start advertising mid-session.
+	 * Non-blocking, which matters in this context. */
+	k_work_cancel_delayable(&s_adv_restart);
+
 	int rc = bt_conn_le_param_update(conn, &s_fast_param);
 	if (rc && rc != -EALREADY) {
 		LOG_WRN("conn param update rc=%d", rc);
@@ -134,10 +207,11 @@ static void on_disconnected(struct bt_conn *conn, uint8_t reason)
 		return;
 	}
 	LOG_INF("peer disconnected reason=0x%02x", reason);
-	int rc = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
-	if (rc && rc != -EALREADY) {
-		LOG_ERR("adv restart failed rc=%d", rc);
-	}
+	/* Handed to the system workqueue rather than done here. This callback
+	 * runs in the host's own context, and the restart may now need to stop
+	 * and start a scan around itself — several synchronous HCI commands,
+	 * which is not something to do from inside a connection callback. */
+	k_work_reschedule(&s_adv_restart, K_NO_WAIT);
 }
 
 /* Called when the negotiated LE connection parameters (interval, latency,
@@ -219,10 +293,15 @@ static int bt_ready(void)
 		return rc;
 	}
 	bt_gatt_cb_register(&gatt_callbacks);
-	rc = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
+	rc = adv_start_raw();
 	if (rc) {
-		LOG_ERR("adv start rc=%d", rc);
-		return rc;
+		/* Not fatal any more. Everything below this point — the SMP
+		 * transport, the DFU runner, auto_flash — is worth having on a
+		 * device that is briefly not discoverable, and the retry will
+		 * put it on the air as soon as the controller allows. */
+		LOG_ERR("adv start rc=%d — will keep trying", rc);
+		s_adv_failing = true;
+		k_work_reschedule(&s_adv_restart, K_MSEC(ADV_RETRY_MS));
 	}
 	/*
 	 * AFTER advertising has started, not before.
@@ -242,7 +321,9 @@ static int bt_ready(void)
 	 * every packet doing so, which is what the old order bought on this board.
 	 */
 	ble_tx_power_apply_global(app_config_current()->ble_tx_power);
-	LOG_INF("BLE up, advertising as '%s'", CONFIG_BT_DEVICE_NAME);
+	LOG_INF("BLE up, %s as '%s'",
+		s_adv_failing ? "NOT yet advertising" : "advertising",
+		CONFIG_BT_DEVICE_NAME);
 	selfconfirm_ble_ready();
 	return 0;
 }
@@ -356,11 +437,54 @@ int main(void)
 		cfg->min_rssi, cfg->retry_cooldown, cfg->wedge_cooldown,
 		cfg->ble_tx_power, cfg->wifi_tx_power,
 		cfg->scan_timeout, cfg->scan_debug, cfg->pkt_gap_ms);
+	LOG_INF("cfg: auto_flash=%d ext_antenna=%d (switch %s)",
+		cfg->auto_flash, cfg->ext_antenna,
+		antenna_switchable() ? "present" : "absent on this board");
+
+	/* Before the radio, not after. The antenna path should already be
+	 * right the first time the controller keys up — advertising starts
+	 * inside bt_ready(), and a path corrected afterwards means the first
+	 * advertisements go out of the wrong one. On a board with no switch
+	 * this reports -ENOTSUP and says so only if `ext_antenna` was set. */
+	antenna_apply(cfg->ext_antenna);
 
 	rc = bt_ready();
 	if (rc) {
 		led_set_state(LED_STATE_DONE_FAIL);
 		return rc;
+	}
+
+	/*
+	 * Unattended operation: power-on is the trigger.
+	 *
+	 * Every other route into a DFU starts with a TRIGGER_DFU write from
+	 * the web client, which requires a browser within Bluetooth range of
+	 * the updater — and the device exists to go where a browser cannot
+	 * follow. This is the one path that does not need anybody present.
+	 *
+	 * The mapping check is here rather than left to dfu_runner_start()
+	 * because the failure is otherwise invisible in exactly the situation
+	 * this feature is for: no client, no console, and a device that looks
+	 * armed. An empty mapping means auto-flash has no way to choose a
+	 * bundle, so it would refuse — silently, at the far end of a flight.
+	 */
+	if (cfg->auto_flash) {
+		if (cfg->ble_firmware_mapping[0] == '\0') {
+			LOG_ERR("auto_flash is set but ble_firmware_mapping is "
+				"empty — there is no rule saying which bundle "
+				"goes to which target, so nothing will be "
+				"flashed. Set a mapping, or clear auto_flash.");
+			led_set_state(LED_STATE_DONE_FAIL);
+		} else {
+			rc = dfu_runner_start(NULL, NULL);
+			if (rc) {
+				LOG_ERR("auto_flash: dfu_runner_start rc=%d", rc);
+			} else {
+				LOG_INF("auto_flash: armed, searching for a "
+					"target matching '%s'",
+					cfg->ble_firmware_mapping);
+			}
+		}
 	}
 
 	/* All work now happens off the main thread:

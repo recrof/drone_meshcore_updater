@@ -1,0 +1,38 @@
+/*
+ * Devicetree overlay for the MCUboot image on the XIAO MG24.
+ *
+ * Sysbuild picks this up because updater/sysbuild/CMakeLists.txt selects it by
+ * board name and sets mcuboot_DTC_OVERLAY_FILE. That selection is a hard error
+ * when the file is missing, on purpose: without an overlay MCUboot inherits
+ * the board's own `zephyr,code-partition` and links wherever that points, and
+ * both images still build.
+ */
+
+/*
+ * The enlarged bootloader partition. Included by the application image too
+ * (boards/xiao_mg24.overlay), so the two cannot disagree about where the slots
+ * are — see that file for why 48K was not enough.
+ */
+#include "../mg24_partitions.dtsi"
+
+/*
+ * Put MCUboot in the bootloader partition.
+ *
+ * xiao_mg24.dts sets `zephyr,code-partition = &slot0_partition`, which is the
+ * right answer for the bootloader-less build this board had always been, and
+ * cannot survive contact with MCUboot: the bootloader image inherits it and
+ * links at 0x10000, on top of the very slot it exists to load. Only this image
+ * needs correcting — the application really does belong in slot0.
+ */
+/ {
+	chosen {
+		zephyr,code-partition = &boot_partition;
+	};
+};
+
+/*
+ * MCUboot has no business with the external SPI flash — its slots are both in
+ * internal flash — and it does not know about it either, since the node is
+ * added by the *application's* board overlay, which this image never sees.
+ * Nothing to disable here; noted so the next person does not go looking.
+ */

@@ -56,7 +56,10 @@ LOG_MODULE_REGISTER(wifi_ota, LOG_LEVEL_INF);
 
 /* Fixed by MeshCore: `WiFi.softAP("MeshCore-OTA", NULL)` — open, no PSK, the
  * same on every repeater. */
-#define OTA_SSID      "MeshCore-OTA"
+/* Moved to elegantota.h once the scanner also needed it: the panel marks the
+ * one network this updater could actually flash through, and a second copy of
+ * the name here would be a drift pair with nothing checking it. */
+#include "elegantota.h"
 /* Arduino's softAP is always 192.168.4.1, and its DHCP server hands us
  * something on that /24. The address is a property of the AP, not a guess. */
 #define OTA_HOST      "192.168.4.1"
@@ -658,9 +661,21 @@ static bool wifi_available(const struct app_config *cfg)
 }
 
 static int wifi_find(struct dfu_target *out, const struct app_config *cfg,
-		     uint32_t timeout_ms)
+		     uint32_t timeout_ms, const char *pin)
 {
 	ARG_UNUSED(cfg);
+
+	/* No pinning here yet. The field is deliberately transport-opaque so
+	 * this could one day take an IP or a hostname, but today the only
+	 * thing that produces a pin is the BLE scanner, and a MAC address
+	 * means nothing to an HTTP endpoint. Refusing is what turns "flash
+	 * this .bin at that Bluetooth device" into an error the operator can
+	 * read, instead of a scan that silently ignores their choice and
+	 * flashes whatever ElegantOTA peer answered first. */
+	if (pin != NULL && pin[0] != '\0') {
+		LOG_ERR("wifi-elegantota cannot target a pinned address ('%s')", pin);
+		return -EINVAL;
+	}
 
 	memset(out, 0, sizeof(*out));
 	out->tp = &dfu_transport_wifi_elegantota;

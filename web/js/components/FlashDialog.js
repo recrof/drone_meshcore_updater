@@ -1,4 +1,5 @@
 import { ref, computed, watch } from "../vue.js";
+import { onEscape } from "../lib/dialog.js";
 import { loadIndex, usbEntries, boardLabel } from "../lib/firmware-manifest.js";
 import {
   SUPPORTED_METHODS, flasherFor, apiAvailable, entryIsFlashable,
@@ -42,6 +43,9 @@ export default {
   props: { open: Boolean },
   emits: ["close"],
   setup(props, { emit }) {
+    /* Routed through close(), which refuses while a write is in flight —
+     * unmounting mid-flash drops the probe handle or the serial port. */
+    onEscape(() => props.open, () => close());
     const entries = ref([]);          // every board this client can flash by USB
     const manifestError = ref("");
     /*

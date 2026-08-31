@@ -25,6 +25,7 @@
 #include "firmware_map.h"
 #include "dfu_client.h"
 #include "dfu_status.h"
+#include "survey.h"
 #include "app.h"
 
 LOG_MODULE_REGISTER(dfu_runner, LOG_LEVEL_INF);
@@ -138,6 +139,11 @@ static bool runner_sleep(k_timeout_t d)
 	return k_sem_take(&s_wake, d) == 0;
 }
 static char             s_path[DFU_PATH_MAX + 1];
+/* The peer the operator picked, opaque to this file — see dfu_transport.h.
+ * Empty means the usual search. Sized for "AA:BB:CC:DD:EE:FF (random)" with
+ * room to spare, since a future transport may pin something longer. */
+#define DFU_PIN_MAX 40
+static char             s_pin[DFU_PIN_MAX + 1];
 
 /* How long a single transport gets to look, when there is more than one to
  * share the window with. Only used in that case — see find_target(). */
@@ -212,7 +218,7 @@ static uint8_t mapping_kind_mask(const char *mapping)
  * expired quietly, or the last real error if one of them actually failed.
  */
 static int find_target(struct dfu_target *out, const struct app_config *cfg,
-		       uint8_t kind_mask)
+		       uint8_t kind_mask, const char *pin)
 {
 	size_t count;
 	const struct dfu_transport *const *all = dfu_transport_list(&count);
@@ -236,6 +242,15 @@ static int find_target(struct dfu_target *out, const struct app_config *cfg,
 	if (n == 0) {
 		LOG_ERR("no usable transport for this file — nothing can be reached");
 		return -ENOTSUP;
+	}
+
+	/* A pinned target names one peer, so alternating transports to look
+	 * for it makes no sense: the pin either belongs to one of them or to
+	 * none. Slicing the window would only delay the -EINVAL. */
+	if (pin != NULL && pin[0] != '\0' && n > 1) {
+		LOG_INF("pinned target — %zu transports offered, trying %s only",
+			n, usable[0]->name);
+		n = 1;
 	}
 
 	const uint32_t configured = (uint32_t)cfg->scan_timeout * 1000u;
@@ -265,7 +280,7 @@ static int find_target(struct dfu_target *out, const struct app_config *cfg,
 			if (n > 1) {
 				LOG_INF("scanning via %s (%u ms)", usable[i]->name, slice);
 			}
-			int rc = usable[i]->find(out, cfg, slice);
+			int rc = usable[i]->find(out, cfg, slice, pin);
 			if (rc == -ECANCELED) {
 				return rc;   /* stopped — not a transport fault */
 			}
@@ -292,7 +307,11 @@ static void run_thread(void *a, void *b, void *c)
 {
 	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
 
-	LOG_INF("DFU runner: begin path=%s", s_path);
+	if (s_pin[0]) {
+		LOG_INF("DFU runner: begin path=%s pinned=%s", s_path, s_pin);
+	} else {
+		LOG_INF("DFU runner: begin path=%s", s_path);
+	}
 	led_set_state(LED_STATE_DFU_RUNNING);
 
 	/* Reload config.txt — users edit + re-upload it while the device
@@ -386,7 +405,7 @@ static void run_thread(void *a, void *b, void *c)
 			LOG_DBG("scanning for %s targets only",
 				kinds == KIND_BIT(DFU_PAYLOAD_ZIP) ? "packaged" : "raw-image");
 		}
-		rc = find_target(&target, cfg, kinds);
+		rc = find_target(&target, cfg, kinds, s_pin);
 		if (rc == -ECANCELED || cancelled()) {
 			goto stopped;
 		}
@@ -549,7 +568,7 @@ done:
 	k_mutex_unlock(&s_lock);
 }
 
-int dfu_runner_start(const char *zip_path)
+int dfu_runner_start(const char *zip_path, const char *pin)
 {
 	/* NULL or "" selects auto-flash — the bundle is chosen from
 	 * ble_firmware_mapping once a target has been found.
@@ -566,7 +585,16 @@ int dfu_runner_start(const char *zip_path)
 		return -EBUSY;
 	}
 	snprintf(s_path, sizeof(s_path), "%s", zip_path ? zip_path : "");
+	snprintf(s_pin,  sizeof(s_pin),  "%s", pin ? pin : "");
 	s_busy = true;
+
+	/* The radio is ours from here. survey_start() refuses while we are
+	 * busy, but a survey that began a moment *before* this call would
+	 * otherwise keep sweeping across the whole transfer — on the ESP32
+	 * parts that is the same radio, and a scan alongside a DFU costs the
+	 * image (Trap 2: no resume). Belt and braces on purpose: the check
+	 * there and the stop here close opposite halves of the same race. */
+	survey_stop();
 	/* Cleared here rather than at the end of run_thread: a stop that lands
 	 * while the previous thread is still unwinding must not leak into the
 	 * next run, and this is the point where the next run is committed to.

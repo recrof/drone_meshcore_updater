@@ -1,0 +1,64 @@
+/*
+ * Internal-flash partition table for the XIAO MG24 (EFR32MG24, 1536 KB).
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Unlike every other board here, upstream's table is already MCUboot-shaped
+ * and internally consistent: 48K boot / 736K slot0 / 736K slot1 / 16K storage,
+ * exactly filling 1536 KB, every boundary a multiple of the 8192-byte page.
+ * Nothing about it is wrong. **One number in it is too small for us**, and
+ * that is the only reason this file exists.
+ *
+ * ---- Why boot_partition grows from 48K to 64K ---------------------------
+ *
+ * The signature type decides the bootloader's size, and this board signs
+ * RSA-2048 (sysbuild/sysbuild_xiao_mg24.conf has the full reasoning — it is
+ * the only type in NCS's MCUboot fork that reaches for neither Nordic crypto
+ * nor tinycrypt). RSA pulls in PSA/mbedTLS, and this project's MCUboot builds
+ * to 65,488 bytes on the Espressif parts with exactly that configuration.
+ * Thumb-2 is denser than Xtensa or RV32, so 48K might have fitted — but
+ * "might" is not a thing to find out at flash time, and the 16K comes out of
+ * a slot with 440 KB of slack in it.
+ *
+ * On this part an over-large bootloader is at least a **link error**, because
+ * MCUboot links against its own partition. That is the nRF behaviour, not the
+ * Espressif one: an Espressif image is assembled by `esptool elf2image` and
+ * written at an offset it is told separately, so its length is never checked
+ * against the partition it is destined for and it happily runs past the end.
+ * Do not carry that Espressif reflex over to this board — here the build tells
+ * you.
+ *
+ *   0x000000   64K  boot_partition   (mcuboot)      48K -> 64K
+ *   0x010000  728K  slot0_partition  (image-0)      736K -> 728K
+ *   0x0C6000  728K  slot1_partition  (image-1)      736K -> 728K
+ *   0x17C000   16K  storage_partition               unchanged
+ *   0x180000        end of 1536K flash
+ *
+ * 728K is 0xB6000, which is 91 whole 8192-byte pages, and the two slots stay
+ * equal — swap-using-move needs them to be. The application is ~293 KB signed.
+ *
+ * **storage_partition deliberately does not move.** CONFIG_SETTINGS=y with no
+ * explicit backend can land there, and relocating it would silently discard
+ * whatever a deployed device has stored. It is also why the 16K came out of
+ * the slots rather than off the end.
+ *
+ * WHY THIS IS A SEPARATE FILE, not part of the board overlay: sysbuild builds
+ * MCUboot as its own Zephyr image with its own devicetree, and a board overlay
+ * applies only to the application image. Both images include this one fragment
+ * — boards/xiao_mg24.overlay for the app, sysbuild/mcuboot_xiao_mg24.overlay
+ * for the bootloader — so the two can never disagree about where the slots
+ * are, which is the kind of disagreement that produces an image that flashes
+ * and does not boot. Same arrangement as rram_partitions.dtsi.
+ */
+
+&boot_partition {
+	reg = <0x00000000 DT_SIZE_K(64)>;
+};
+
+&slot0_partition {
+	reg = <0x00010000 DT_SIZE_K(728)>;
+};
+
+&slot1_partition {
+	reg = <0x000c6000 DT_SIZE_K(728)>;
+};

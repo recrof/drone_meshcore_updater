@@ -116,9 +116,23 @@ struct dfu_transport {
 	/* Look for a peer this transport can reach. 0 on success, -ETIMEDOUT
 	 * if the window expired with no match, another negative errno if the
 	 * radio itself failed. May leave a connection open; release() is what
-	 * closes it. */
+	 * closes it.
+	 *
+	 * `pin` is NULL or "" for the usual search — take whatever matches the
+	 * configured filters. Otherwise it names one specific peer the operator
+	 * picked out of a scan, and the transport must reach that one or fail;
+	 * `ble_name` and `min_rssi` do not apply, because a deliberate choice
+	 * is not something a filter should be allowed to overrule.
+	 *
+	 * **The string is opaque to the runner**, which never learns what an
+	 * address is: it arrives from the client, is carried through unread,
+	 * and is parsed by whichever transport claims it. That is what lets a
+	 * MAC and a future "192.168.1.50" share one field. A transport that
+	 * cannot make sense of the pin it is handed returns -EINVAL, which the
+	 * runner reports as this file being unable to reach that target.
+	 */
 	int (*find)(struct dfu_target *out, const struct app_config *cfg,
-		    uint32_t timeout_ms);
+		    uint32_t timeout_ms, const char *pin);
 
 	/* Flash `bundle` into the peer find() reported. Blocks for the whole
 	 * transfer — the runner has its own thread for exactly this. */

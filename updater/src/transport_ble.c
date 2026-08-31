@@ -13,19 +13,151 @@
  */
 
 #include <zephyr/kernel.h>
+#include <zephyr/bluetooth/conn.h>
+#include <zephyr/bluetooth/hci_types.h>
+#include <errno.h>
 #include <zephyr/logging/log.h>
 #include <stdio.h>
 
 #include "dfu_transport.h"
+#include "pin_addr.h"
 #include <zephyr/sys/__assert.h>
 
 LOG_MODULE_REGISTER(transport_ble, LOG_LEVEL_INF);
 
-static int ble_find(struct dfu_target *out, const struct app_config *cfg,
-		    uint32_t timeout_ms)
+/*
+ * Tear down any link this updater still holds as a central, before looking for
+ * a target.
+ *
+ * ---- The deadlock this exists to break ---------------------------------
+ *
+ * A BLE peripheral in a connection does not advertise. So if a run ends with
+ * the *target* still believing the link is up — our side gave up, timed out, or
+ * lost its handle — that target goes quiet, our next scan cannot see it, and
+ * every retry fails at the scan rather than at the thing that actually broke.
+ * The transfer can never be repaired, because the two ends disagree about
+ * whether they are talking. On a repeater up a mast that means a trip.
+ *
+ * The specific leak that produced it is fixed in dfu_client.cpp
+ * (disconnect_and_release now always terminates, not only when it believes the
+ * link came up). **This is the net underneath that**, and it is worth having
+ * separately: any future path that drops a handle without terminating,
+ * anywhere in the client, is repaired at the start of the next attempt instead
+ * of bricking the run.
+ *
+ * ---- Why role is the discriminator -------------------------------------
+ *
+ * We are central for every DFU target — we are the one that connects — and
+ * peripheral for exactly one thing: the browser holding the SMP link that
+ * triggered this run. Sweeping by role therefore cleans up every target link
+ * and cannot touch the operator's own connection, which needs no special case
+ * and no address to be remembered anywhere.
+ *
+ * Nothing legitimate is open as a central at this point: the client holds its
+ * link inside run(), never across find(). A central link here is stale by
+ * definition.
+ */
+struct stale_sweep {
+	int seen;
+};
+
+static void sweep_one(struct bt_conn *conn, void *user_data)
 {
-	int rc = ble_scanner_find_first(&out->ble, timeout_ms, cfg->ble_name,
-					cfg->min_rssi, NULL);
+	struct stale_sweep *sw = user_data;
+	struct bt_conn_info info;
+
+	if (bt_conn_get_info(conn, &info) < 0 || info.type != BT_CONN_TYPE_LE) {
+		return;
+	}
+	/* The browser's SMP link. Never ours to close. */
+	if (info.role != BT_CONN_ROLE_CENTRAL) {
+		return;
+	}
+
+	char addr[BT_ADDR_LE_STR_LEN];
+	bt_addr_le_to_str(info.le.dst, addr, sizeof(addr));
+	LOG_WRN("stale link to %s still open — closing it so the peer can "
+		"advertise again", addr);
+
+	/* Also cancels an initiator that never completed, which is the state
+	 * that stops a peer advertising without either side being connected. */
+	int rc = bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+	if (rc && rc != -ENOTCONN) {
+		LOG_WRN("stale link disconnect rc=%d", rc);
+	}
+	sw->seen++;
+}
+
+static void ble_reset_stale_links(void)
+{
+	struct stale_sweep sw = { 0 };
+
+	bt_conn_foreach(BT_CONN_TYPE_LE, sweep_one, &sw);
+	if (sw.seen == 0) {
+		return;
+	}
+
+	/*
+	 * Wait for the disconnects to land, then for the peer to start
+	 * advertising again.
+	 *
+	 * Polled rather than waited on a callback because this is a sweep over
+	 * connections we deliberately hold no handle to — there is nothing to
+	 * hang a semaphore on. Trap 3 is why the budget is seconds and not
+	 * milliseconds: a pending ATT request can hold a link open well past
+	 * our own disconnect.
+	 */
+	for (int i = 0; i < 20; i++) {
+		k_sleep(K_MSEC(100));
+		struct stale_sweep again = { 0 };
+		bt_conn_foreach(BT_CONN_TYPE_LE, sweep_one, &again);
+		if (again.seen == 0) {
+			break;
+		}
+	}
+
+	/* A peripheral does not resume advertising the instant the link drops —
+	 * it has to notice, and then wait out its own advertising interval.
+	 * Scanning through that costs nothing but makes the first sweep of the
+	 * scan useless, and on a `scan_timeout` of a few seconds that is the
+	 * difference between finding the target and reporting no target. */
+	k_sleep(K_MSEC(500));
+}
+
+static int ble_find(struct dfu_target *out, const struct app_config *cfg,
+		    uint32_t timeout_ms, const char *pin)
+{
+	int rc;
+
+	/* Before anything else: a link we failed to close would keep the target
+	 * silent, and no amount of scanning finds a peripheral that is already
+	 * in a connection. */
+	ble_reset_stale_links();
+
+	if (pin != NULL && pin[0] != '\0') {
+		bt_addr_le_t addr;
+		char mac[BT_ADDR_STR_LEN];
+		char type[16];
+
+		/* **bt_addr_le_to_str() and bt_addr_le_from_str() are not
+		 * inverses.** The renderer produces one string; the parser
+		 * takes the address and the type as two arguments and rejects
+		 * anything but exactly 17 characters for the first. Passing
+		 * the rendered string straight back shipped once and failed as
+		 * "the scanner could not start" — see pin_addr.h. */
+		if (pin_addr_split(pin, mac, sizeof(mac), type, sizeof(type)) < 0 ||
+		    bt_addr_le_from_str(mac, type, &addr) < 0) {
+			/* The operator's client sending nonsense, not a missing
+			 * peer: -EINVAL rather than -ETIMEDOUT, because
+			 * retrying cannot help. */
+			LOG_ERR("cannot parse pinned address '%s'", pin);
+			return -EINVAL;
+		}
+		rc = ble_scanner_find_pinned(&out->ble, timeout_ms, &addr);
+	} else {
+		rc = ble_scanner_find_first(&out->ble, timeout_ms, cfg->ble_name,
+					    cfg->min_rssi, NULL);
+	}
 	if (rc < 0) {
 		return rc;
 	}

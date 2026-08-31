@@ -12,23 +12,35 @@ header .title {
 }
 header .device { font-family: var(--mono); font-size: 13px; }
 header .grow { flex: 1; }
-header .dot {
-  width: 8px; height: 8px; border-radius: 50%;
-  background: var(--muted); display: inline-block; margin-right: 6px;
-  vertical-align: middle;
-  box-shadow: 0 0 0 0 var(--accent);
+/* Was an abstract dot with a box-shadow ring pulsing off it. It is a
+   bluetooth glyph now, so the pulse had to move onto the glyph — a ring
+   expanding out of a piece of line art reads as a rendering artefact rather
+   than as a heartbeat. Opacity instead, which works on any shape. */
+header .dot-icon {
+  color: var(--muted); margin-right: 6px; vertical-align: middle;
 }
-header.connected .dot {
-  background: var(--accent);
-  animation: pulse 2.2s ease-out infinite;
+header.connected .dot-icon {
+  color: var(--accent);
+  animation: pulse 2.2s ease-in-out infinite;
 }
 @keyframes pulse {
-  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 60%, transparent); }
-  70%  { box-shadow: 0 0 0 10px transparent; }
-  100% { box-shadow: 0 0 0 0 transparent; }
+  50% { opacity: 0.35; }
 }
 @media (prefers-reduced-motion: reduce) {
-  header.connected .dot { animation: none; }
+  header.connected .dot-icon { animation: none; }
+}
+
+/* The header's two actions carry a glyph as well as their word. They are the
+   only buttons on the page whose meaning is a *radio state*, and the icons
+   make the pair readable as opposites at a glance. */
+header button .icon { margin-right: 6px; vertical-align: -3px; }
+
+/* A glyph beside a word, anywhere. Buttons are inline-flex so the two centre
+   on each other rather than sitting on a shared baseline, which is what made
+   a 16px icon ride high next to 13px text. */
+td.actions button:has(.icon),
+.flash-step button:has(.icon) {
+  display: inline-flex; align-items: center; gap: 5px;
 }
 
 /* --- appearance controls (ThemePicker) ------------------------- */
@@ -44,6 +56,13 @@ header.connected .dot {
 }
 .icon-only:hover:not(:disabled) { border-color: var(--line); color: var(--fg); }
 .icon-only[aria-expanded="true"] { border-color: var(--accent); color: var(--fg); }
+/* Delete is destructive and appears in every row. Red at rest would make an
+   ordinary file listing look like an error report, so it stays muted until
+   the pointer is on it and the intent is real. */
+.icon-only.danger { color: var(--muted); }
+.icon-only.danger:hover:not(:disabled) {
+  color: var(--danger); border-color: var(--danger);
+}
 
 /* The palette menu. Anchored to .theme-ctl, right-aligned so it opens inward
    from the header's right-hand side rather than off the edge. */

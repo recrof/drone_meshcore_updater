@@ -34,6 +34,9 @@
 #include "fsx_mgmt.h"
 #include "firmware_inspect.h"
 #include "dfu_runner.h"
+#include "survey.h"
+
+#include <zephyr/bluetooth/addr.h>
 
 LOG_MODULE_REGISTER(fsx_mgmt, LOG_LEVEL_INF);
 
@@ -44,6 +47,21 @@ LOG_MODULE_REGISTER(fsx_mgmt, LOG_LEVEL_INF);
  * paginate using `off` + `count`.
  */
 #define FSX_LIST_MAX_ENTRIES  32
+
+/* Longest pinned address a client may send to TRIGGER_DFU. Sized for what
+ * bt_addr_le_to_str() emits — "E9:52:9F:23:87:4A (random)" — with slack. */
+#define FSX_ADDR_MAX          40
+
+/* Entries per SCAN response.
+ *
+ * Bounded by CONFIG_MCUMGR_TRANSPORT_NETBUF_SIZE (1024), not by the survey
+ * table: a row costs roughly 60 bytes encoded — a 26-character address
+ * string, a name up to BLE_SCANNER_NAME_MAX, four small integers and their
+ * keys — so a dozen is the most that reliably fits with the envelope. The
+ * client paginates with `off` exactly as it does for `list`, and gets the
+ * whole table across two round trips.
+ */
+#define FSX_SCAN_MAX_ENTRIES  12
 
 /* Copy a zcbor tstr into `dst` (null-terminated). Returns false on
  * empty/too-long input.
@@ -396,9 +414,11 @@ static int fsx_trigger_dfu(struct smp_streamer *ctxt)
 	zcbor_state_t *zsd = ctxt->reader->zs;
 
 	struct zcbor_string path_str = { 0 };
+	struct zcbor_string addr_str = { 0 };
 	size_t decoded;
 	struct zcbor_map_decode_key_val dec[] = {
 		ZCBOR_MAP_DECODE_KEY_DECODER("path", zcbor_tstr_decode, &path_str),
+		ZCBOR_MAP_DECODE_KEY_DECODER("addr", zcbor_tstr_decode, &addr_str),
 	};
 	if (zcbor_map_decode_bulk(zsd, dec, ARRAY_SIZE(dec), &decoded) != 0) {
 		return MGMT_ERR_EINVAL;
@@ -412,12 +432,20 @@ static int fsx_trigger_dfu(struct smp_streamer *ctxt)
 		return MGMT_ERR_EINVAL;
 	}
 
+	/* Absent `addr` is the ordinary scan-and-pick run. Present-but-oversized
+	 * is a client bug and is refused here rather than silently truncated
+	 * into an address that would match some *other* device. */
+	char addr[FSX_ADDR_MAX + 1] = { 0 };
+	if (addr_str.len != 0 && !copy_path(addr, sizeof(addr), &addr_str)) {
+		return MGMT_ERR_EINVAL;
+	}
+
 	/* dfu_runner_start spawns a thread; returns quickly. Failures
 	 * (already busy, bad path) surface through the standard fs-error
 	 * `rc` field so the client can display them.
 	 */
-	int rc = dfu_runner_start(path);
-	LOG_INF("TRIGGER_DFU path='%s' -> rc=%d", path, rc);
+	int rc = dfu_runner_start(path, addr);
+	LOG_INF("TRIGGER_DFU path='%s' addr='%s' -> rc=%d", path, addr, rc);
 	if (rc < 0) {
 		smp_add_cmd_err(zse, FSX_MGMT_GROUP_ID, (uint16_t)-rc);
 	}
@@ -446,6 +474,104 @@ static int fsx_stop_dfu(struct smp_streamer *ctxt)
 }
 
 /* ---------- registration ---------- */
+
+/* SCAN — see fsx_mgmt.h for the contract. */
+static int fsx_scan(struct smp_streamer *ctxt)
+{
+	zcbor_state_t *zse = ctxt->writer->zs;
+	zcbor_state_t *zsd = ctxt->reader->zs;
+
+	bool on = true;
+	bool reset = false;
+	uint32_t kind = SURVEY_BLE;
+	uint32_t off = 0;
+	uint32_t count = FSX_SCAN_MAX_ENTRIES;
+	size_t decoded;
+
+	struct zcbor_map_decode_key_val dec[] = {
+		ZCBOR_MAP_DECODE_KEY_DECODER("on",    zcbor_bool_decode,   &on),
+		ZCBOR_MAP_DECODE_KEY_DECODER("reset", zcbor_bool_decode,   &reset),
+		ZCBOR_MAP_DECODE_KEY_DECODER("kind",  zcbor_uint32_decode, &kind),
+		ZCBOR_MAP_DECODE_KEY_DECODER("off",   zcbor_uint32_decode, &off),
+		ZCBOR_MAP_DECODE_KEY_DECODER("count", zcbor_uint32_decode, &count),
+	};
+	if (zcbor_map_decode_bulk(zsd, dec, ARRAY_SIZE(dec), &decoded) != 0) {
+		return MGMT_ERR_EINVAL;
+	}
+	if (count == 0 || count > FSX_SCAN_MAX_ENTRIES) {
+		count = FSX_SCAN_MAX_ENTRIES;
+	}
+	if (kind != SURVEY_BLE && kind != SURVEY_WIFI) {
+		return MGMT_ERR_EINVAL;
+	}
+
+	if (!on) {
+		survey_stop();
+	} else {
+		/* -EBUSY (a DFU owns the radio) and -ENOTSUP (this board has no
+		 * such radio) are both honest answers rather than failures, and
+		 * both are reported through the same `rc` channel as a
+		 * filesystem error so they render like every other refusal. */
+		int rc = survey_start((enum survey_kind)kind, reset);
+		if (rc < 0) {
+			smp_add_cmd_err(zse, FSX_MGMT_GROUP_ID, (uint16_t)-rc);
+			return MGMT_ERR_EOK;
+		}
+	}
+
+	/* One page at a time on the stack. This runs on the mcumgr thread,
+	 * where several KB have been lost to littlefs before now, so the
+	 * survey table is read through a window rather than copied whole. */
+	struct survey_row page[FSX_SCAN_MAX_ENTRIES];
+	size_t total = 0;
+	size_t n = survey_get(page, count, off, &total);
+
+	bool ok = zcbor_tstr_put_lit(zse, "kind")
+	       && zcbor_uint32_put(zse, (uint32_t)survey_active())
+	       && zcbor_tstr_put_lit(zse, "kinds")
+	       && zcbor_uint32_put(zse, survey_kinds_available())
+	       && zcbor_tstr_put_lit(zse, "scanning")
+	       && zcbor_bool_put(zse, survey_active() != SURVEY_NONE)
+	       && zcbor_tstr_put_lit(zse, "total")
+	       && zcbor_uint32_put(zse, (uint32_t)total)
+	       && zcbor_tstr_put_lit(zse, "entries")
+	       && zcbor_list_start_encode(zse, FSX_SCAN_MAX_ENTRIES);
+
+	for (size_t i = 0; ok && i < n; i++) {
+		const struct survey_row *e = &page[i];
+
+		/* `id` is whatever that radio calls a device, rendered by the
+		 * firmware — a Bluetooth address in bt_addr_le_to_str()'s own
+		 * format, which is also what bt_addr_le_from_str() parses. So
+		 * the string a client hands back to TRIGGER_DFU needs no
+		 * reformatting at either end, and there is no second address
+		 * format to keep in step. */
+		ok = zcbor_map_start_encode(zse, 7)
+		  && zcbor_tstr_put_lit(zse, "id")
+		  && zcbor_tstr_encode_ptr(zse, e->id, strlen(e->id))
+		  && zcbor_tstr_put_lit(zse, "name")
+		  && zcbor_tstr_encode_ptr(zse, e->name, strlen(e->name))
+		  && zcbor_tstr_put_lit(zse, "rssi")
+		  && zcbor_int32_put(zse, e->rssi)
+		  && zcbor_tstr_put_lit(zse, "best")
+		  && zcbor_int32_put(zse, e->best)
+		  && zcbor_tstr_put_lit(zse, "n")
+		  && zcbor_uint32_put(zse, e->count)
+		  && zcbor_tstr_put_lit(zse, "ch")
+		  && zcbor_uint32_put(zse, e->channel)
+		  && zcbor_tstr_put_lit(zse, "fl")
+		  && zcbor_uint32_put(zse, e->flags)
+		  && zcbor_map_end_encode(zse, 7);
+	}
+
+	ok = ok
+	  && zcbor_list_end_encode(zse, FSX_SCAN_MAX_ENTRIES)
+	  && zcbor_tstr_put_lit(zse, "truncated")
+	  && zcbor_bool_put(zse, (off + n) < total);
+
+	return ok ? MGMT_ERR_EOK : MGMT_ERR_EMSGSIZE;
+}
+
 static const struct mgmt_handler fsx_handlers[] = {
 	[FSX_MGMT_ID_LIST]        = { .mh_read = fsx_list,        .mh_write = NULL            },
 	[FSX_MGMT_ID_MKDIR]       = { .mh_read = NULL,            .mh_write = fsx_mkdir       },
@@ -456,6 +582,7 @@ static const struct mgmt_handler fsx_handlers[] = {
 	[FSX_MGMT_ID_STOP_DFU]    = { .mh_read = NULL,            .mh_write = fsx_stop_dfu    },
 	[FSX_MGMT_ID_INSPECT]     = { .mh_read = fsx_inspect,     .mh_write = NULL            },
 	[FSX_MGMT_ID_CAPS]        = { .mh_read = fsx_caps,        .mh_write = NULL            },
+	[FSX_MGMT_ID_SCAN]        = { .mh_read = NULL,            .mh_write = fsx_scan        },
 };
 
 static struct mgmt_group fsx_group = {

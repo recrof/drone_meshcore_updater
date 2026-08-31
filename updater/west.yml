@@ -61,6 +61,36 @@ manifest:
       west-commands: west/west-commands.yml
       groups:
         - hal
+
+    # Silabs HAL + SiSDK — the XIAO MG24 (EFR32MG24) build needs it.
+    #
+    # Same allowlist trap as hal_espressif above: NCS ships Nordic silicon and
+    # strips every other vendor HAL out of the Zephyr manifest it imports, so
+    # the board files resolve, DTS preprocesses, and the failure lands at the
+    # SoC Kconfig a long way from the cause.
+    #
+    # THE REVISION MUST MATCH zephyr/west.yml, for the same "two halves of one
+    # interface" reason:
+    #
+    #   grep -A2 'name: hal_silabs' zephyr/west.yml
+    #
+    # This one additionally needs blobs — the Bluetooth link layer and RAIL
+    # ship as binaries:
+    #
+    #   west blobs fetch hal_silabs
+    #
+    # `BT_SILABS_EFR32 depends on ZEPHYR_HAL_SILABS_MODULE_BLOBS`, so without
+    # them the HCI driver is simply not selectable and BT silently does not
+    # exist. (`CONFIG_BUILD_ONLY_NO_BLOBS=y` links against stubs in
+    # zephyr/modules/hal_silabs/simplicity_sdk/src/blob_stubs.c — that builds
+    # and does nothing on air. It is a CI compile check, never a firmware.)
+    - name: hal_silabs
+      repo-path: hal_silabs
+      path: modules/hal/silabs
+      remote: zephyrproject
+      revision: f5201210afa1319ed8dd8dbe21682bcb63b25771
+      groups:
+        - hal
   self:
     # Application lives in the `updater/` subdirectory of the repo (which is
     # also the west workspace root once `west init -l updater` is run).

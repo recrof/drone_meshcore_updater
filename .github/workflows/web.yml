@@ -72,15 +72,54 @@ jobs:
       - name: CMSIS-DAP / SWD encoding tests
         run: node web/test/cmsis-dap.test.mjs
 
+      # Both probe flash algorithms, against models of the two flash
+      # controllers. The RRAM model reproduces Trap 1 (a partial trailing line
+      # left in the write buffer) and the MSC model refuses a write to a page
+      # that was not erased, so an algorithm that looks right and is not fails
+      # here rather than on a board that is not always plugged in.
+      - name: Probe flash algorithm tests
+        run: node web/test/swd-flash.test.mjs
+
       # Cross-checks the fsx_mgmt command IDs against the client's copy. A
       # renumbered command is silent both ways: the client sends one command
       # and the device runs another, or waits out a 15 s timeout.
       - name: fsx_mgmt command table tests
         run: node web/test/fsx-mgmt.test.mjs
 
+      # The link teardown and the stale-link sweep: structural checks on
+      # firmware node cannot run, but both defects they encode are absences —
+      # a missing disconnect and a missing role check — and an absence is what
+      # a reviewer's eye slides over.
+      - name: BLE link teardown tests
+        run: node web/test/ble-link.test.mjs
+
+      # The signal bands and the sentence that explains them, the SCAN wire
+      # format against the encoder that produces it, and the two halves that
+      # stop a survey outliving the client that asked for it.
+      - name: BLE scanner tests
+        run: node web/test/scanner.test.mjs
+
       # Cross-checks the log file naming against updater/prj.conf.
       - name: Log file tests
         run: node web/test/log-file.test.mjs
+
+      # Holds common.dtsi's `cache-size` against prj.conf's
+      # CONFIG_FS_LITTLEFS_CACHE_SIZE. They are different settings — one sizes
+      # each per-file cache, the other sizes the heap they come out of — and
+      # raising only the first produces a board that boots, mounts, and then
+      # fails every fs_open() with -ENOMEM, reported to the user as
+      # "config.txt not present". Also enforces littlefs's own divisibility
+      # rules, which otherwise fail at mount time on hardware.
+      - name: LittleFS cache tests
+        run: node web/test/littlefs-cache.test.mjs
+
+      # Locks out the way this device stopped being discoverable: restarting a
+      # connectable advertiser needs HCI LE Set Random Address, which is
+      # Command Disallowed while scanning, so a client disconnecting with the
+      # scanner open left the board off the air permanently. Structural — the
+      # firmware built, booted and flashed correctly with the bug in it.
+      - name: Advertising restart tests
+        run: node web/test/adv-restart.test.mjs
 
       # Cross-checks the live DFU status layout, enums and service UUIDs
       # against updater/src/dfu_status.[ch]. A renumbered state parses fine

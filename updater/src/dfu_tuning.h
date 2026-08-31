@@ -103,6 +103,42 @@
 #define DFU_PKT_GAP_MS_DEFAULT     7
 #define DFU_ERASE_PAUSE_MS_DEFAULT 150
 
+#elif defined(CONFIG_SOC_FAMILY_SILABS_S2)
+
+/*
+ * XIAO MG24 (EFR32MG24). **Not measured — this is the documented starting
+ * guess, and it is written down as a guess on purpose.**
+ *
+ * The rule this file states is "start from the family whose
+ * CONFIG_BT_CONN_TX_MAX is closest", and on this part that answer is Nordic's,
+ * which is why these are Nordic's numbers rather than Espressif's:
+ *
+ *   nRF54L / nRF52840      BT_CONN_TX_MAX 3
+ *   EFR32MG24              BT_CONN_TX_MAX 3
+ *   ESP32-S3 / ESP32-C5    BT_CONN_TX_MAX 10
+ *
+ * There is a wrinkle worth knowing, because it makes this number *ours* in a
+ * way it is not on the Espressif parts. Zephyr's Silabs link-layer config
+ * header maps
+ *
+ *     SL_BT_CONTROLLER_LE_BUFFER_SIZE_MAX = CONFIG_BT_BUF_ACL_TX_COUNT
+ *
+ * (zephyr/modules/hal_silabs/simplicity_sdk/config/ll/sl_btctrl_config.h), and
+ * BT_CONN_TX_MAX defaults to that, whose own Zephyr default is 3. So the ring
+ * depth here is a Kconfig we choose, not a property of a controller blob — the
+ * ESP32's 10 is fixed by its controller and cannot be argued with. Changing
+ * BT_BUF_ACL_TX_COUNT on this board therefore moves the anchor these numbers
+ * are calibrated against, and invalidates them. Do not do one without the
+ * other.
+ *
+ * What "measure it" means here is in notes/dfu-tuning.md: run a real image at
+ * a real target, watch for the first page boundary, and only then edit this
+ * branch. The ESP32-S3 sequence in that note produced two wrong answers before
+ * the right one, and both wrong answers completed short transfers.
+ */
+#define DFU_PKT_GAP_MS_DEFAULT     4
+#define DFU_ERASE_PAUSE_MS_DEFAULT 100
+
 #elif defined(CONFIG_SOC_FAMILY_NORDIC_NRF)
 
 /* Measured on the nRF54L, and unchanged since. Per-packet tracing put gap=2 on

@@ -3,10 +3,11 @@ import {
   updateReady, reloadForUpdate,
 } from "../store.js";
 import ThemePicker from "./ThemePicker.js";
+import Icon from "./Icon.js";
 
 export default {
   name: "AppHeader",
-  components: { ThemePicker },
+  components: { ThemePicker, Icon },
   setup() {
     return {
       connected, deviceName, connect, disconnect, bluetoothAvailable,
@@ -28,8 +29,16 @@ export default {
            dropped before release and survived only because grepping for
            "Drone MCU Updater" does not match it. -->
       <span class="title">Drone MeshCore Updater</span>
+      <!-- The state indicator is the icon now, not an abstract dot. A dot
+           says "something is on"; bluetooth_connected says what, and
+           bluetooth_disabled says what is missing rather than leaving the
+           reader to infer it from a grey circle. It still pulses when
+           connected — the pulse moved from a box-shadow ring onto the glyph
+           itself. -->
       <span class="device">
-        <span class="dot"></span>{{ connected ? deviceName : "not connected" }}
+        <Icon class="dot-icon" :size="16"
+              :name="connected ? 'bluetooth_connected' : 'bluetooth_disabled'"/>
+        {{ connected ? deviceName : "not connected" }}
       </span>
       <span class="grow"></span>
       <!-- Appearance sits left of the actions, not right of them: Connect and
@@ -44,9 +53,11 @@ export default {
         Update ready — reload
       </button>
       <button class="primary" :disabled="connected || !bluetoothAvailable" @click="connect">
-        Connect
+        <Icon name="bluetooth" :size="18"/>Connect
       </button>
-      <button :disabled="!connected" @click="disconnect">Disconnect</button>
+      <button :disabled="!connected" @click="disconnect">
+        <Icon name="bluetooth_disabled" :size="18"/>Disconnect
+      </button>
     </header>
   `,
 };

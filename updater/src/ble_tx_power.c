@@ -78,12 +78,23 @@ static int set_one(uint8_t handle_type, uint16_t handle, int8_t dbm,
 	if (err) {
 		/* Not fatal: a controller that does not implement the command
 		 * simply refuses, and the radio keeps running at whatever level
-		 * it was built with. Say so rather than leaving `tx_power` in
-		 * config.txt looking as though it took — and say it once. */
+		 * it was built with. Say so rather than leaving `ble_tx_power`
+		 * in config.txt looking as though it took — and say it once.
+		 *
+		 * **The key name here was stale**, and that is worse than it
+		 * sounds: it said `tx_power`, which has been the *old* name
+		 * since the WiFi radio arrived and is now only an alias. The
+		 * one message whose whole job is to tell an operator which
+		 * setting is being ignored was naming a different setting.
+		 * Caught on the XIAO MG24, which is the first board where this
+		 * path is the normal outcome rather than a bug — Zephyr's
+		 * Silabs driver implements no Zephyr VS commands at all, so
+		 * 0xFC0E is refused by design and the radio takes
+		 * CONFIG_BT_CTLR_TX_PWR_ANTENNA instead. */
 		s_unsupported = true;
 		LOG_WRN("%s: HCI VS write-tx-power (0x%04x) refused (err %d). "
-			"This controller does not implement it, so `tx_power` in "
-			"config.txt has no effect on this board; the radio runs "
+			"This controller does not implement it, so `ble_tx_power` "
+			"in config.txt has no effect on this board; the radio runs "
 			"at its built-in level. Not reported again.",
 			what, BT_HCI_OP_VS_WRITE_TX_POWER_LEVEL, err);
 		return INT8_MIN;

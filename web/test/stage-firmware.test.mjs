@@ -399,6 +399,37 @@ t("STAGED_PART_NAME is derived from PART_LAYOUT",
       JSON.stringify(built) === JSON.stringify(boards),
       `build.yml: ${built.join(",")} vs sysbuild: ${boards.join(",")}`);
 
+    /* And build.sh's own board table, which is a fourth copy of this list.
+     *
+     * It exists because the script needs short names (`./build.sh mg24`) and
+     * the fully-qualified targets they expand to, and neither the workflow nor
+     * updater/sysbuild/ holds that pairing. The drift it prevents is the
+     * quiet one: a board you can build and flash on your desk, that no
+     * release ever contains, because nobody added the matrix row. Held to
+     * build.yml rather than to sysbuild/ because build.yml is the file that
+     * decides what ships. */
+    const script = readFileSync(join(ROOT, "build.sh"), "utf8");
+    const table = /^BOARDS="\n([\s\S]*?)^"$/m.exec(script);
+    t("build.sh declares a board table", !!table);
+    if (table) {
+      const pairs = table[1].trim().split("\n")
+        .map(l => l.trim()).filter(Boolean)
+        .map(l => l.split(":"));
+      const scriptBoards = [...new Set(pairs.map(([, target]) => boardName(target)))].sort();
+      t("build.sh builds exactly the boards the release workflow does",
+        JSON.stringify(scriptBoards) === JSON.stringify(built),
+        `build.sh: ${scriptBoards.join(",")} vs build.yml: ${built.join(",")}`);
+
+      /* A slug that is not a prefix-free, lowercase token would collide with
+       * the command names build.sh dispatches on, and the collision resolves
+       * silently in favour of whichever test runs first. */
+      const commands = ["build", "merge", "bump", "flash", "menuconfig",
+                        "guiconfig", "clean", "boards", "all"];
+      const clash = pairs.map(([slug]) => slug).filter(sl => commands.includes(sl));
+      t("no board slug collides with a build.sh command", clash.length === 0,
+        clash.join(","));
+    }
+
     /* A board whose images are flashed as parts must publish where they go,
      * or the staging side has nothing to pass to --part and quietly drops it
      * from the index. */
@@ -420,6 +451,68 @@ t("STAGED_PART_NAME is derived from PART_LAYOUT",
       t(`${wf} writes down no part offsets of its own`, offsets.length === 0,
         offsets.join(","));
     }
+  }
+}
+
+/* --- every board says which board it is, on the air ---------------------
+ *
+ * prj.conf carries a generic CONFIG_BT_DEVICE_NAME and each board overrides it
+ * from `updater/boards/`. A board with no override still builds and still
+ * advertises — as "Drone MeshCore Updater", indistinguishable in a scan list
+ * from every other one. That is the whole failure: silent, cosmetic, and only
+ * noticed by someone standing in front of four identical XIAO boards.
+ *
+ * Variants are checked separately and on purpose. Board files are matched by
+ * exact qualified target with no inheritance, so `xiao_ble/nrf52840/sense`
+ * does NOT pick up `xiao_ble.conf` — a fact that has cost time in this repo
+ * before and looks like nothing in a diff.
+ */
+{
+  const boardsDir = join(ROOT, "updater", "boards");
+  const confs = Object.fromEntries(
+    readdirSync(boardsDir)
+      .filter((f) => f.endsWith(".conf"))
+      .map((f) => [f.replace(/\.conf$/, ""),
+                   readFileSync(join(boardsDir, f), "utf8")]));
+
+  const nameOf = (src) => /^CONFIG_BT_DEVICE_NAME="([^"]*)"/m.exec(src ?? "")?.[1];
+
+  /* Zephyr matches either the plain board name or the fully qualified target,
+   * which is why both spellings appear in this directory already. */
+  const nameFor = (board) => {
+    for (const key of [board, board.split("_")[0] + "_" + board.split("_")[1]]) {
+      const n = nameOf(confs[key]);
+      if (n) return n;
+    }
+    for (const [k, src] of Object.entries(confs)) {
+      if (k.startsWith(board) || board.startsWith(k)) {
+        const n = nameOf(src);
+        if (n) return n;
+      }
+    }
+    return null;
+  };
+
+  const seen = new Map();
+  for (const b of boards) {
+    const n = nameFor(b);
+    t(`${b} advertises a name of its own`, !!n, n ?? "falls back to prj.conf");
+    if (!n) continue;
+    t(`  ${b} does not ship the generic name`,
+      n !== "Drone MeshCore Updater", n);
+    /* Two boards sharing a name would put the reader back where they
+       started. Variants may share with their base — same silicon, same
+       updater — and are not in `boards` anyway. */
+    t(`  ${b}'s name is unique`, !seen.has(n), `also used by ${seen.get(n)}`);
+    seen.set(n, b);
+  }
+
+  /* Every `_sense` variant this repo carries a file for must set the name
+     too, or it silently falls back. */
+  for (const [k, src] of Object.entries(confs)) {
+    if (!k.endsWith("_sense")) continue;
+    t(`${k} sets a name of its own (variants inherit nothing)`,
+      !!nameOf(src), nameOf(src) ?? "MISSING");
   }
 }
 

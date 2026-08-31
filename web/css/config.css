@@ -340,6 +340,137 @@ a.flash-note { color: var(--accent); }
    line you opened the log to find. */
 .logv-line.lv-raw  { color: var(--fg); opacity: 0.9; }
 
+/* ================= the scanner ===================================
+   Shares .cfg-modal / .cfg-head / .cfg-body with the config editor for the
+   same reason the flash dialog does. The table copies the file listing's
+   layout deliberately — it is the same kind of object (a list of things with
+   a name, a property and per-row actions) and inventing a second visual
+   language for it would make the app feel like two apps. */
+#scanner-overlay {
+  position: fixed; inset: 0; z-index: 30;
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  backdrop-filter: blur(3px);
+  display: grid; place-items: center; padding: 24px;
+}
+
+.scan-state {
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+/* A quiet pulse, so "scanning" differs from "idle" at a glance without
+   another line of text. Dropped for anyone who asked for less motion — the
+   word beside it already carries the meaning. */
+/* The word still says it, but the tab's own icon is now the primary signal —
+   it is where the eye already is, and it says *which* radio is sweeping,
+   which the word cannot. */
+.scan-state.live { color: var(--accent); animation: scan-pulse 1.6s ease-in-out infinite; }
+.scan-tabs button.on .icon-cycle { color: var(--accent); }
+@keyframes scan-pulse { 50% { opacity: 0.45; } }
+@media (prefers-reduced-motion: reduce) { .scan-state.live { animation: none; } }
+
+/* One radio at a time is a constraint of the device, not a preference, so it
+   gets tabs rather than a filter control that would imply both could be on. */
+.scan-tabs { display: flex; gap: 4px; padding: 12px 0 4px; }
+.scan-tabs button {
+  border-color: transparent; color: var(--muted);
+  border-bottom: 2px solid transparent; border-radius: 6px 6px 0 0;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.scan-tabs button.on {
+  color: var(--fg); border-bottom-color: var(--accent); background: var(--card);
+}
+
+.scan-legend {
+  color: var(--muted); font-size: 12px; line-height: 1.55;
+  margin: 10px 0; max-width: 70ch;
+}
+.scan-legend .band { font-weight: 600; }
+.scan-legend .band.excellent { color: var(--ok); }
+.scan-legend .band.good      { color: var(--warn); }
+.scan-legend .band.poor      { color: var(--danger); }
+
+.scan-filter {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: var(--fg); margin: 0 0 10px;
+}
+
+.scan-table { width: 100%; border-collapse: collapse; }
+.scan-table th {
+  text-align: left; font-size: 11px; font-weight: 600; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.08em;
+  padding: 6px 8px; border-bottom: 1px solid var(--line);
+}
+/* Vertical padding is deliberately small, because it is not what sets the row
+   height — the Flash button is. base.css floors every button at --minhit for a
+   thumb (28px here via .small, and the full 36/44px on a coarse pointer), and
+   8px of cell padding on top of that made a 44px row for one line of 13px
+   text. Trimming the padding leaves the tap target exactly as large as it was
+   and takes the airiness out of the table, which is the one screen that is
+   meant to be scanned down. */
+.scan-table td {
+  padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: middle;
+}
+.scan-table td.empty { color: var(--muted); text-align: center; padding: 20px; }
+.scan-table td.actions { text-align: right; white-space: nowrap; }
+
+/* Signal is a glyph *and* a colour. Colour alone would exclude anyone who
+   cannot separate the red from the green, on the one screen whose whole
+   output is a judgement about quality — so the bar count carries the same
+   information independently. */
+/* inline-flex, and on a <span> inside the cell rather than on the <td>. A
+   table cell given display:flex is no longer a table-cell: it stops
+   stretching to the row height and stops taking the column's width, so its
+   bottom border drew higher than the rest of the row's and stopped short of
+   the next column. */
+.scan-sig { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+/* Tabular figures: this number updates while somebody moves an antenna, and
+   it must not jitter sideways as it changes. */
+.scan-dbm { font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+.scan-row.excellent .scan-sig { color: var(--ok); }
+.scan-row.good      .scan-sig { color: var(--warn); }
+.scan-row.poor      .scan-sig { color: var(--danger); }
+
+/* The rows an automatic run would have gone for. A left edge and a tinted
+   ground rather than a colour on the text: the signal columns already own
+   colour on this screen, and a second meaning for it would make both harder
+   to read. */
+.scan-row.hit td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.scan-row.hit td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+
+.scan-name { font-weight: 600; }
+.scan-badge {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+  padding: 2px 6px; border-radius: 4px; margin-left: 6px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+.scan-badge.lock { background: none; padding: 0; }
+.scan-id { color: var(--muted); font-size: 12px; }
+.scan-id code { font-family: var(--mono); font-size: 11px; }
+
+.scan-pick-row td { background: var(--card); }
+.scan-file {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  text-align: left; width: 100%; margin-bottom: 6px;
+}
+.scan-file-name { font-family: var(--mono); font-size: 12px; }
+
+.scan-auto {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px; color: var(--fg);
+}
+.cfg-foot .scan-auto + button { margin-left: 4px; }
+
+@media (max-width: 640px) {
+  #scanner-overlay { padding: 0; }
+  #scanner-overlay .cfg-modal {
+    width: 100%; height: 100%; max-height: 100%; border-radius: 0; border: none;
+  }
+  /* The address is the first thing worth dropping on a narrow screen: it is
+     the longest column and the least useful for telling two rows apart. */
+  .scan-table th:nth-child(3), .scan-table td.scan-id { display: none; }
+}
+
 /* --- touch / small screens -------------------------------------- */
 
 /* A modal centred with 24px of padding wastes a third of a phone screen and

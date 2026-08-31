@@ -1,4 +1,5 @@
 import { ref, reactive, computed, watch, onUnmounted } from "../vue.js";
+import { onEscape } from "../lib/dialog.js";
 import { smp, entries, log as appLog } from "../store.js";
 import { fmtSize } from "../lib/format.js";
 import {
@@ -25,6 +26,7 @@ export default {
   props: { open: Boolean, path: String, startLive: Boolean },
   emits: ["close"],
   setup(props, { emit }) {
+    onEscape(() => props.open, () => emit("close"));
     const lines = ref([]);
     const loading = ref(false);
     const error = ref("");

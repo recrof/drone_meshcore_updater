@@ -58,11 +58,18 @@ enum fsx_mgmt_cmd {
 	FSX_MGMT_ID_RMDIR       = 2,
 	FSX_MGMT_ID_MOVE        = 3,
 	FSX_MGMT_ID_STATVFS     = 4,
-	/* WRITE { path:tstr } — arm the DFU state machine to flash the
-	 * zip at `path`. Handler returns immediately after queueing; the
+	/* WRITE { path:tstr, addr:tstr? } — arm the DFU state machine to flash
+	 * the zip at `path`. Handler returns immediately after queueing; the
 	 * actual scan → connect → discover → stream runs on a dedicated
 	 * workqueue. Progress is via serial log; the LED state indicates
 	 * running / done / fail.
+	 *
+	 * `addr` is optional and turns the run into **manual mode**: instead of
+	 * taking the first peer that passes `ble_name` and `min_rssi`, the run
+	 * reaches exactly the peer at that address (or its bootloader one MAC
+	 * above) and fails if it cannot. Pass back an `addr` verbatim from a
+	 * SCAN response. Neither filter applies — the operator chose this one,
+	 * and a weak target is usually why they went looking.
 	 */
 	FSX_MGMT_ID_TRIGGER_DFU = 5,
 
@@ -108,6 +115,55 @@ enum fsx_mgmt_cmd {
 	 * instead of testing it, and a copy that cannot exist cannot drift.
 	 */
 	FSX_MGMT_ID_CAPS        = 8,
+
+	/* SCAN (write): survey the air and report what the radio can hear.
+	 *
+	 *   req: { "on":bool, "kind":uint?, "reset":bool?, "off":uint?,
+	 *          "count":uint? }
+	 *   rsp: { "kind":uint, "kinds":uint, "scanning":bool, "total":uint,
+	 *          "truncated":bool,
+	 *          "entries": [ { "id":tstr, "name":tstr, "rssi":int,
+	 *                         "best":int, "n":uint, "ch":uint,
+	 *                         "fl":uint }, ... ] }
+	 *
+	 * `kind` is enum survey_kind: 1 = Bluetooth advertisers, 2 = WiFi
+	 * access points. `kinds` is the bitmask of kinds this build has a
+	 * radio for, so a client offers a WiFi tab only where one exists
+	 * rather than keeping its own board table — same reasoning as CAPS.
+	 *
+	 * **At most one survey runs, and none during a DFU.** Asking for the
+	 * other kind switches, which clears the table; asking during a run
+	 * returns EBUSY. survey.h has the three reasons, of which the
+	 * expensive one is that Bluetooth and WiFi are one radio on the ESP32
+	 * parts and a scan alongside a transfer costs the whole image.
+	 *
+	 * `reset` empties the table before scanning. A poll must not do that —
+	 * `best` and the sighting count are accumulated history — but a manual
+	 * refresh must, or it answers "what is out there now" with everything
+	 * heard since the survey began, none of which ever ages out.
+	 *
+	 * A **write**, not a read, because asking is what starts the radio.
+	 * One command arms, polls and disarms: `on:true` starts or refreshes,
+	 * `on:false` stops. A running survey also stops itself if nobody polls
+	 * for a few seconds, so a browser tab that closes cannot leave the
+	 * radio scanning until the next reboot.
+	 *
+	 * Nothing is filtered. `min_rssi` and `ble_name` exist to pick a
+	 * target automatically; a survey exists because that found nothing and
+	 * someone needs to see why — at which point the device below the
+	 * threshold is the interesting one, and hearing only a stranger's
+	 * phone still proves the receiver works.
+	 *
+	 * `rssi` is the latest sighting and `best` the strongest of the
+	 * survey: the first moves while an antenna is aimed, the second
+	 * answers "did it ever get good". `n` counts sightings — advertisements
+	 * for Bluetooth, completed sweeps for WiFi. `ch` is the WiFi channel
+	 * (0 for Bluetooth) and `fl` is SURVEY_F_DFU / SURVEY_F_SECURE.
+	 *
+	 * Entries come back in **insertion order** and the client sorts them;
+	 * see survey_get() for why signal order would corrupt pagination.
+	 */
+	FSX_MGMT_ID_SCAN        = 9,
 };
 
 /* Directory entry type constants used in `list` response. */
