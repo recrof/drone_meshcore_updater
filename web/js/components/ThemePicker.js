@@ -14,10 +14,10 @@ import {
  *
  * ---- Why the palette is behind a button ---------------------------------
  *
- * Seven swatches in the header is seven controls competing with Connect and
- * Disconnect, which are what people are actually here for. Behind one icon it
- * is a thing you go and find once and then never see again — which is the
- * correct weight for a colour preference.
+ * Seven swatches in the header is seven controls competing with Connect, which
+ * is what people are actually here for. Behind one icon it is a thing you go
+ * and find once and then never see again — which is the correct weight for a
+ * colour preference.
  *
  * ---- What the menu has to get right -------------------------------------
  *

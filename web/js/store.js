@@ -24,6 +24,13 @@ export const smp = new SmpClient();
 
 /* ---- state ------------------------------------------------------------ */
 export const connected  = ref(false);
+/* True from the moment Connect is pressed until the link is up and the device
+ * has answered. It exists because the header is one toggle now rather than two
+ * buttons: with a pair, the disabled half carried the state and the gap between
+ * "picker dismissed" and "connected" was merely quiet. With a toggle, that gap
+ * is a button still reading "Connect" and still enabled, which is a button that
+ * looks like it did nothing. */
+export const connecting = ref(false);
 export const deviceName = ref("");
 /* The board target the device reports (os_mgmt info, format "i") — e.g.
  * "xiao_ble/nrf52840". Null on firmware that predates it. Not cosmetic: it is
@@ -183,6 +190,8 @@ async function task(label, fn, { errPrefix = label } = {}) {
 
 /* ---- connection ------------------------------------------------------- */
 export async function connect() {
+  if (connecting.value || connected.value) return;
+  connecting.value = true;
   try {
     log("scanning…");
     const name = await smp.connect();
@@ -209,6 +218,12 @@ export async function connect() {
     await refresh();
   } catch (e) {
     log(`connect failed: ${e.message}`, "err");
+  } finally {
+    /* finally, not the end of try: the browser's device picker throws when it
+     * is dismissed, and that is the most common way this function ends. A
+     * header stuck on "Connecting…" after someone changed their mind would be
+     * a dead control with no way back. */
+    connecting.value = false;
   }
 }
 

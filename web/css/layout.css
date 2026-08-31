@@ -30,10 +30,19 @@ header.connected .dot-icon {
   header.connected .dot-icon { animation: none; }
 }
 
-/* The header's two actions carry a glyph as well as their word. They are the
-   only buttons on the page whose meaning is a *radio state*, and the icons
-   make the pair readable as opposites at a glance. */
+/* The header's action carries a glyph as well as its word. It is one toggle
+   now rather than a Connect/Disconnect pair — see AppHeader.js — so the glyph
+   is doing more work than it was: it is the part that changes shape when the
+   label changes word, which is what keeps the swap from reading as the same
+   button with different text. */
 header button .icon { margin-right: 6px; vertical-align: -3px; }
+/* inline-flex so the glyph centres on the word rather than sitting on its
+   baseline, and so the button does not resize between "Connect" and
+   "Connecting…" enough to move under a thumb already on its way down. */
+header .conn {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 8.5em;
+}
 
 /* A glyph beside a word, anywhere. Buttons are inline-flex so the two centre
    on each other rather than sitting on a shared baseline, which is what made
@@ -65,10 +74,13 @@ td.actions button:has(.icon),
 }
 
 /* The palette menu. Anchored to .theme-ctl, right-aligned so it opens inward
-   from the header's right-hand side rather than off the edge. */
+   from the header's right-hand side rather than off the edge.
+
+   Which is only true while the control *is* on the right — see the narrow
+   override below. */
 .theme-menu {
   position: absolute; top: calc(100% + 6px); right: 0; z-index: 40;
-  min-width: 168px; padding: 4px;
+  min-width: 168px; max-width: calc(100vw - 24px); padding: 4px;
   background: var(--card); border: 1px solid var(--line); border-radius: 8px;
   box-shadow: 0 6px 22px rgba(0, 0, 0, 0.22);
   display: flex; flex-direction: column; gap: 1px;
@@ -93,6 +105,38 @@ td.actions button:has(.icon),
   border-radius: 50%;
   background: var(--sw);
   border: 1px solid color-mix(in srgb, var(--fg) 22%, transparent);
+}
+
+/* On a narrow screen the header wraps, and the appearance controls land at the
+   *left* of the second row. Right-aligning a 168px menu to a ~92px control
+   there puts most of it off the left edge of the screen — observed on a phone
+   as labels cut in half with their swatches missing entirely, which reads as a
+   broken menu rather than as one that is merely positioned badly. Open it from
+   the left edge of the control instead, where the space is.
+
+   Widths between the wrap point and 640px get this too, and are fine either
+   way: a 168px menu opening rightward from a control at x=420 still ends well
+   inside the viewport. The max-width above is the backstop for anything
+   narrower than the menu itself. */
+@media (max-width: 640px) {
+  /* The header wraps here, so make it wrap *predictably*. .grow becomes a
+     full-width spacer, which forces the break at one known place: line 1 is
+     always the title and the device, line 2 is always the controls. Left to
+     itself the break lands wherever the device name happens to end, so a long
+     name could push the appearance controls onto a line of their own and the
+     action onto a third. */
+  header .grow { flex-basis: 100%; }
+
+  /* Appearance at one end of that line, the action at the other.
+     Both halves matter. The action keeps the edge it occupies on a desktop —
+     it is the one control a thumb reaches for repeatedly, and a button that
+     moves to the opposite side of the screen because the window got narrower
+     is a button you have to look for. And the appearance controls keep the
+     left, away from it: they are pressed once ever, and the cost of a mis-tap
+     between "connect" and "change the accent colour" is all on one side. */
+  header .conn { margin-left: auto; }
+
+  .theme-menu { left: 0; right: auto; }
 }
 
 /* --- toolbar --------------------------------------------------- */

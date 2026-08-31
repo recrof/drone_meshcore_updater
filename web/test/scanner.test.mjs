@@ -272,13 +272,40 @@ t("Icon.js defines radar", /\n  radar:/.test(icons));
     t(`a ${n}-frame cycle has keyframes`, new RegExp(`cycle-${n}[\\s\\S]{0,200}cyc${n}`).test(css));
   }
   const header = read("web/js/components/AppHeader.js");
-  t("Connect and Disconnect carry opposite bluetooth glyphs",
-    /name="bluetooth"[\s\S]{0,200}Connect/.test(header) &&
-    /name="bluetooth_disabled"[\s\S]{0,200}Disconnect/.test(header));
+  /* One toggle, not a Connect/Disconnect pair. Both words and both glyphs
+     still have to be there — the glyph is what stops the swap reading as the
+     same button with different text — but they now hang off `connected`. */
+  t("the connection control is a single toggle",
+    (header.match(/<button/g) || []).length ===
+    (header.match(/@click="toggle"|@click="reloadForUpdate"/g) || []).length);
+  t("it swaps both its word and its glyph on `connected`",
+    /connected \? 'bluetooth_disabled' : 'bluetooth'/.test(header) &&
+    /connected \? "Disconnect" : "Connect"/.test(header));
+  /* The gap between the picker closing and the device answering is a second
+     or two in which a toggle still says "Connect" and still takes a press. */
+  t("and reports the connect in flight",
+    /connecting \? "Connecting…"/.test(header) &&
+    /:disabled="connecting/.test(header));
   t("the connection indicator is a glyph, not a dot",
     /bluetooth_connected/.test(header) && !/class="dot"/.test(header));
+  const layout = read("web/css/layout.css");
   t("and it still pulses when connected",
-    /header\.connected \.dot-icon[\s\S]{0,120}animation: pulse/.test(read("web/css/layout.css")));
+    /header\.connected \.dot-icon[\s\S]{0,120}animation: pulse/.test(layout));
+  /* The header wraps on a phone and puts .theme-ctl at the *left*, where
+     right-aligning the menu to it hangs most of it off the screen. Observed:
+     labels cut in half, swatches gone. Neither grep nor jsdom sees this — the
+     menu renders perfectly, at a negative x — so the rule itself is the only
+     thing there is to hold on to. */
+  t("the palette menu opens leftward on a narrow screen",
+    /@media \(max-width: 640px\)[\s\S]{0,1600}\.theme-menu \{[^}]*left: 0[^}]*right: auto/.test(layout));
+  t("and can never be wider than the screen",
+    /\.theme-menu \{[\s\S]{0,200}max-width: calc\(100vw/.test(layout));
+  /* Same class of check, same reason: the wrapped header lays out fine at any
+     position, so only the rules say which position was intended. */
+  t("the wrapped header breaks at one known place",
+    /@media \(max-width: 640px\)[\s\S]{0,900}header \.grow \{ flex-basis: 100%/.test(layout));
+  t("and keeps the action at the far end of its row",
+    /@media \(max-width: 640px\)[\s\S]{0,1400}header \.conn \{ margin-left: auto/.test(layout));
 }
 
 /* --- every dialog closes the same three ways ---------------------------

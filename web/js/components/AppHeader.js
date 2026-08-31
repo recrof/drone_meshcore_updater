@@ -1,5 +1,5 @@
 import {
-  connected, deviceName, connect, disconnect, bluetoothAvailable,
+  connected, connecting, deviceName, connect, disconnect, bluetoothAvailable,
   updateReady, reloadForUpdate,
 } from "../store.js";
 import ThemePicker from "./ThemePicker.js";
@@ -10,8 +10,12 @@ export default {
   components: { ThemePicker, Icon },
   setup() {
     return {
-      connected, deviceName, connect, disconnect, bluetoothAvailable,
+      connected, connecting, deviceName, bluetoothAvailable,
       updateReady, reloadForUpdate,
+      /* One handler, because there is one button. Whichever it is, it is
+       * never both — `connected` decides, and connect() refuses a second
+       * press while the first is still in flight. */
+      toggle: () => (connected.value ? disconnect() : connect()),
     };
   },
   template: /* html */ `
@@ -41,10 +45,12 @@ export default {
         {{ connected ? deviceName : "not connected" }}
       </span>
       <span class="grow"></span>
-      <!-- Appearance sits left of the actions, not right of them: Connect and
-           Disconnect are what people reach for on every visit, and putting a
-           colour picker between them and the edge of the window would cost
-           that every time to save it once. -->
+      <!-- Appearance sits left of the action, not right of it: Connect is what
+           people reach for on every visit, and putting a colour picker between
+           it and the edge of the window would cost that every time to save it
+           once. On a phone the header wraps and this lands at the left of the
+           second row, which is why the menu opens leftward there — see
+           .theme-menu in layout.css. -->
       <ThemePicker />
       <!-- A newer service worker is installed and waiting. Reloading is the
            user's call: this page may be driving a DFU right now. -->
@@ -52,11 +58,25 @@ export default {
               title="A newer version has been downloaded. Reload to use it.">
         Update ready — reload
       </button>
-      <button class="primary" :disabled="connected || !bluetoothAvailable" @click="connect">
-        <Icon name="bluetooth" :size="18"/>Connect
-      </button>
-      <button :disabled="!connected" @click="disconnect">
-        <Icon name="bluetooth_disabled" :size="18"/>Disconnect
+      <!-- One button, not two.
+           It used to be a pair, on the argument that they are a *radio state*
+           and read as opposites at a glance. That holds on a desktop and
+           breaks on a phone: the header wraps, and two buttons where one would
+           do is the difference between the actions fitting on the second row
+           and crowding it. Half of the pair was always disabled anyway — a
+           permanently dead control is not information, it is furniture.
+
+           The state is not lost with it. It is in the header already, twice
+           over: the bluetooth glyph beside the device name, and the name
+           itself where "not connected" would be. This button says what
+           pressing it *does*, which is the one thing neither of those says. -->
+      <button class="conn" :class="{ primary: !connected }"
+              :disabled="connecting || (!connected && !bluetoothAvailable)"
+              :title="connected ? 'Disconnect from ' + deviceName
+                                : 'Choose a device and connect over Bluetooth'"
+              @click="toggle">
+        <Icon :name="connected ? 'bluetooth_disabled' : 'bluetooth'" :size="18"/>{{
+          connecting ? "Connecting…" : connected ? "Disconnect" : "Connect" }}
       </button>
     </header>
   `,
