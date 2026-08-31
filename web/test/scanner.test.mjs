@@ -393,16 +393,32 @@ t("only the Bluetooth tab offers a flash button", /v-if="isBle"[\s\S]{0,200}Flas
       execFileSync(join(dir, "t"), { input: lines.join("\n") + "\n" })
         .toString().trim().split("\n");
 
-    /* Zephyr is the authority on both halves, so both are read from it. */
-    const addrC = read("zephyr/subsys/bluetooth/host/addr.c");
-    const types = [...addrC.matchAll(/strcmp\(type,\s*"\(?([a-z-]+)\)?"\)/g)]
-      .map((m) => m[1]);
-    const accepted = new Set(types);
-    t("Zephyr accepts the four address types we expect",
-      ["public", "random", "public-id", "random-id"].every((x) => accepted.has(x)),
-      [...accepted].join(","));
-    t("Zephyr enforces a fixed address length",
-      /len != BT_ADDR_STR_LEN - 1/.test(addrC));
+    /* Zephyr is the authority on both halves, so both are read from it —
+     * when it is there. `zephyr/` is a west sibling, not part of this repo, so
+     * a plain checkout (which is what CI does for a node job) has none of it.
+     *
+     * The two halves degrade differently on purpose. The round trip below is
+     * the half that catches Trap 10, it needs nothing but a C compiler, and it
+     * runs either way. Only the cross-check *of the spellings themselves*
+     * needs Zephyr, so that one is skipped and the list falls back to the four
+     * we know — stated here as an assumption rather than as a fact. */
+    let addrC = null;
+    try { addrC = read("zephyr/subsys/bluetooth/host/addr.c"); } catch { /* no tree */ }
+
+    const KNOWN = ["public", "random", "public-id", "random-id"];
+    let accepted;
+    if (addrC === null) {
+      console.log("  skip  zephyr/ not checked out; address spellings not " +
+                  "cross-checked (run after `west update`)");
+      accepted = new Set(KNOWN);
+    } else {
+      accepted = new Set([...addrC.matchAll(/strcmp\(type,\s*"\(?([a-z-]+)\)?"\)/g)]
+                         .map((m) => m[1]));
+      t("Zephyr accepts the four address types we expect",
+        KNOWN.every((x) => accepted.has(x)), [...accepted].join(","));
+      t("Zephyr enforces a fixed address length",
+        /len != BT_ADDR_STR_LEN - 1/.test(addrC));
+    }
 
     /* Every form bt_addr_le_to_str() can emit. */
     const MAC = "E9:52:9F:23:87:4A";

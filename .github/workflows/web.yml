@@ -58,6 +58,15 @@ jobs:
         with:
           node-version: '22'
 
+      # Before any test step, because several suites render a component in
+      # jsdom and every one of them *skips silently* without it. That is how
+      # scanner.test.mjs's render check — the only thing in the suite that can
+      # see a broken Vue template, since a template error is a blank panel and
+      # not a syntax error — reported "ok" in CI while never running: the
+      # install used to live in the Render tests step, twenty steps later.
+      - name: Install jsdom
+        run: npm install --no-save jsdom
+
       - name: Schema tests (no dependencies)
         run: node web/test/config-file.test.mjs
 
@@ -185,7 +194,6 @@ jobs:
 
       - name: Render tests
         run: |
-          npm install --no-save jsdom
           node web/test/render.test.mjs web/dist/updater.html
           node web/test/flash-dialog.test.mjs web/dist/updater.html
           node web/test/dfu-banner.test.mjs
