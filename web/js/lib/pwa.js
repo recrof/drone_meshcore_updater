@@ -79,3 +79,73 @@ export function applyUpdate() {
   if (!waiting) { location.reload(); return; }
   waiting.postMessage("skip-waiting");
 }
+
+/* ---- Installing the app -------------------------------------------------
+ *
+ * "There is no install prompt on Android Chrome" is the expected behaviour,
+ * not a bug in the manifest. Chrome removed the automatic install banner: an
+ * installable page now gets a `beforeinstallprompt` event, and if the page
+ * does nothing with it the only remaining affordance is an "Install app" item
+ * buried in the ⋮ menu. Most people never find it.
+ *
+ * So the prompt is ours to raise. The browser still decides *whether* it is
+ * offered — the event only fires when the install criteria are met and the app
+ * is not already installed — but once it has fired, prompt() shows the real
+ * system dialog. Two rules the API enforces and this file has to respect:
+ * prompt() must be called from a user gesture, and each event is good for
+ * exactly one call.
+ *
+ * **This is a Chromium-only path.** Firefox does not implement it at all, and
+ * on iOS installing is Share → Add to Home Screen with no API to trigger or
+ * even detect it — so there the button correctly never appears, because there
+ * is nothing it could do.
+ */
+
+let installEvent = null;
+
+/* True when the page is already running as an installed app, in which case
+ * there is nothing to offer. Two spellings because iOS predates the standard
+ * one and still answers only to its own. */
+export function runningInstalled() {
+  if (typeof window === "undefined") return false;
+  return !!window.matchMedia?.("(display-mode: standalone)").matches
+      || window.navigator?.standalone === true;
+}
+
+/*
+ * Start listening. `onAvailable(bool)` is called when an install becomes
+ * offerable and again when it stops being — installing the app is the usual
+ * reason, and Chrome fires `appinstalled` for installs done from its own menu
+ * too, so a button raised by us still disappears when the user goes around it.
+ */
+export function watchInstall({ onAvailable = () => {}, onInstalled = () => {} } = {}) {
+  if (typeof window === "undefined") return;
+
+  window.addEventListener("beforeinstallprompt", (e) => {
+    /* Suppresses Chrome's own mini-infobar, which is the thing users are not
+     * seeing anyway, in favour of a control that sits still and can be found
+     * twice. */
+    e.preventDefault();
+    installEvent = e;
+    onAvailable(true);
+  });
+
+  window.addEventListener("appinstalled", () => {
+    installEvent = null;
+    onAvailable(false);
+    onInstalled();
+  });
+}
+
+/* Show the system install dialog. Must be called from a user gesture.
+ * Resolves to "accepted", "dismissed", or null when there was nothing to
+ * show. The event is discarded either way: it is single-use, and Chrome fires
+ * a fresh one if the page becomes installable again. */
+export async function promptInstall() {
+  const e = installEvent;
+  if (!e) return null;
+  installEvent = null;
+  e.prompt();
+  const { outcome } = await e.userChoice;
+  return outcome;
+}

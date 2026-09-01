@@ -8,7 +8,10 @@
 
 import { reactive, ref, computed, watch } from "./vue.js";
 import { SmpClient, SURVEY_KIND } from "./lib/smp-client.js";
-import { registerServiceWorker, applyUpdate } from "./lib/pwa.js";
+import {
+  registerServiceWorker, applyUpdate,
+  watchInstall, promptInstall, runningInstalled,
+} from "./lib/pwa.js";
 import { fmtSize, fmtRate, timestamp, joinPath } from "./lib/format.js";
 import {
   CONFIG_PATH, CONFIG_MAX_BYTES, isConfigPath, canonicalUploadPath,
@@ -861,7 +864,29 @@ export const bluetoothAvailable = computed(() => "bluetooth" in navigator);
 export const updateReady = ref(false);
 export const reloadForUpdate = applyUpdate;
 
+/* Set when the browser has offered us an install and we have not used it.
+ *
+ * It starts false and stays false on everything that cannot install: Firefox,
+ * every browser on iOS, and a page that is already running installed. That is
+ * why the header shows a button only when this is true rather than a disabled
+ * one with a reason — the usual preference here — since on those platforms
+ * there is no reason to give and nothing the user could do about it. */
+export const installReady = ref(false);
+
+export async function installApp() {
+  const outcome = await promptInstall();
+  /* Single-use either way: Chrome fires a fresh beforeinstallprompt if the
+   * page becomes installable again, and leaving the button up after a
+   * dismissal would give us one that does nothing on the second press. */
+  installReady.value = false;
+  if (outcome === "dismissed") log("install dismissed");
+}
+
 export function initOffline() {
+  watchInstall({
+    onAvailable: (v) => { installReady.value = v && !runningInstalled(); },
+    onInstalled: () => log("installed — the updater now opens as its own app", "ok"),
+  });
   return registerServiceWorker({
     onLog: log,
     onUpdate: () => { updateReady.value = true; },

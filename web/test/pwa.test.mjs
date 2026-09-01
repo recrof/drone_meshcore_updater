@@ -8,7 +8,7 @@
  * loads fine online and simply fails to start offline, which is the one
  * condition nobody tests by accident. So walk web/ and compare.
  */
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve, join, relative } from "node:path";
 
@@ -133,6 +133,46 @@ if (single === null) {
   t("single-file build drops the icon links",    !/<link rel="(apple-touch-)?icon"/.test(single));
   t("single-file build has no sibling refs",
     !/(href|src)="(?!data:|#)[^"]*\.(css|js|png|webmanifest)"/.test(single));
+}
+
+/* --- installability ------------------------------------------------------
+ *
+ * "No install prompt on Android Chrome" is what an installable page looks
+ * like when it ignores `beforeinstallprompt`: Chrome dropped the automatic
+ * banner, so the only remaining affordance is an item in the ⋮ menu. The
+ * manifest half of the criteria is checked here too, because a missing 192px
+ * icon or a display mode of "browser" fails silently — the event simply never
+ * fires, and there is nothing to see anywhere.
+ */
+{
+  const mf = JSON.parse(readFileSync(join(WEB, "manifest.webmanifest"), "utf8"));
+  const sizes = (mf.icons || []).map((i) => i.sizes);
+  t("manifest has a name and a short_name", !!mf.name && !!mf.short_name);
+  t("...a start_url and a scope", !!mf.start_url && !!mf.scope);
+  t("...an installable display mode",
+    ["standalone", "fullscreen", "minimal-ui"].includes(mf.display), mf.display);
+  t("...a 192px icon", sizes.includes("192x192"), sizes.join(" "));
+  t("...a 512px icon", sizes.includes("512x512"));
+  t("...and a maskable one, or Android crops it into a circle",
+    (mf.icons || []).some((i) => (i.purpose || "").split(/\s+/).includes("maskable")));
+  for (const i of mf.icons || []) {
+    t(`  ${i.src} exists`, existsSync(join(WEB, i.src)));
+  }
+
+  /* Chrome requires a fetch handler, not merely a registered worker. */
+  t("the service worker handles fetch", /addEventListener\("fetch"/.test(sw));
+
+  const pwa = readFileSync(join(WEB, "js", "lib", "pwa.js"), "utf8");
+  t("the app captures beforeinstallprompt", /"beforeinstallprompt"/.test(pwa));
+  t("...keeps the event for a later gesture", /installEvent = e/.test(pwa));
+  t("...calls prompt() on it", /\be\.prompt\(\)/.test(pwa));
+  t("...and drops it after one use, because it is single-use",
+    /installEvent = null;\s*\n\s*e\.prompt\(\)/.test(pwa));
+  t("...and stands down when the app is installed", /"appinstalled"/.test(pwa));
+
+  const hdr = readFileSync(join(WEB, "js", "components", "AppHeader.js"), "utf8");
+  t("the header offers the install only when the browser has",
+    /v-if="installReady"/.test(hdr) && /@click="installApp"/.test(hdr));
 }
 
 console.log(bad ? `\n${bad} FAILURES` : "\nall pwa tests passed");

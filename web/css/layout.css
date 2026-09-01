@@ -443,6 +443,14 @@ footer {
 
 /* Offer, not an interruption — a waiting service-worker update must never
    pull the page out from under a transfer in progress. */
+/* Offered, not demanded: this is a convenience, and it sits next to the one
+   control people came for. Accent-bordered rather than filled — a solid
+   button here would compete with Connect, which is the actual job. */
+header .install {
+  border-color: var(--accent); color: var(--accent); font-size: 12px;
+}
+header .install:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+
 header .update {
   border-color: var(--warn); color: var(--warn); font-size: 12px;
 }

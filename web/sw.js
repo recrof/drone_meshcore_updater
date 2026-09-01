@@ -32,7 +32,7 @@
 /* Bump on every shell change — the suffix is what invalidates the precache.
  * Restarted at v1 with the rename: the old counter belonged to a name that
  * no longer exists, and there were no deployed caches to keep continuity with. */
-const CACHE = "drone-meshcore-updater-v16";
+const CACHE = "drone-meshcore-updater-v17";
 
 /*
  * The release firmware staged by CI at firmware/. Kept in its own cache,

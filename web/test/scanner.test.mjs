@@ -275,9 +275,12 @@ t("Icon.js defines radar", /\n  radar:/.test(icons));
   /* One toggle, not a Connect/Disconnect pair. Both words and both glyphs
      still have to be there — the glyph is what stops the swap reading as the
      same button with different text — but they now hang off `connected`. */
+  /* Counted by what the handlers *do*, not by how many buttons the header
+     has — it grew an Install button and the old count-everything form broke
+     without anything being wrong. */
+  const clicks = [...header.matchAll(/@click="([^"]+)"/g)].map((m) => m[1]);
   t("the connection control is a single toggle",
-    (header.match(/<button/g) || []).length ===
-    (header.match(/@click="toggle"|@click="reloadForUpdate"/g) || []).length);
+    clicks.filter((c) => /toggle|connect/i.test(c)).length === 1, clicks.join(", "));
   t("it swaps both its word and its glyph on `connected`",
     /connected \? 'bluetooth_disabled' : 'bluetooth'/.test(header) &&
     /connected \? "Disconnect" : "Connect"/.test(header));

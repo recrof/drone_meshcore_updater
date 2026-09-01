@@ -1,6 +1,6 @@
 import {
   connected, connecting, deviceName, connect, disconnect, bluetoothAvailable,
-  updateReady, reloadForUpdate,
+  updateReady, reloadForUpdate, installReady, installApp,
 } from "../store.js";
 import ThemePicker from "./ThemePicker.js";
 import Icon from "./Icon.js";
@@ -11,7 +11,7 @@ export default {
   setup() {
     return {
       connected, connecting, deviceName, bluetoothAvailable,
-      updateReady, reloadForUpdate,
+      updateReady, reloadForUpdate, installReady, installApp,
       /* One handler, because there is one button. Whichever it is, it is
        * never both — `connected` decides, and connect() refuses a second
        * press while the first is still in flight. */
@@ -54,6 +54,16 @@ export default {
       <ThemePicker />
       <!-- A newer service worker is installed and waiting. Reloading is the
            user's call: this page may be driving a DFU right now. -->
+      <!-- Only when the browser has actually offered an install. Chrome
+           stopped showing its own banner, so without this the affordance is
+           an "Install app" line in the ⋮ menu that nobody finds; with it, the
+           press raises the real system dialog. Absent rather than disabled on
+           the platforms that cannot install — see installReady. -->
+      <button class="install" v-if="installReady" @click="installApp"
+              title="Install this as an app: its own window, its own icon, and
+                     it keeps working with no network.">
+        Install App
+      </button>
       <button class="update" v-if="updateReady" @click="reloadForUpdate"
               title="A newer version has been downloaded. Reload to use it.">
         Update ready — reload
