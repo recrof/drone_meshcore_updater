@@ -313,6 +313,39 @@ t("Icon.js defines radar", /\n  radar:/.test(icons));
   const cfg = read("web/css/config.css");
   const fixedCols = [...cfg.matchAll(/\.scan-table th:(?:nth-child\(2\)|last-child)[^{]*\{([^}]*)\}/g)]
     .map((m) => m[1]).filter((d) => /width:/.test(d));
+  /* A matched row draws its accent edge as an inset shadow on the name cell,
+     so that cell's left padding is what keeps the stripe off the first letter
+     of the device name. They were set in different places and read as
+     unrelated: zeroing the padding to line the column up with the lede put
+     the stripe through the "X" of XIAO_NRF52_OTA — the one row in the table
+     anybody is looking for. */
+  {
+    const stripe = Number(/\.scan-row\.hit td:first-child \{[^}]*inset (\d+)px/
+      .exec(cfg)?.[1]);
+    const pad = Number(/\.scan-table th:first-child, \.scan-table td\.scan-name \{ padding-left: (\d+)px/
+      .exec(cfg)?.[1]);
+    t("the name cell's padding clears the matched-row stripe",
+      Number.isFinite(stripe) && Number.isFinite(pad) && pad >= stripe + 4,
+      `stripe ${stripe}px, padding ${pad}px`);
+  }
+
+  /* A row that spans every column, next to a column hidden with display:none,
+     is a trap: removing a header cell removes the column, and the colspan
+     then invents one back — auto-width, placed last, taking an equal share of
+     the leftover. Every ordinary row stopped 87px short of the picker under
+     it. So the count has to match and the hiding has to collapse rather than
+     remove. */
+  {
+    const heads = (dialog.match(/<th>/g) || []).length;
+    const spans = [...dialog.matchAll(/colspan="(\d+)"/g)].map((m) => Number(m[1]));
+    t("every colspan covers exactly the columns that exist",
+      heads > 0 && spans.length > 0 && spans.every((n) => n === heads),
+      `${heads} columns, colspans ${spans.join(",")}`);
+    t("...and no scanner column is removed with display:none",
+      !/\.scan-table[^{]*\{[^}]*display:\s*none/.test(cfg),
+      /(\.scan-table[^{]*)\{[^}]*display:\s*none/.exec(cfg)?.[1] ?? "");
+  }
+
   t("the scanner's fixed columns are sized in px, not em",
     fixedCols.length === 2 && fixedCols.every((d) => /width:\s*\d+px/.test(d)),
     fixedCols.map((d) => d.trim()).join(" | "));
@@ -720,7 +753,7 @@ const bleRows = [
 
   t("the row offers all four actions", btns.length === 4, String(btns.length));
 
-  for (const [label, icon] of [["flash", "bolt_boost"], ["check", "search_check_2"]]) {
+  for (const [label, icon] of [["Flash", "bolt_boost"], ["Check", "search_check_2"]]) {
     const b = byText(new RegExp(`^\\s*${label}\\s*$`));
     t(`${label} keeps its label`, !!b, btns.map((x) => x.textContent.trim()).join("|"));
     t(`${label} also carries an icon`, !!b?.querySelector("svg"));
@@ -739,6 +772,38 @@ const bleRows = [
 
   t("every action button has exactly one glyph",
     btns.every((b) => b.querySelectorAll("svg").length === 1));
+
+  /* --- the listing is grouped, not alphabetical ------------------------
+   *
+   * Alphabetical sorts by the least interesting thing a file has, and on a
+   * real device it interleaved the three kinds and buried config.txt in the
+   * middle of the logs. The order is the order of the work: the file you
+   * edit, the files you flash, the files you read when a flash went wrong.
+   *
+   * Rendered rather than reasoned about: the comparator is a closure inside
+   * the component, so what reaches the screen is the only thing that can be
+   * asked. The input below is deliberately in an order that is wrong on both
+   * counts — kinds interleaved, and LOG.0010 ahead of LOG.0009. */
+  store.entries.value = [
+    { name: "LOG.0010", size: 32, type: 0 },
+    { name: "b-repeater.zip", size: 64, type: 0 },
+    { name: "LOG.0009", size: 32, type: 0 },
+    { name: "config.txt", size: 128, type: 0 },
+    { name: "a-repeater.zip", size: 64, type: 0 },
+    { name: "notes.txt", size: 8, type: 0 },
+    { name: "sub", size: 0, type: 1 },
+  ];
+  await Vue.nextTick();
+  const order = [...dom.window.document.querySelectorAll("td.name")]
+    .map((td) => td.textContent.trim().replace(/\s+.*$/, ""));
+  const EXPECT = ["config.txt", "sub", "a-repeater.zip", "b-repeater.zip",
+                  "notes.txt", "LOG.0009", "LOG.0010"];
+  t("config.txt is first", order[0] === "config.txt", order.join(" "));
+  t("then the flashable files, by name",
+    order.slice(2, 4).join() === "a-repeater.zip,b-repeater.zip", order.join(" "));
+  t("then the logs, last and in index order",
+    order.slice(-2).join() === "LOG.0009,LOG.0010", order.join(" "));
+  t("the whole order", order.join(" ") === EXPECT.join(" "), order.join(" "));
 
   store.entries.value = [];
   store.connected.value = false;

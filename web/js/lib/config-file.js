@@ -228,10 +228,9 @@ export const CONFIG_SCHEMA = [
     def: "OTA | DFU",
     maxLength: BLE_NAME_MAX,
     placeholder: "(any device with the DFU service)",
-    desc: `Substring filter for the advertised BLE name. Empty accepts any peer
-           exposing the Legacy DFU service. Multiple substrings may be OR'd with
-           "|" — useful when an app and its bootloader advertise under different
-           names, e.g. RAK4631_OTA|4631_DFU.`,
+    desc: `Substring match on the peer's advertised name; empty accepts anything
+           advertising the Legacy DFU service. Several may be OR'd with "|",
+           which an app and its bootloader usually need: RAK4631_OTA|4631_DFU.`,
   },
   {
     key: "ble_firmware_mapping",
@@ -244,12 +243,10 @@ export const CONFIG_SCHEMA = [
     /* Rendered by MappingEditor rather than as a raw string. The stored type
      * is still plain text — this only tells the dialog which control to use. */
     editor: "mapping",
-    desc: `Lets one updater carry several bundles and pick per target. Rules are
-           "name:fileglob", separated by "|" and tried in order; the first whose
-           name part appears in the peer's advertised name wins, and its glob is
-           resolved against /lfs1 (if several files match, the last by name wins,
-           so v2 beats v1). Only used by Auto flash — flashing a specific zip from
-           the list always sends exactly that zip.`,
+    desc: `"name:fileglob" rules separated by "|" and tried in order; the first
+           whose name appears in the peer's advertised name wins. Globs resolve
+           against /lfs1, and the last match by name wins, so v2 beats v1. Used by
+           Auto flash only — flashing a named file always sends that file.`,
     check: (v) => {
       const { bad } = parseMapping(v);
       return bad.length
@@ -274,10 +271,9 @@ export const CONFIG_SCHEMA = [
     min: -127,
     max: 0,
     unit: "dBm",
-    desc: `Advertisements weaker than this are rejected during the scan. -127
-           disables the check. Refuses to start flashing when the link isn't
-           strong enough to stream reliably — a weak link fails mid-image, which
-           costs a full retry.`,
+    desc: `Reject advertisements weaker than this. Legacy DFU has no resume, so a
+           marginal link does not fail slowly — it fails mid-image and costs a
+           whole retry. -127 accepts anything.`,
   },
   {
     key: "scan_timeout",
@@ -288,9 +284,9 @@ export const CONFIG_SCHEMA = [
     min: 0,
     max: 65535,
     unit: "s",
-    desc: `How long to wait for a matching target. 0 scans forever (the default,
-           intended for drone use). On expiry the sequence gives up without
-           consuming a DFU retry.`,
+    desc: `How long to look for a target. 0 never gives up, which is the default and
+           what an unattended flight wants. Giving up does not consume a DFU
+           retry.`,
     note: (v) => (Number(v) === 0 ? "0 = scan forever" : null),
   },
   {
@@ -299,22 +295,11 @@ export const CONFIG_SCHEMA = [
     title: "Flash automatically at power-on",
     type: "bool",
     def: false,
-    desc: `Start searching for a target the moment the radio comes up, with no
-           browser connected and nobody to press anything. This is the setting
-           that makes the device work at the far end of a flight: every other
-           way of starting a DFU needs a client in Bluetooth range of the
-           updater, which is the one thing it will not have.
-
-           It uses \`ble_firmware_mapping\` to decide which bundle goes to
-           which target, so it needs one — armed without a mapping, the device
-           logs an error at boot and flashes nothing rather than guessing.
-
-           Two consequences worth knowing before you fly it. The device is
-           armed from power-on, so it will flash any target its mapping
-           matches, including one you did not mean to be near. And with
-           \`scan_timeout\` at its default of 0 the search never gives up, so
-           the device stays busy — which means the Scan panel stays
-           unavailable until you press Stop.`,
+    desc: `Start looking for a target as soon as the radio is up, with no browser and
+           nobody to press anything — the only route that does not need a client in
+           range. Needs a mapping rule: armed without one, the device logs an error
+           at boot and flashes nothing. It will flash any target the mapping
+           matches, including one you did not intend to be near.`,
   },
 
   {
@@ -323,9 +308,9 @@ export const CONFIG_SCHEMA = [
     title: "Log rejected advertisements",
     type: "bool",
     def: false,
-    desc: `Log every advertisement rejected for weak signal, name mismatch, or
-           missing DFU service UUID. Useful when diagnosing why a target isn't
-           being picked up; noisy in the field, so off by default.`,
+    desc: `Log every advertisement the scan rejects and why — weak signal, name
+           mismatch, no DFU service. For working out why a target is not being
+           found; noisy in a populated place.`,
   },
 
   {
@@ -337,24 +322,32 @@ export const CONFIG_SCHEMA = [
     def: 32,
     min: 0,
     max: 65535,
-    desc: `Firmware packets between packet-receipt notifications. Each receipt
-           lets the updater compare the peer's byte count against its own and
-           abort early rather than discovering a divergence at VALIDATE. It is
-           not the flow control — pkt_gap_ms is — because the peer emits a
-           receipt as soon as a packet is buffered, not when flash catches up.
-           0 disables receipts entirely (the official app's default), leaving no
-           check until the image is validated.`,
+    desc: `Firmware packets between packet-receipt notifications. Each receipt lets
+           the updater compare the peer's byte count with its own and stop early
+           instead of failing at VALIDATE. It is a check, not flow control — the
+           peer acknowledges a packet when it is buffered, not when flash has
+           caught up, so pkt_gap_ms does the pacing. 0 turns receipts off.`,
     /* Legacy DFU data packets carry no offset, so the bootloader appends
      * blindly; a dropped packet corrupts the image from that point on while
-     * its byte counter keeps advancing. Only prn=1 can resume, but with
-     * high_mtu off the peer's accumulator makes loss rare enough that the
-     * throughput of a high cadence is the better trade.
+     * its byte counter keeps advancing.
+     *
+     * **There is no resume at any cadence**, which these notes used to say
+     * there was at prn=1 — see Trap 2 in notes/dfu-tuning.md. Rewinding to the
+     * peer's byte count realigns the counters onto bytes that are already
+     * wrong: the count says how much it holds, not that any of it is right.
+     * dfu_client.cpp implements no resume, and neither does the Android
+     * library it was ported from. A receipt is therefore worth exactly one
+     * thing — finding out early — and the only question this key answers is
+     * how much of a transfer you are willing to lose before you hear about it.
      */
     note: (v) => {
       const n = Number(v);
-      if (n === 0) return "prn=0 disables flow control entirely — no loss detection until VALIDATE fails";
-      if (n === 1) return "prn=1 enables mid-image resume, but one receipt per packet is slow — prefer 300 unless a target is dropping packets";
-      return "any loss aborts the attempt and retries the whole image (resume only works at prn=1)";
+      if (n === 0) return "no loss detection at all until VALIDATE fails at the end";
+      /* No "prefer N" here. Whatever number that named, it disagreed with the
+       * default sitting in the chip beside it, which is a screen telling the
+       * reader two things at once. */
+      if (n === 1) return "a receipt per packet — the earliest possible warning, and the slowest";
+      return `any loss restarts the whole image; you hear about it within ${n} packets`;
     },
   },
   {
@@ -363,15 +356,11 @@ export const CONFIG_SCHEMA = [
     title: "Try WiFi/ElegantOTA targets",
     type: "bool",
     def: true,
-    desc: `MeshCore's ESP32 repeaters do not do Bluetooth DFU at all — they
-           raise a WiFi AP called MeshCore-OTA and take an upload over HTTP.
-           This lets the updater try that as well as Bluetooth, and has no
-           effect on hardware with no WiFi radio — which is every nRF board.
-           Rarely needs changing: flashing a named file picks the transport
-           from the file itself (.zip is Bluetooth, .bin is WiFi) and never
-           scans for the other, and auto-flash narrows the same way from the
-           mapping rules. This only decides the cases that remain genuinely
-           ambiguous.`,
+    desc: `MeshCore's ESP32 repeaters have no Bluetooth DFU — they raise a WiFi AP
+           and take an HTTP upload. This allows that route as well. Rarely matters:
+           the transport is picked from the file (.zip Bluetooth, .bin WiFi), so
+           this only decides what stays ambiguous. No effect without a WiFi
+           radio.`,
     note: (v) => (v
       ? "only consulted when the updater cannot tell which transport a run needs"
       : "Bluetooth only, whatever the hardware can do"),
@@ -388,13 +377,10 @@ export const CONFIG_SCHEMA = [
     min: 0,
     max: 1000,
     unit: "ms",
-    desc: `Gap after each ordinary firmware packet. With erase_pause_ms set,
-           this only has to cover the target's flash write rate (~2.5 ms per
-           244 B store), so it can be small. With erase_pause_ms at 0 it must
-           instead cover a whole page erase, and the measured floor is 18 ms.
-           Actual spacing runs ~2.7 ms above this value — that is the
-           write-completion latency, and it is why 15 ms measured 17.9 and
-           still failed.`,
+    desc: `Gap after each ordinary firmware packet, covering the target's flash
+           write — about 2.5 ms per 244 B. It only needs to be large when
+           erase_pause_ms is 0, since it must then cover a whole page erase as
+           well. Real spacing lands about 2.7 ms above what you set.`,
     note: (v) => {
       const n = Number(v);
       const actual = n + 2.7;
@@ -411,15 +397,12 @@ export const CONFIG_SCHEMA = [
     min: 0,
     max: 1000,
     unit: "ms",
-    desc: `The target erases each 4 KB page lazily, on the first write that
-           touches it, and stalls for ~100 ms while it does — buffering only 8
-           packets meanwhile. This waits out that stall after the one packet per
-           page that triggers it, so the other ~16 can go at full speed. 0
-           disables it and paces every packet as if it were the expensive one,
-           which is correct but costs about half the throughput. The value
-           needed is per-board: it is timed from a write-completion callback,
-           and completion means something different on each controller — the
-           nRF wants 100, the ESP32 wants 150 for the same target.`,
+    desc: `The target erases each 4 KB page on the first write that touches it and
+           stalls about 100 ms, buffering only 8 packets meanwhile. This waits that
+           out after the one packet that triggers it, so the rest run at full
+           speed. 0 paces every packet as if it were the expensive one and costs
+           about half the throughput. The right value is per board, and the default
+           is the one measured for this one.`,
     note: (v, board) => {
       const n = Number(v);
       const p = tuningFor(board);
@@ -443,13 +426,11 @@ export const CONFIG_SCHEMA = [
     def: 0,
     min: 0,
     max: 8,
-    desc: `How many packets to send during the erase before waiting out the
-           rest of it. 0 stops dead at the boundary, which is safe but wasteful:
-           the erase pauses measured 44% of a transfer with the target's 8-slot
-           buffer sitting empty. Raising this overlaps packets with the erase.
-           Measured, 6 fails every time: the ring is still draining the previous
-           erase when the next begins, so the overflow lands on the second page
-           and the failure point drifts. 2-3 is the usable range.`,
+    desc: `How many packets to send into a page erase before waiting out the rest.
+           0 stops at the boundary and is what every measured-good configuration
+           here uses. Raising it overlaps packets with the erase; 2-3 is the most
+           that has worked, and 6 fails every time — the buffer is still draining
+           the previous erase when the next one starts.`,
     note: (v) => {
       const n = Number(v);
       if (n === 0) return "no overlap — the full erase pause is dead air";
@@ -463,12 +444,10 @@ export const CONFIG_SCHEMA = [
     title: "Negotiate 247-byte MTU",
     type: "bool",
     def: true,
-    desc: `Request an ATT MTU of up to 247 B instead of the 23 B default, making
-           each packet 244 B. Worth having: the peer buffers one packet per slot
-           during a page erase regardless of size, so large packets carry far
-           more data through the same 8 slots. Some older bootloaders don't
-           honour MTU exchange — turn this off if a target stalls right after
-           connect.`,
+    desc: `Ask for a 247-byte ATT MTU, making each packet 244 B instead of 20. Worth
+           having: the target buffers one packet per slot during an erase whatever
+           its size, so bigger packets carry more through the same 8 slots. Turn it
+           off if a target stalls right after connect.`,
     note: (v) => (v
       ? "244 B/packet — 8 pending slots hold ~1952 B across a page erase"
       : "20 B/packet — the peer's accumulator coalesces them to 240 B before flashing"),
@@ -479,20 +458,11 @@ export const CONFIG_SCHEMA = [
     title: "Use the external antenna",
     type: "bool",
     def: false,
-    desc: `Point the antenna switch at the external connector instead of the
-           on-board antenna. Only some boards have such a switch — it is a
-           property of the board, not the radio — and on one that does not,
-           this setting is accepted and does nothing but say so in the log.
-
-           Off means the on-board antenna, which is what every board here
-           ships selecting and the only choice that works with nothing plugged
-           in. **Turning this on with no antenna attached makes the link
-           worse, not better.**
-
-           On the XIAO MG24, switching the path was measured at about 6 dB,
-           which in free space is roughly double the range. The device also
-           receives through the same switch, so a scan that reports weak
-           signal everywhere is worth re-running after changing this.`,
+    desc: `Switch the antenna path to the external connector. Only some boards have
+           the switch; on one that does not, this is accepted and logged as
+           unsupported. With nothing plugged in it makes the link worse, not
+           better. Worth about 6 dB on the XIAO MG24, and it affects receive too —
+           re-run a scan after changing it.`,
   },
 
   {
@@ -502,18 +472,11 @@ export const CONFIG_SCHEMA = [
     type: "select",
     def: 8,
     options: TX_POWER_LEVELS.map(v => ({ value: v, label: `${v > 0 ? "+" : ""}${v} dBm` })),
-    desc: `Bluetooth TX power, applied to advertising, scanning and every
-           connection. Only the levels listed here are implemented; the radio
-           rounds anything else to a neighbour, and the boot log prints what
-           it actually selected.
-
-           More is not always better. At very short range a strong signal
-           saturates the receiver and the link gets *worse*, so a target on
-           the same desk may need less power rather than more. Turn it down
-           before assuming the problem is distance.
-
-           Was called \`tx_power\`. The device still accepts the old name and
-           says so in its log, so an existing config.txt keeps working.`,
+    desc: `Applied to advertising, scanning and every connection. The ceiling is per
+           board — nRF parts stop at +8, Espressif at +20 — and the radio rounds
+           down to a level it has, so the boot log is what it actually set. More is
+           not always better: at very short range a strong signal saturates the
+           receiver and the link gets worse. The old name tx_power still works.`,
   },
 
   {
@@ -523,14 +486,10 @@ export const CONFIG_SCHEMA = [
     type: "select",
     def: 20,
     options: WIFI_TX_POWER_LEVELS.map(v => ({ value: v, label: `+${v} dBm` })),
-    desc: `WiFi TX power for the ElegantOTA transport, applied once the
-           updater has joined the target's access point. The default is the
-           chip's own maximum, so leaving it alone changes nothing.
-
-           Only meaningful on a board with a WiFi radio — the nRF boards
-           ignore it. The same "more is not always better" caveat applies:
-           this radio and Bluetooth share one antenna, and a target a metre
-           away does not need 20 dBm.`,
+    desc: `Applied once the updater has joined the target's access point. Defaults to
+           the chip's own maximum, so leaving it alone changes nothing, and it is
+           ignored on a board with no WiFi radio. Same caveat as Bluetooth — and
+           here the two radios share one antenna.`,
   },
 
   {
@@ -542,9 +501,9 @@ export const CONFIG_SCHEMA = [
     def: 5,
     min: 1,
     max: 255,
-    desc: `How many times to attempt the DFU before giving up. config.txt is
-           re-read before every attempt, so a corrected file uploaded mid-run
-           applies to the next one.`,
+    desc: `How many times to attempt the DFU before giving up. config.txt is re-read
+           before every attempt, so a corrected file uploaded mid-run applies to
+           the next one.`,
   },
   {
     key: "retry_cooldown",
@@ -555,8 +514,8 @@ export const CONFIG_SCHEMA = [
     min: 0,
     max: 600,
     unit: "s",
-    desc: `Pause after an attempt that failed before connecting. The bootloader
-           needs a moment to settle after a reset before it will accept another
+    desc: `Pause after an attempt that failed before connecting. The bootloader needs
+           a moment to settle after a reset before it will accept another
            START_DFU.`,
   },
   {
@@ -568,13 +527,11 @@ export const CONFIG_SCHEMA = [
     min: 0,
     max: 600,
     unit: "s",
-    desc: `Pause after a response timeout, protocol error, or mid-stream link
-           drop. A target that has genuinely wedged only unsticks when its own
-           inactivity watchdog fires — 60–120 s on stock SDK 11-era Adafruit
-           bootloaders — so raise this if failures repeat immediately. The
-           default is short because most post-connect failures here are not
-           wedges: the peer reboots and re-advertises within seconds, and
-           waiting a minute for it wastes most of a retry budget.`,
+    desc: `Pause after a response timeout, protocol error, or mid-stream drop. Most
+           of these are not wedges — the peer reboots and re-advertises within
+           seconds — so the default is short. A genuinely wedged target only
+           unsticks when its own watchdog fires, 60-120 s on stock Adafruit
+           bootloaders, so raise this if failures repeat immediately.`,
   },
 ];
 

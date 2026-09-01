@@ -259,10 +259,12 @@ export async function refresh() {
       off += (r.entries || []).length;
       if (off > 4096) break;   // sanity guard
     }
-    all.sort((a, b) => {
-      if (a.type !== b.type) return b.type - a.type;   // dirs first
-      return a.name.localeCompare(b.name);
-    });
+    /* A stable base order only. What the user sees is grouped — config, then
+     * flashable files, then logs — and that lives in FileListing.js, which is
+     * where a file's kind is worked out. Sorted at all so that anything else
+     * reading `entries` (the mapping editor's file suggestions) gets a
+     * predictable list rather than device order. */
+    all.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
     entries.value = all;
     listError.value = "";
     updateFsInfo(p);

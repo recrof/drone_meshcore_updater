@@ -20,6 +20,36 @@ const BLOCKED = {
     "that route is built only for boards with a WiFi radio",
 };
 
+/*
+ * The order the listing is read in, top to bottom.
+ *
+ * Alphabetical was the obvious order and the wrong one, because it sorts by
+ * the least interesting thing a file has. On a device holding a config, a
+ * bundle and three rotated logs it interleaved all three kinds and buried
+ * config.txt in the middle — the one file that is always present, always the
+ * same name, and the reason most people open this screen.
+ *
+ * So: the file you edit, then the files you flash, then the files you read
+ * when a flash went wrong. That is the order of the work, and it is also
+ * roughly the order of how often each is touched.
+ *
+ * Directories rank above the files rather than below because they contain
+ * them; there are none in practice — nothing this device reads lives below
+ * the root — but a listing that put a folder after its own siblings would
+ * read as a bug the first time one appeared. OTHER is everything that is not
+ * one of the four: an upload that failed halfway, a file put there by hand.
+ * It sits above the logs because it is unexplained, and unexplained things
+ * are worth seeing.
+ */
+const GROUP = { CONFIG: 0, DIR: 1, FIRMWARE: 2, OTHER: 3, LOG: 4 };
+
+const groupOf = (r) =>
+  r.isCfg      ? GROUP.CONFIG
+  : r.isDir    ? GROUP.DIR
+  : r.isFirmware ? GROUP.FIRMWARE
+  : r.isLog    ? GROUP.LOG
+  : GROUP.OTHER;
+
 export default {
   name: "FileListing",
   components: { Icon },
@@ -58,7 +88,14 @@ export default {
               : isLog ? "View log"
               : "Download",
         };
-      });
+      })
+      /* Grouped here rather than in store.js's fetch, because the grouping
+       * needs isCfg / isFirmware / isLog and those are decided above — the
+       * store sees names and a type flag and nothing else. */
+      .sort((a, b) => groupOf(a) - groupOf(b) ||
+        /* numeric so LOG.0009 comes before LOG.0010, and a v1.9 bundle before
+         * a v1.10 one. Plain string order gets both backwards. */
+        a.name.localeCompare(b.name, undefined, { numeric: true }));
     });
 
     const empty = computed(() => {
@@ -123,11 +160,11 @@ export default {
               <button v-if="row.isFirmware" class="primary small"
                       :disabled="!row.canFlash" :title="whyBlocked(row)"
                       @click.stop="flashFile(row.full)">
-                <Icon name="bolt_boost" :size="16"/>flash
+                <Icon name="bolt_boost" :size="16"/>Flash
               </button>
               <button v-if="row.isFirmware" class="small"
                       @click.stop="check(row)">
-                <Icon name="search_check_2" :size="16"/>check
+                <Icon name="search_check_2" :size="16"/>Check
               </button>
               <!-- Icon-only, unlike flash/check beside them. These two are
                    universal file operations with settled glyphs, so a label

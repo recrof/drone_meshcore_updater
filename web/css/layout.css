@@ -321,9 +321,14 @@ main { flex: 1; overflow: auto; }
 .file-table tbody td.name.log::before { background: var(--muted); }
 
 .file-table td.size, .file-table td.actions {
-  color: var(--muted); font-variant-numeric: tabular-nums;
-  font-family: var(--mono); font-size: 12px;
+  color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px;
 }
+/* Mono on the size and NOT on the actions. base.css gives every button
+   `font: inherit`, so mono on the actions cell reached the buttons inside it
+   — which is why "flash" and "check" were the only monospace button labels in
+   the app, next to a scanner whose Flash button was not. The size column
+   wants the mono face for its own reason: digits that line up between rows. */
+.file-table td.size { font-family: var(--mono); }
 .file-table td.actions { text-align: right; white-space: nowrap; }
 .file-table td.actions button { margin-left: 5px; }
 

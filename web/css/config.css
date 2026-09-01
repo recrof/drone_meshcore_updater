@@ -481,8 +481,24 @@ a.flash-note { color: var(--accent); }
     width: 100%; height: 100%; max-height: 100%; border-radius: 0; border: none;
   }
   /* The address is the first thing worth dropping on a narrow screen: it is
-     the longest column and the least useful for telling two rows apart. */
-  .scan-table th:nth-child(3), .scan-table td.scan-id { display: none; }
+     the longest column and the least useful for telling two rows apart.
+
+     **Collapsed to zero width, not `display: none`.** Removing a header cell
+     removes its *column*, and the table still has a row that spans all four —
+     the file picker a Flash press opens. That colspan then invents the fourth
+     column back, as an auto-width one placed after the others, and it takes an
+     equal share of whatever the sized columns left over: measured at 369px,
+     the name column got 88px instead of 175 and every ordinary row stopped
+     87px short of the picker beneath it. The row looked like it was not using
+     the full width because it was not.
+
+     visibility rather than a colour, so nothing is announced to a screen
+     reader either, and overflow because a 0-width cell would otherwise paint
+     its content across the neighbour. */
+  .scan-table th:nth-child(3), .scan-table td.scan-id {
+    width: 0; padding-left: 0; padding-right: 0;
+    overflow: hidden; visibility: hidden;
+  }
 
   /* It stays a table here — three columns fit on a phone once the address is
      gone, and the whole value of this screen is comparing rows down a column.
@@ -519,12 +535,19 @@ a.flash-note { color: var(--accent); }
   .scan-table th:nth-child(2), .scan-table td.scan-sig-cell { width: 64px; }
   .scan-table th:last-child, .scan-table td.actions { width: 106px; }
 
-  /* The outer edges of the table carry no padding of their own, so the first
-     column lines up with the lede above it and the button's right edge lines
-     up with everything else against the panel's 12px gutter. The gap the
-     button needs from the signal column comes from the cell's left padding,
-     where it is one number and not the sum of two. */
-  .scan-table th:first-child, .scan-table td.scan-name { padding-left: 0; }
+  /* The right edge of the table carries no padding of its own, so the
+     button's right edge lines up with everything else against the panel's
+     12px gutter. The gap the button needs from the signal column comes from
+     the cell's left padding, where it is one number and not the sum of two.
+
+     The *left* edge keeps a little, and 9px is not a rounding of 8: a matched
+     row draws its accent stripe as a 3px inset shadow on this cell, so
+     anything under about 6px puts the stripe under the first letter of the
+     device name. At padding 0 — which is what lining the column up with the
+     lede above it asked for — it clipped the "X" of XIAO_NRF52_OTA, on the
+     one row in the table that matters most. Same arrangement as the file
+     listing, where the name is indented past its own stripe. */
+  .scan-table th:first-child, .scan-table td.scan-name { padding-left: 9px; }
   .scan-table th:last-child, .scan-table td.actions {
     padding-left: 14px; padding-right: 0;
   }
