@@ -32,7 +32,7 @@
 /* Bump on every shell change — the suffix is what invalidates the precache.
  * Restarted at v1 with the rename: the old counter belonged to a name that
  * no longer exists, and there were no deployed caches to keep continuity with. */
-const CACHE = "drone-meshcore-updater-v17";
+const CACHE = "drone-meshcore-updater-v19";
 
 /*
  * The release firmware staged by CI at firmware/. Kept in its own cache,
@@ -101,6 +101,7 @@ const PRECACHE = [
   "js/components/IconCycle.js",
   "js/components/LogPane.js",
   "js/components/LogViewer.js",
+  "js/components/PinDialog.js",
   "js/components/MappingEditor.js",
   "js/components/ProbeFlash.js",
   "js/components/ProgressBar.js",

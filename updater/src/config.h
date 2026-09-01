@@ -27,6 +27,16 @@ extern "C" {
 #define APP_CONFIG_PATH   "/lfs1/config.txt"
 #define APP_CONFIG_NAME_MAX 24
 
+/* Room for more than a passkey can legally be, which is the point.
+ *
+ * A Bluetooth passkey is 0..999999, so six digits plus a terminator would fit
+ * every valid value — and would silently turn an invalid one into a valid
+ * lookalike, because snprintf() would clip a hand-typed "1234567" to "123456"
+ * and hand ble_pairing.c a PIN nobody chose. Sized to let a wrong value
+ * survive the parser intact so it can be *refused*, with a message, instead of
+ * failing later as an authentication error that reads like a typo. */
+#define APP_CONFIG_PIN_MAX  12
+
 /* ble_firmware_mapping holds several "name:file" rules, so it needs far more
  * room than a single name. Bounded well under the 1023-byte parse buffer so a
  * long mapping can't push other keys off the end of the file.
@@ -55,6 +65,30 @@ struct app_config {
 	 * Flashing a specific zip still sends exactly that zip.
 	 */
 	char     ble_firmware_mapping[APP_CONFIG_MAPPING_MAX];
+
+	/* The PIN used when a target refuses to talk over an unencrypted link.
+	 *
+	 * MeshCore's firmware is the case this exists for: its characteristics
+	 * require authentication, so an unpaired central is answered with ATT
+	 * "Insufficient Authentication" and — before this — the run failed
+	 * reporting a missing DFU characteristic.
+	 *
+	 * Empty (the default) does **not** mean "do not pair". Nothing is ever
+	 * offered up front either way: the link is raised only when a peer
+	 * refuses something, and Zephyr's BT_ATT_RETRY_ON_SEC_ERR then retries
+	 * the request by itself. What this key changes is whether we can
+	 * *answer* when that happens. Set empty, a target that wants a PIN is
+	 * reported as needing one instead of failing obscurely — which is the
+	 * whole improvement, and it applies with the key unset.
+	 *
+	 * A fleet default. One specific target can be flashed with a different
+	 * PIN from the scanner without touching this file; see fsx_mgmt.h's
+	 * TRIGGER_DFU.
+	 *
+	 * Digits only, one to six of them. See ble_pairing.h for why the name
+	 * says `pin` while everything inside the firmware says `passkey`.
+	 */
+	char     ble_pin[APP_CONFIG_PIN_MAX];
 
 	/* Packet Receipt Notification cadence (writes between PRN callbacks).
 	 * 10 is safe for SDK 6.0 bootloaders; modern ones tolerate ~32. 0

@@ -58,7 +58,7 @@ enum fsx_mgmt_cmd {
 	FSX_MGMT_ID_RMDIR       = 2,
 	FSX_MGMT_ID_MOVE        = 3,
 	FSX_MGMT_ID_STATVFS     = 4,
-	/* WRITE { path:tstr, addr:tstr? } — arm the DFU state machine to flash
+	/* WRITE { path:tstr, addr:tstr?, pin:tstr? } — arm the DFU state machine to flash
 	 * the zip at `path`. Handler returns immediately after queueing; the
 	 * actual scan → connect → discover → stream runs on a dedicated
 	 * workqueue. Progress is via serial log; the LED state indicates
@@ -70,6 +70,22 @@ enum fsx_mgmt_cmd {
 	 * above) and fails if it cannot. Pass back an `addr` verbatim from a
 	 * SCAN response. Neither filter applies — the operator chose this one,
 	 * and a weak target is usually why they went looking.
+	 *
+	 * `pin` is optional and is the *passkey* for a target that will not
+	 * talk over an unencrypted link — one to six digits. Absent, the run
+	 * falls back to config.txt's `ble_pin`; present, it wins for this run
+	 * only and is never written to the config file. Nothing is offered to
+	 * a peer that does not ask, so sending it costs nothing when the
+	 * target turns out not to need one.
+	 *
+	 * **`addr` and `pin` are unrelated despite the firmware calling an
+	 * address a "pin" everywhere else.** The wire names are the
+	 * operator's: an address and a PIN. See ble_pairing.h.
+	 *
+	 * A run that ends because of authentication reports
+	 * DFU_STATUS_RESULT_AUTH_REQUIRED (nothing was offered) or
+	 * _AUTH_FAILED (one was, and the peer refused it) and does **not**
+	 * consume the retry budget — the answer would not change.
 	 */
 	FSX_MGMT_ID_TRIGGER_DFU = 5,
 
@@ -164,6 +180,23 @@ enum fsx_mgmt_cmd {
 	 * see survey_get() for why signal order would corrupt pagination.
 	 */
 	FSX_MGMT_ID_SCAN        = 9,
+
+	/* SUBMIT_PIN (write): answer a pairing that is waiting for one.
+	 *
+	 *   req: { "pin": tstr }        empty or absent cancels the pairing
+	 *   rsp: { "taken": bool }      false if nothing was waiting
+	 *
+	 * Only meaningful while the status is DFU_STATUS_AWAITING_PIN. The
+	 * target is displaying the digits *now*, for this pairing and no other,
+	 * which is why this is a separate command rather than an argument to
+	 * TRIGGER_DFU: by the time a run could be re-triggered the number on
+	 * the screen has changed, and declining the first one is what cleared
+	 * the screen.
+	 *
+	 * `taken: false` is not an error — SMP times a pairing out after 30 s,
+	 * so a prompt the operator left sitting simply misses the window.
+	 */
+	FSX_MGMT_ID_SUBMIT_PIN  = 10,
 };
 
 /* Directory entry type constants used in `list` response. */

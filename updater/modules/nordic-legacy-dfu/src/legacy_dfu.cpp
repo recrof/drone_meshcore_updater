@@ -140,7 +140,50 @@ private:
 	Observer *observer_;
 	Firmware fw_;
 	Parameters params_;
-	GattLink link_;
+
+	/*
+	 * **Static storage, and that is the whole point of it.**
+	 *
+	 * A Session is a local: `Session session(...)` in run() and again in
+	 * detect(), on the dfu_runner thread's stack. GattLink used to be an
+	 * ordinary member, so every structure Zephyr is handed a pointer to —
+	 * sub_params_ above all — lived in a stack frame that ended when
+	 * dfu_client_run() returned.
+	 *
+	 * The Bluetooth host does not give those pointers back at the same
+	 * time. It keeps `sub_params_.node` on its own subscription list until
+	 * the connection's ATT channel detaches, which lags our disconnect by
+	 * up to ATT's 30 s timeout (Trap 3), and then walks that list in
+	 * remove_subscriptions() and calls `params->notify(conn, params, NULL,
+	 * 0)`. By then the frame holding it is somebody else's:
+	 *
+	 *   PREVIOUS RUN CRASHED: unknown (reason 35) in thread BT RX WQ
+	 *     pc=0x00000000 lr=0x0003a44d          -> gatt.c:3446
+	 *
+	 * — a branch through a `notify` read out of a dead stack frame. The
+	 * list `next` pointers are read from the same dead memory, so the host
+	 * can walk anywhere from there. It reproduced on four boards, two
+	 * architectures, at the same point in the same run.
+	 *
+	 * A previous attempt fixed the wrong half: it stopped this file
+	 * *zeroing* sub_params_ and waited for the host to release it before
+	 * reuse. Both are right and neither is sufficient, because the object
+	 * doing the waiting is the one that has ceased to exist. The flag it
+	 * waits on was on that stack too.
+	 *
+	 * One instance, shared by detect()'s Session and run()'s — which costs
+	 * nothing, because only one DFU runs at a time (dfu_runner_busy()
+	 * enforces it) and the file's callbacks have always assumed a single
+	 * active link (`s_active`). attach() resets every field, so a shared
+	 * object starts each session as clean as a fresh one.
+	 *
+	 * The same reasoning covers disc_params_, read_params_, write_params_
+	 * and mtu_params_: each is held by the host only for the length of one
+	 * operation, but a timed-out or aborted operation returns *while* the
+	 * host still holds it. Those never crashed; they had the same fault
+	 * and were merely luckier.
+	 */
+	static GattLink link_;
 
 	uint16_t version_ = 0;
 	uint8_t file_type_ = 0;
@@ -169,6 +212,10 @@ private:
 
 	uint8_t buffer_[CONFIG_NORDIC_LEGACY_DFU_MAX_PACKET_SIZE];
 };
+
+/* The one instance. In .bss, so it outlives every Session that borrows it —
+ * which is the property the Bluetooth host depends on. */
+GattLink Session::link_;
 
 Failure Session::map_gatt(int rc)
 {

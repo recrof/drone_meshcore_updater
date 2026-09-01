@@ -41,6 +41,10 @@ static void apply_defaults(struct app_config *c)
 	 * expensive to undo.
 	 */
 	c->ble_firmware_mapping[0] = '\0';
+	/* Empty. Not "do not pair" — see config.h: nothing is offered up front
+	 * with or without it, and an empty PIN still turns a protected target
+	 * from an obscure failure into a report that says a PIN is wanted. */
+	c->ble_pin[0] = '\0';
 	/* PRN is not what keeps the peer alive — pkt_gap_ms is (see below).
 	 * Its job here is the integrity check: each receipt lets us compare
 	 * the peer's byte count against our own and abort early instead of
@@ -134,6 +138,16 @@ static void apply_kv(struct app_config *c, const char *key, const char *val)
 	if (!strcmp(key, "ble_firmware_mapping")) {
 		snprintf(c->ble_firmware_mapping,
 			 sizeof(c->ble_firmware_mapping), "%s", val);
+		return;
+	}
+	if (!strcmp(key, "ble_pin")) {
+		/* Copied verbatim, including a value too long or not numeric.
+		 * The validation lives in ble_pairing_set_passkey(), which is
+		 * the only place that can act on it, and it refuses the whole
+		 * string rather than taking a prefix — clipping "1234567" to
+		 * "123456" would offer the peer a PIN nobody chose. Truncating
+		 * *here* would hide that from it. */
+		snprintf(c->ble_pin, sizeof(c->ble_pin), "%s", val);
 		return;
 	}
 	int n = atoi(val);

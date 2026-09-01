@@ -129,7 +129,7 @@ export function describeSmpError(group, cmd, body) {
 export const OS_ID  = { ECHO: 0, RESET: 5, INFO: 7 };
 export const FSX_ID = {
   LIST: 0, MKDIR: 1, RMDIR: 2, MOVE: 3, STATVFS: 4, TRIGGER_DFU: 5, STOP_DFU: 6,
-  INSPECT: 7, CAPS: 8, SCAN: 9,
+  INSPECT: 7, CAPS: 8, SCAN: 9, SUBMIT_PIN: 10,
 };
 
 /* Link quality bands, in dBm. The thresholds are the operator-facing point of
@@ -524,11 +524,34 @@ export class SmpClient extends EventTarget {
    * exact peer instead of taking whatever passes `ble_name` and `min_rssi`.
    * Pass an `addr` back verbatim from fsxScan() — the string format is the
    * firmware's own, and reformatting it here would be a second place for the
-   * two to disagree. */
-  fsxTriggerDfu(path, addr = "") {
+   * two to disagree.
+   *
+   * `pin` is the passkey for a target that refuses an unencrypted link, one to
+   * six digits. Omitted, the device falls back to config.txt's `ble_pin`; it
+   * is used for this run only and never written to the config file. Nothing is
+   * offered to a peer that does not ask, so sending one costs nothing.
+   *
+   * `addr` and `pin` are unrelated, despite the firmware calling a pinned
+   * address a "pin" internally — these two argument names are the operator's,
+   * an address and a PIN. */
+  fsxTriggerDfu(path, addr = "", pin = "") {
     const req = { path };
     if (addr) req.addr = addr;
+    if (pin) req.pin = pin;
     return this.request(MGMT_OP.WRITE_REQ, GRP.FSX, FSX_ID.TRIGGER_DFU, req);
+  }
+  /* Answer a pairing that is parked waiting for a PIN.
+   *
+   * Only meaningful while the status is STATE.AWAITING_PIN. An empty `pin`
+   * cancels the pairing, which is what dismissing the prompt means.
+   *
+   * A separate command rather than an argument to fsxTriggerDfu because the
+   * target is displaying these digits *for this pairing*: by the time a run
+   * could be re-triggered the number has changed, and declining the first one
+   * is what cleared the screen. Resolves to `{ taken }` — false means the
+   * 30 s window closed, which is an outcome and not an error. */
+  fsxSubmitPin(pin = "") {
+    return this.request(MGMT_OP.WRITE_REQ, GRP.FSX, FSX_ID.SUBMIT_PIN, { pin });
   }
   /* Survey the air. Resolves to
    * `{ kind, kinds, scanning, total, truncated,

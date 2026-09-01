@@ -74,6 +74,55 @@ static void sweep_one(struct bt_conn *conn, void *user_data)
 		return;
 	}
 
+	/*
+	 * ---- Not every conn object is a link -----------------------------
+	 *
+	 * `bt_conn_foreach()` walks every slot in `acl_conns[]` and hands over
+	 * anything with a non-zero reference count. It does **not** filter on
+	 * state, so the enumeration includes objects that are not connections
+	 * at all — and one of them is ours.
+	 *
+	 * `le_adv_start_add_conn()` reserves a conn for a connectable
+	 * advertiser before any peer exists:
+	 *
+	 *     conn = bt_conn_add_le(adv->id, BT_ADDR_LE_NONE);
+	 *     bt_conn_set_state(conn, BT_CONN_ADV_CONNECTABLE);
+	 *
+	 * `bt_conn_add_le()` never assigns `role`, and the slot is zeroed, so
+	 * it reads back as **BT_CONN_ROLE_CENTRAL (0)** — a value nothing ever
+	 * wrote. Its `dst` is BT_ADDR_LE_NONE. So the sweep saw "a central
+	 * link to FF:FF:FF:FF:FF:FF", tried to disconnect it, got -ENOTCONN
+	 * (that state falls to the `default` arm of bt_conn_disconnect), found
+	 * it again on the next poll, and burned its full 20 x 100 ms — every
+	 * DFU attempt, with 22 identical warnings in front of the scan:
+	 *
+	 *     stale link to FF:FF:FF:FF:FF:FF (public) still open — closing it
+	 *
+	 * This was written down as suspected `CONFIG_BT_EXT_ADV` fallout
+	 * because the MG24 is the only board with it and the MG24 is where it
+	 * was first seen. **That was wrong**: a user's log has it on an
+	 * nRF52840, which has no extended advertising. It is the ordinary
+	 * connectable advertiser, on every board, and the role reading CENTRAL
+	 * — the detail that argued *against* the advertising theory — turns
+	 * out to be the strongest evidence for it, because an advertiser's
+	 * placeholder is the one conn object whose role is never set.
+	 *
+	 * The address is the discriminator, not the state: a stuck *initiator*
+	 * is also "connecting" and is exactly what Trap 11 needs this sweep to
+	 * cancel, but it always has a peer address, because nothing here uses
+	 * `bt_conn_le_create_auto()` or directed advertising. A conn with no
+	 * peer is not something we opened.
+	 */
+	if (bt_addr_le_eq(info.le.dst, BT_ADDR_LE_NONE)) {
+		return;
+	}
+	/* Already gone, or already going. Disconnecting these returns
+	 * -ENOTCONN or 0 forever and they leave on their own. */
+	if (info.state == BT_CONN_STATE_DISCONNECTED ||
+	    info.state == BT_CONN_STATE_DISCONNECTING) {
+		return;
+	}
+
 	char addr[BT_ADDR_LE_STR_LEN];
 	bt_addr_le_to_str(info.le.dst, addr, sizeof(addr));
 	LOG_WRN("stale link to %s still open — closing it so the peer can "
@@ -189,11 +238,35 @@ static enum dfu_result ble_run(const struct dfu_target *t,
  * good behaviour and it makes our success report a lie: the peer is sitting in
  * DFU mode and we have gone home saying it is updated.
  *
- * The tell is the bootloader's own address. It is not the application's — a
- * Nordic bootloader entered from an app advertises at MAC+1, and one that was
- * already in DFU mode has its own — so *anything* advertising there is the
- * bootloader, still in DFU mode. A target that booted its new application is
- * silent at that address.
+ * ---- The tell is the DFU service, not the address ----------------------
+ *
+ * **This keyed on the address alone and that was wrong**, on the reasoning
+ * that a Nordic bootloader advertises at MAC+1 (or at its own address when it
+ * was already in DFU mode), so anything advertising *there* must be the
+ * bootloader. Some targets are like that. The one that found this is not: a
+ * RAK4631 running MeshCore keeps the same address in both modes —
+ *
+ *   pinned match: C1:DB:7B:EB:7A:0C (random) name='AdaDFU'   <- bootloader
+ *   ... 494176 bytes uploaded, result=SUCCESS ...
+ *   C1:DB:7B:EB:7A:0C (random) is advertising: name='' dfu_service=no
+ *
+ * — and that last line is the *new application*, up and running, which this
+ * function called a rejection. The runner then reflashed a target that had
+ * already succeeded, and again, and again: an **update loop against a device
+ * that was finished the first time**.
+ *
+ * It is a race, which is why it did not surface sooner. The same log has an
+ * earlier transfer to the same board pass verification, for no better reason
+ * than that the target had not finished rebooting inside the 5 s window.
+ * Whether a successful DFU got reported as success depended on how fast the
+ * peer came back up.
+ *
+ * The discriminator is `dfu_uuid`: whether the advertisement carries the
+ * Legacy DFU service. A bootloader in DFU mode advertises it — it must, or
+ * find_first() could never discover one at all — and an application does not.
+ * The flag was already collected, already *logged* in the failure message
+ * below, and simply never consulted. An address answers "is something there",
+ * which is not the question being asked.
  *
  * Two numbers, both deliberately generous, because the cost of being wrong is
  * asymmetric. A false "rejected" costs one retry against a target that is
@@ -237,10 +310,17 @@ static enum dfu_result ble_verify(const struct dfu_target *t,
 		return DFU_OK;
 	}
 
-	LOG_ERR("verify: the bootloader is still advertising at the same "
-		"address (name='%s' dfu_service=%s) — it rejected the image, "
-		"most likely on its own CRC check, and has re-armed DFU",
-		seen.name, seen.dfu_uuid ? "yes" : "no");
+	/* Something is at that address. Which something is the whole question. */
+	if (!seen.dfu_uuid) {
+		LOG_INF("verify: %s is advertising without the DFU service "
+			"(name='%s') — that is the application, so the new "
+			"image is running", t->name, seen.name);
+		return DFU_OK;
+	}
+
+	LOG_ERR("verify: the DFU service is still advertised at the target's "
+		"address (name='%s') — it rejected the image, most likely on "
+		"its own CRC check, and has re-armed DFU", seen.name);
 	return DFU_TARGET_REJECTED;
 }
 

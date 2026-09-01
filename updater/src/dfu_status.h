@@ -107,6 +107,14 @@ enum dfu_status_state {
 	 * appended, and clients must not assume the working states are a
 	 * contiguous range below DONE. */
 	DFU_STATUS_VERIFYING     = 11, /* peer reset; checking that it took */
+	/* The target is displaying a passkey and nobody has typed it.
+	 *
+	 * A *waiting* state, not a failure: the pairing is held open for SMP's
+	 * own 30 s so the digits stay on the target's screen while a client
+	 * prompts for them. Declining instead is what made the display vanish
+	 * before anyone could read it. See ble_pairing.h.
+	 */
+	DFU_STATUS_AWAITING_PIN  = 12,
 };
 
 /* Why the run ended.
@@ -132,6 +140,20 @@ enum dfu_status_result {
 	DFU_STATUS_RESULT_FS_ERROR           = 11,
 	DFU_STATUS_RESULT_RETRIES_EXHAUSTED  = 12,
 	DFU_STATUS_RESULT_TARGET_REJECTED    = 13, /* sent whole, peer would not run it */
+	/* The peer will not talk unencrypted, and the pairing did not happen.
+	 *
+	 * Two results rather than one because they ask the operator for
+	 * different things: _AUTH_REQUIRED means nothing was offered and a PIN
+	 * has to be supplied, _AUTH_FAILED means one was and the peer rejected
+	 * it. A single "auth error" would send someone to re-type a PIN they
+	 * had never entered. See ble_pairing.h.
+	 *
+	 * Neither is retried. Every attempt would ask the same question and
+	 * get the same answer, and on an unattended run that is five wasted
+	 * connections instead of one clear report.
+	 */
+	DFU_STATUS_RESULT_AUTH_REQUIRED      = 14,
+	DFU_STATUS_RESULT_AUTH_FAILED        = 15,
 };
 
 /* Start a new run: clears the snapshot, starts the elapsed clock, and enters

@@ -63,6 +63,15 @@ const BLE_NAME_MAX = 23;
 /* config.h: APP_CONFIG_MAPPING_MAX 192, snprintf → 191 usable. */
 const MAPPING_MAX = 191;
 
+/* Six, not APP_CONFIG_PIN_MAX-1.
+ *
+ * The field in config.h is deliberately roomier than a legal passkey so that a
+ * hand-edited over-long value survives the parser and can be *refused* with a
+ * message rather than silently clipped into a different PIN. That is the
+ * firmware coping with a file it did not write. This editor writes the file,
+ * so it stops at what is actually valid: a Bluetooth passkey is 0..999999. */
+const BLE_PIN_MAX = 6;
+
 /* Split a ble_firmware_mapping value the way firmware_map.c does: '|' between
  * rules, first ':' splitting name pattern from file glob, whitespace trimmed.
  * Returns { rules: [{name, file}], bad: [rawRule] }.
@@ -261,6 +270,25 @@ export const CONFIG_SCHEMA = [
       return `${rules.length} rule(s): ` +
              rules.map(r => `"${r.name}" → ${r.file}`).join(", ");
     },
+  },
+  {
+    key: "ble_pin",
+    label: "ble_pin",
+    title: "Target PIN",
+    type: "text",
+    def: "",
+    maxLength: BLE_PIN_MAX,
+    placeholder: "(none)",
+    inputmode: "numeric",
+    desc: `Passkey for a target that refuses to talk unencrypted — MeshCore
+           firmware does. Empty is fine: nothing is offered to a peer that does
+           not ask, and one that does is then reported as needing a PIN instead
+           of failing as a missing characteristic. The scanner can ask for a
+           different PIN for one device without changing this.`,
+    check: (v) => (v === "" || /^[0-9]{1,6}$/.test(v)
+      ? null
+      : "one to six digits, or empty — the firmware refuses anything else " +
+        "rather than offering the target a PIN nobody chose"),
   },
   {
     key: "min_rssi",

@@ -130,6 +130,23 @@ jobs:
       - name: Advertising restart tests
         run: node web/test/adv-restart.test.mjs
 
+      # Two defects that only fire when a DFU runs more than once, both found
+      # in one field log: a target that had been flashed successfully was
+      # declared a failure and reflashed in a loop, and the updater eventually
+      # branched to address zero through a GATT subscription it had zeroed
+      # while the Bluetooth host still held it. A single-shot DFU exercises
+      # neither, which is why both shipped.
+      - name: DFU re-run tests
+        run: node web/test/dfu-loop.test.mjs
+
+      # The BLE PIN path, which is dormant on every board this project owns —
+      # none of the five requires authentication — so none of the defects it
+      # covers can be found by using the thing. The sharpest is that
+      # dfu_runner_start()'s `pin` (an address) and `passkey` (a credential)
+      # are adjacent const char *: swapping them builds and boots.
+      - name: BLE pairing tests
+        run: node web/test/ble-pairing.test.mjs
+
       # Cross-checks the live DFU status layout, enums and service UUIDs
       # against updater/src/dfu_status.[ch]. A renumbered state parses fine
       # and reports the wrong step, so nothing at run time would catch it.

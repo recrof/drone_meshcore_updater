@@ -662,3 +662,37 @@ a.flash-note { color: var(--accent); }
 
 .upd { padding-bottom: 4px; }
 .upd-status { margin: 6px 0 0; color: var(--muted); font-family: var(--sans); }
+
+/* ---- PinDialog -------------------------------------------------------
+ *
+ * Shares .cfg-modal / .cfg-head / .cfg-body / .cfg-foot with the config
+ * editor, as the scanner and flash dialogs do. What is specific here is the
+ * one input: it wants to be big enough to read back at a glance, because it
+ * is transcribed from another device's screen against a clock and a
+ * mistyped digit costs the whole pairing.
+ */
+#pin-overlay {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px; background: rgba(0, 0, 0, 0.5);
+}
+.pin-modal { max-width: 380px; width: 100%; }
+.pin-lead { margin: 12px 0 14px; line-height: 1.5; }
+.pin-input {
+  width: 100%; box-sizing: border-box;
+  font-family: var(--mono);
+  /* 28px and letter-spaced: this is read off one screen and typed into
+     another, which is exactly when a 6 and an 8 get confused. */
+  font-size: 28px; letter-spacing: 0.32em; text-align: center;
+  padding: 10px 8px;
+}
+.pin-err { color: var(--danger); margin: 10px 0 0; }
+/* Not --accent: the accent is a user preference with seven settings, one of
+   which is red, and a countdown that turns "urgent" in the colour it was
+   already using says nothing. Same rule as the scanner's --ok token. */
+.pin-clock { color: var(--muted); margin: 12px 0 0; font-size: 12px; }
+.pin-clock.urgent { color: var(--danger); }
+/* The retry ask has no clock — nothing is counting down — so this sits in the
+ * same slot and says what the PIN is scoped to instead. */
+.pin-note { color: var(--muted); margin: 12px 0 0; font-size: 12px; line-height: 1.5; }
+.pin-note code { font-family: var(--mono); }

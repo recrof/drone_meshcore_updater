@@ -15,12 +15,14 @@ import ConfigDialog from "./components/ConfigDialog.js";
 import FlashDialog  from "./components/FlashDialog.js";
 import LogViewer    from "./components/LogViewer.js";
 import ScannerDialog from "./components/ScannerDialog.js";
+import PinDialog from "./components/PinDialog.js";
 
 export default {
   name: "App",
   components: {
     AppHeader, ProgressBar, FileToolbar, DfuStatus, FileListing,
     LogPane, DropOverlay, ConfigDialog, FlashDialog, LogViewer, ScannerDialog,
+    PinDialog,
   },
   setup() {
     onMounted(() => {
@@ -60,6 +62,14 @@ export default {
          scanning after the panel had gone. (No backticks in this file: the
          template is a JS template literal and one would close it.) -->
     <ScannerDialog />
+    <!-- No "open" prop, for the same reason ScannerDialog has none: the
+         device owns this state. The target is displaying digits for a pairing
+         it is holding open, so what decides whether to ask is the status on
+         the wire, not anything this page remembers.
+         (Quotes, not backticks: this whole template is a template literal and
+         a backtick in a comment ends it. esbuild says "Expected } but found
+         open", which names neither the file's real problem nor the character.) -->
+    <PinDialog />
     <LogViewer :open="logViewOpen" :path="logViewPath" :start-live="logViewLive"
                @close="logViewOpen = false" />
   `,

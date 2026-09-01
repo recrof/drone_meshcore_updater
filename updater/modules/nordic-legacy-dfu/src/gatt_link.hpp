@@ -166,9 +166,32 @@ private:
 	uint8_t read_buf_[8]{};
 	uint16_t read_len_ = 0;
 
-	/* Zephyr keeps pointers to these for the duration of each operation. */
+	/*
+	 * Zephyr keeps pointers to these for the duration of each operation —
+	 * and, for sub_params_, for as long after our disconnect as the ATT
+	 * channel takes to detach (Trap 3: up to 30 s).
+	 *
+	 * **So a GattLink may not live on a stack.** The one instance is
+	 * `Session::link_` in legacy_dfu.cpp, which is static for this reason
+	 * and says so at length. It was an ordinary member of a stack-local
+	 * Session once, and the host walked into the dead frame.
+	 */
 	bt_gatt_discover_params disc_params_{};
 	bt_gatt_subscribe_params sub_params_{};
+	/*
+	 * Does the *host* still have sub_params_ on one of its lists?
+	 *
+	 * Not the same question as `subscribed_`, which is about this session.
+	 * Zephyr removes a subscription when the connection's ATT channel
+	 * detaches, which can lag our own disconnect by a long way (Trap 3: a
+	 * pending ATT request outlives bt_conn_disconnect() by up to ATT's 30 s
+	 * timeout). Until then it holds a pointer *into* this struct, and
+	 * touching it is memory corruption in the host's own list.
+	 *
+	 * Cleared by notify_cb() when Zephyr calls it with data == NULL, which
+	 * is exactly the host announcing it has let go.
+	 */
+	volatile bool sub_linked_ = false;
 	bt_gatt_write_params write_params_{};
 	bt_gatt_read_params read_params_{};
 	bt_gatt_exchange_params mtu_params_{};

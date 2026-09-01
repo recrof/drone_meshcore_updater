@@ -34,6 +34,7 @@
 #include "antenna.h"
 #include "dfu_runner.h"
 #include "ble_scanner.h"
+#include "ble_pairing.h"
 
 LOG_MODULE_REGISTER(app, LOG_LEVEL_INF);
 
@@ -293,6 +294,16 @@ static int bt_ready(void)
 		return rc;
 	}
 	bt_gatt_cb_register(&gatt_callbacks);
+	/* Before anything can connect. The callbacks are passive — nothing here
+	 * ever *starts* a pairing — so registering them changes no behaviour
+	 * until a peer asks for a passkey. Failure is logged and not fatal: it
+	 * costs only the ability to reach targets that demand authentication,
+	 * which is a strict subset of what this device does. */
+	rc = ble_pairing_init();
+	if (rc) {
+		LOG_ERR("pairing callbacks rc=%d — targets that require a PIN "
+			"will not be reachable this boot", rc);
+	}
 	rc = adv_start_raw();
 	if (rc) {
 		/* Not fatal any more. Everything below this point — the SMP
@@ -476,7 +487,10 @@ int main(void)
 				"flashed. Set a mapping, or clear auto_flash.");
 			led_set_state(LED_STATE_DONE_FAIL);
 		} else {
-			rc = dfu_runner_start(NULL, NULL);
+			/* No pinned address and no per-run PIN: an unattended run
+			 * has nobody to type one, so config.txt's `ble_pin` is
+			 * the only PIN it can offer. */
+			rc = dfu_runner_start(NULL, NULL, NULL);
 			if (rc) {
 				LOG_ERR("auto_flash: dfu_runner_start rc=%d", rc);
 			} else {

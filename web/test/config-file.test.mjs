@@ -23,6 +23,10 @@ const t = (name, cond, extra = "") => {
 /* --- defaults must match updater/src/config.c apply_defaults() --- */
 const FIRMWARE_DEFAULTS = {
   ble_name: "OTA | DFU", ble_firmware_mapping: "",
+  /* Empty, and that is not "do not pair": nothing is offered to a peer
+   * that does not ask either way. What an empty ble_pin changes is only
+   * whether the device can *answer* a peer that does. */
+  ble_pin: "",
   prn: 32, high_mtu: true, retries: 5, min_rssi: -75,
   retry_cooldown: 5, wedge_cooldown: 10, ble_tx_power: 8, wifi_tx_power: 20,
   scan_timeout: 0,

@@ -315,15 +315,29 @@ uint8_t GattLink::notify_cb(bt_conn *conn, bt_gatt_subscribe_params *params, con
 			    uint16_t length)
 {
 	ARG_UNUSED(conn);
-	ARG_UNUSED(params);
-	GattLink *self = s_active;
+
+	/*
+	 * Recovered from `params`, not from s_active.
+	 *
+	 * This callback is how the host announces it has *removed* the
+	 * subscription, and that can arrive long after detach() has cleared
+	 * s_active — which is precisely the window subscribe_control_point()
+	 * needs to know about. Keying on s_active would miss the one call that
+	 * matters and leave sub_linked_ set forever.
+	 */
+	GattLink *self = CONTAINER_OF(params, GattLink, sub_params_);
 
 	if (self == nullptr) {
 		return BT_GATT_ITER_STOP;
 	}
 	if (data == nullptr) {
-		/* Unsubscribed. */
+		/* The host has let go of sub_params_. */
 		self->subscribed_ = false;
+		self->sub_linked_ = false;
+		return BT_GATT_ITER_STOP;
+	}
+	if (self != s_active) {
+		/* A late notification from a connection that is over. */
 		return BT_GATT_ITER_STOP;
 	}
 
@@ -379,12 +393,142 @@ int GattLink::subscribe_control_point()
 		return -ENOENT;
 	}
 
-	memset(&sub_params_, 0, sizeof(sub_params_));
+	/*
+	 * Wait for the previous connection's subscription to be released before
+	 * reusing the struct it lives in.
+	 *
+	 * Assigning the fields below is safe on its own — nothing is zeroed —
+	 * but subscribing while the old entry is still linked would put one
+	 * `node` on two lists and break the tail of the first. The host tells
+	 * us when it has let go (notify_cb with data == NULL), so this waits
+	 * for that rather than guessing at a delay.
+	 *
+	 * Bounded, and a timeout is reported rather than pushed through: an
+	 * attempt refused with -EBUSY costs one retry, and the alternative is
+	 * corrupting a list the Bluetooth host walks on every disconnect.
+	 */
+	for (int i = 0; sub_linked_ && i < 60; i++) {
+		if (i == 0) {
+			LOG_WRN("previous subscription not released yet — "
+				"waiting before reusing it");
+		}
+		k_sleep(K_MSEC(50));
+	}
+	if (sub_linked_) {
+		/*
+		 * Take it back rather than give up for the rest of the boot.
+		 *
+		 * bt_gatt_unsubscribe() works by pointer identity on *this*
+		 * connection's list only: 0 means it was there and is now
+		 * gone, and anything else means it belongs to some other peer
+		 * and is not ours to touch. So this is safe in the one case it
+		 * can help and a no-op in the one where meddling would corrupt
+		 * a list. It costs a CCC write we are about to make again.
+		 *
+		 * The reason for having it at all is Trap 14's rule: a failure
+		 * whose consequence is "this device cannot flash anything until
+		 * someone power-cycles it" gets a recovery path, not a log
+		 * line. The bonded-subscription retention that produced exactly
+		 * that is fixed below, at its cause; this is the net under any
+		 * future way of arriving at the same place.
+		 */
+		LOG_WRN("the host still holds the last subscription after 3 s — "
+			"reclaiming it");
+		if (bt_gatt_unsubscribe(conn_, &sub_params_) == 0) {
+			sub_linked_ = false;
+		}
+	}
+	if (sub_linked_) {
+		LOG_ERR("the last subscription belongs to another link and "
+			"cannot be reclaimed; refusing to reuse it");
+		return -EBUSY;
+	}
+
+	/*
+	 * **Deliberately not memset().**
+	 *
+	 * This zeroed the whole struct, and that is what crashed a board mid
+	 * update loop:
+	 *
+	 *   PREVIOUS RUN CRASHED: unknown (reason 35) in thread BT RX WQ
+	 *     pc=0x00000000 lr=0x0003a435          <- gatt.c:3443
+	 *
+	 * `reason 35` is K_ERR_ARM_USAGE_ILLEGAL_EPSR — the Thumb bit clear
+	 * on a branch target, which is what a call through a NULL function
+	 * pointer looks like on Cortex-M — and the LR lands on
+	 * `params->notify(conn, params, NULL, 0)` inside `gatt_sub_remove()`.
+	 * A branch to address zero: the host was removing a subscription whose
+	 * `notify` we had already zeroed.
+	 *
+	 * The host keeps `sub_params_.node` on its own list until the
+	 * connection's ATT channel detaches, which is not when *we* see the
+	 * disconnect — Trap 3 again. Between those two moments the runner had
+	 * already rescanned, reconnected, rediscovered and arrived back here to
+	 * set up the next attempt. One memset later, the old list held a
+	 * NULL callback and a zeroed `next`.
+	 *
+	 * So: assign the fields, never clear them. `notify` and `subscribe`
+	 * always point at real functions, and `node` belongs to the host.
+	 *
+	 * **That was only half of it**, and the crash came straight back on
+	 * four boards. The other half is that this struct used to live in a
+	 * Session on the dfu_runner thread's stack, so it stopped existing
+	 * when the run returned — with the host's pointer still in it, and
+	 * with the flag below, which is supposed to notice that, on the same
+	 * dead frame. GattLink now has static storage; see the comment on
+	 * `Session::link_` in legacy_dfu.cpp. Both halves are needed: this one
+	 * keeps the fields honest, that one keeps them in existence.
+	 */
 	sub_params_.notify = notify_cb;
 	sub_params_.subscribe = subscribe_cb;
 	sub_params_.value = BT_GATT_CCC_NOTIFY;
 	sub_params_.value_handle = h_.control_point;
 	sub_params_.ccc_handle = h_.control_point_ccc;
+
+	/*
+	 * **VOLATILE, and this is not a detail.**
+	 *
+	 * Zephyr only takes a subscription off its list on disconnect if the
+	 * peer is *not* bonded (gatt.c, remove_subscriptions()):
+	 *
+	 *   if (!bt_le_bond_exists(conn->id, &conn->le.dst) ||
+	 *       atomic_test_bit(params->flags, BT_GATT_SUBSCRIBE_FLAG_VOLATILE))
+	 *
+	 * That is the spec — a bonded client's CCC is meant to persist on the
+	 * server, so the host keeps the entry and does not re-write it. For us
+	 * it is wrong twice over: our peer is a *bootloader*, which is about to
+	 * reset and remembers nothing, and the removal callback is the only
+	 * thing that ever clears sub_linked_. Without this flag, the first DFU
+	 * that pairs is also the last:
+	 *
+	 *   ble_pairing: paired with C1:DB:7B:EB:7A:0C (bonded, in RAM only)
+	 *   ...
+	 *   nordic_dfu: previous subscription not released yet — waiting
+	 *   nordic_dfu: the host still holds the last subscription after 3 s
+	 *   nordic_dfu: could not enable Control Point notifications (-16)
+	 *
+	 * — on every attempt from then on. **Only a reboot cleared it**, which
+	 * is the tell: `CONFIG_BT_SETTINGS` is off, so the keys live in RAM,
+	 * `bt_le_bond_exists()` goes false again at boot and the host resumes
+	 * releasing subscriptions. A device that has to be power-cycled is the
+	 * one thing this device's operator cannot do (Trap 11, Trap 14).
+	 *
+	 * The flag says what is true: the subscription is not saved on the
+	 * server side, so remove it at disconnect and let us ask again.
+	 */
+	atomic_set_bit(sub_params_.flags, BT_GATT_SUBSCRIBE_FLAG_VOLATILE);
+
+	/*
+	 * The host's own bookkeeping bits, cleared because this struct is now
+	 * static and outlives the connection that set them (see
+	 * `Session::link_`). WRITE_PENDING left over from a CCC write that a
+	 * disconnect interrupted would describe a response that can never
+	 * arrive. They were free before only because the struct was reborn on
+	 * a fresh stack frame each run — which is exactly the property that
+	 * had to go.
+	 */
+	atomic_clear_bit(sub_params_.flags, BT_GATT_SUBSCRIBE_FLAG_WRITE_PENDING);
+	atomic_clear_bit(sub_params_.flags, BT_GATT_SUBSCRIBE_FLAG_SENT);
 
 	att_err_ = 0;
 	k_sem_reset(&op_sem_);
@@ -392,11 +536,13 @@ int GattLink::subscribe_control_point()
 	int rc = bt_gatt_subscribe(conn_, &sub_params_);
 	if (rc == -EALREADY) {
 		subscribed_ = true;
+		sub_linked_ = true;
 		return 0;
 	}
 	if (rc != 0) {
 		return rc;
 	}
+	sub_linked_ = true;
 
 	rc = wait(&op_sem_, CONFIG_NORDIC_LEGACY_DFU_GATT_TIMEOUT_MS);
 	if (rc != 0) {
@@ -412,7 +558,17 @@ int GattLink::subscribe_control_point()
 void GattLink::unsubscribe_control_point()
 {
 	if (subscribed_ && conn_ != nullptr && connected_) {
-		(void)bt_gatt_unsubscribe(conn_, &sub_params_);
+		/*
+		 * A clean unsubscribe takes the node off the host's list
+		 * synchronously — and on the last-subscription path it does so
+		 * *without* calling notify(), so nothing else would ever clear
+		 * sub_linked_. Leaving it set would wedge every later run on
+		 * the -EBUSY in subscribe_control_point(): a permanent failure
+		 * produced by the tidy path rather than the untidy one.
+		 */
+		if (bt_gatt_unsubscribe(conn_, &sub_params_) == 0) {
+			sub_linked_ = false;
+		}
 	}
 	subscribed_ = false;
 }

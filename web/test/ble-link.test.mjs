@@ -64,6 +64,45 @@ t("and says why the other one is untouchable",
 t("it is restricted to LE connections",
   /info\.type\s*!=\s*BT_CONN_TYPE_LE/.test(tport));
 
+/*
+ * --- not every conn object is a link ------------------------------------
+ *
+ * `bt_conn_foreach()` walks every slot in `acl_conns[]` and hands over
+ * anything with a reference; it does not filter on state. So the enumeration
+ * includes the placeholder a connectable advertiser reserves before any peer
+ * exists — `bt_conn_add_le(adv->id, BT_ADDR_LE_NONE)` in
+ * `le_adv_start_add_conn()`, which never assigns `role`, so a zeroed slot
+ * reads back as **BT_CONN_ROLE_CENTRAL (0)**, a value nothing ever wrote.
+ *
+ * Without the address check the sweep found "a central link to
+ * FF:FF:FF:FF:FF:FF" before every DFU attempt, could not disconnect it (that
+ * state falls to bt_conn_disconnect's `default: return -ENOTCONN`), and burned
+ * its full 20 x 100 ms behind 22 identical warnings.
+ *
+ * The address is the discriminator and not the state, because a stuck
+ * *initiator* is also "connecting" and is precisely what Trap 11 needs this
+ * sweep to cancel — but it always has a peer, since nothing here uses
+ * bt_conn_le_create_auto() or directed advertising.
+ */
+t("the advertiser's own placeholder is not mistaken for a link",
+  /bt_addr_le_eq\(info\.le\.dst, BT_ADDR_LE_NONE\)[\s\S]{0,40}return;/.test(tport));
+t("...and a conn already going away is left alone",
+  /info\.state == BT_CONN_STATE_DISCONNECTED/.test(tport) &&
+  /info\.state == BT_CONN_STATE_DISCONNECTING/.test(tport));
+
+/* Zephyr's own source for both halves, so a rename or a re-plumb upstream
+ * fails here rather than silently reinstating the spin. */
+{
+  let adv_c = "";
+  try { adv_c = read("zephyr/subsys/bluetooth/host/adv.c"); } catch { /* not checked out */ }
+  if (!adv_c) {
+    console.log("  skip  zephyr/ not checked out; advertiser placeholder not cross-checked");
+  } else {
+    t("Zephyr still gives a connectable advertiser a peerless conn",
+      /bt_conn_add_le\(adv->id, BT_ADDR_LE_NONE\)/.test(adv_c));
+  }
+}
+
 /* --- the sweep runs before every attempt -------------------------------- */
 
 /* Compared by position inside ble_find's body rather than by a bounded

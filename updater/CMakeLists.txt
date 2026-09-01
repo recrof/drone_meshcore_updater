@@ -26,6 +26,7 @@ target_sources(app PRIVATE
   src/config.c
   src/antenna.c
   src/ble_scanner.c
+  src/ble_pairing.c
   src/survey.c
   src/pin_addr.c
   src/firmware_zip.c

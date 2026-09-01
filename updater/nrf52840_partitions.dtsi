@@ -26,21 +26,59 @@
  *
  * The 788K application region is split:
  *
- *   0x027000   48K  boot_partition   MCUboot
- *   0x033000  368K  slot0_partition  (image-0)
- *   0x08F000  368K  slot1_partition  (image-1)
- *   0x0EB000    4K  (alignment slack)
- *   0x0EC000   32K  storage_partition   unchanged
+ *   0x027000   40K  boot_partition   MCUboot
+ *   0x031000  388K  slot0_partition  (image-0)
+ *   0x092000  388K  slot1_partition  (image-1)
+ *   0x0F3000    4K  (alignment slack)
  *   0x0F4000   48K  the UF2 bootloader  unchanged
  *
- * 368 KB against a ~280 KB image is about 30% headroom, which is thinner than
- * the nRF54L's 896 KB slots and is the real cost of this board: 788 KB has to
- * hold a bootloader and two copies of the application. If the image ever
- * outgrows a slot, MCUboot's CMake says so at build time rather than at boot.
+ * 388 KB against a ~350 KB image is 90% full, which is still the thinnest
+ * margin of any board here — the nRF54L's 896 KB slots run at 36% — and is
+ * the real cost of this one: 788 KB has to hold a bootloader and two copies
+ * of the application. If the image ever outgrows a slot, MCUboot's CMake says
+ * so at build time rather than at boot.
  *
- * storage_partition does not move, for the same reason it does not move on
- * the nRF54L: CONFIG_SETTINGS=y with no explicit backend can land there, and
- * relocating it silently discards whatever a deployed device has stored.
+ * ---- Where the extra 20 KB per slot came from --------------------------
+ *
+ * The first version of this table was 48K/368K/368K with a 32K
+ * storage_partition above it, and it left the board at 95% full once
+ * CONFIG_BT_SMP arrived. Three reclaims, none of which cost a capability:
+ *
+ *   - **storage_partition, 32K, was never written.** The comment here used to
+ *     say it must not move because "CONFIG_SETTINGS=y with no explicit backend
+ *     can land there" — which is true of the NVS backend and is not what this
+ *     build has. `CONFIG_SETTINGS_FILE=y` picks the *file* backend, at
+ *     `CONFIG_SETTINGS_FILE_PATH="/settings/run"` — a path that does not exist
+ *     on this device at all, since the only mount is /lfs1. Nothing in
+ *     updater/src/ calls settings_* either, and BT_SETTINGS is off because
+ *     bonding is (see prj.conf). So there was nothing on it to discard: the
+ *     reasoning was right about NVS and wrong about this build.
+ *   - **MCUboot had 48K for a 33,892 B image.** 40K leaves ~7 KB of headroom,
+ *     which is more than that image has moved in the life of this project.
+ *   - **4K of alignment slack** above slot1, which is still there because the
+ *     two slots must be equal and page-aligned; 0xC3000 does not halve onto a
+ *     4 KB boundary.
+ *
+ * **This moved slot0 from 0x33000 to 0x31000**, so a board carrying the old
+ * layout needs a full merged.uf2 rather than an OTA — an OTA writes slot1,
+ * and the old slot1 is not where the new MCUboot looks. Free while nothing is
+ * deployed; do not repeat it once something is.
+ *
+ * ---- What was deliberately not taken ------------------------------------
+ *
+ * The 156 KB below 0x027000 is the factory MBR + SoftDevice S140 7.3.0, and
+ * Zephyr uses none of it — which makes it look like the obvious prize, four
+ * times the size of everything reclaimed above. **It is reachable and it is
+ * still a trap.** Adafruit's bootloader picks the application's start at *run
+ * time*: `CODE_REGION_1_START` is `is_sd_existed() ? SD_SIZE_GET(MBR_SIZE) :
+ * MBR_SIZE`, so a board whose SoftDevice has been erased really does hand the
+ * region from 0x1000 to the application. But the decision is made by the
+ * board, not by the image, so an image linked for 0x1000 is silently wrong on
+ * any board that still has its SoftDevice: it flashes cleanly, and the
+ * bootloader then jumps to 0x27000 and runs the SoftDevice instead. That is
+ * one fleet-wide provisioning step, one un-checkable precondition, and one
+ * failure mode that looks like a dead board. See web/js/lib/nordic-dfu-serial.js,
+ * which documents the same run-time decision from the flashing side.
  *
  * `boot_partition` is *deleted and redefined*, not resized. The label is
  * MCUboot's own hook — its image links at whatever `boot_partition` says —
@@ -55,22 +93,25 @@
 
 /delete-node/ &code_partition;
 /delete-node/ &boot_partition;
+/* Reclaimed into the slots — see above. Nothing on this device ever wrote it:
+ * the settings backend here is CONFIG_SETTINGS_FILE, not NVS. */
+/delete-node/ &storage_partition;
 
 &flash0 {
 	partitions {
 		boot_partition: partition@27000 {
 			label = "mcuboot";
-			reg = <0x00027000 DT_SIZE_K(48)>;
+			reg = <0x00027000 DT_SIZE_K(40)>;
 		};
 
-		slot0_partition: partition@33000 {
+		slot0_partition: partition@31000 {
 			label = "image-0";
-			reg = <0x00033000 DT_SIZE_K(368)>;
+			reg = <0x00031000 DT_SIZE_K(388)>;
 		};
 
-		slot1_partition: partition@8f000 {
+		slot1_partition: partition@92000 {
 			label = "image-1";
-			reg = <0x0008f000 DT_SIZE_K(368)>;
+			reg = <0x00092000 DT_SIZE_K(388)>;
 		};
 
 		/* The Adafruit UF2 bootloader. Read-only and never written by

@@ -139,6 +139,57 @@ static const char *xtensa_cause_str(uint32_t cause)
 	}
 }
 
+/*
+ * The arch-specific half of `reason`, which used to print as "unknown".
+ *
+ * **This is not cosmetic and the numbers are not guessable.**
+ * `K_ERR_ARCH_START` is **16**, not 32, and the arm enum
+ * (zephyr/arch/arm/arch.h) runs contiguously from there — so a report of
+ * "reason 35" was read as `K_ERR_ARM_MEM_DATA_ACCESS` when it is in fact
+ * `K_ERR_ARM_USAGE_ILLEGAL_EPSR`, and a whole write-up carried the wrong
+ * fault name. The two say different things: a MemManage is a bad *address*,
+ * while ILLEGAL_EPSR is the Thumb bit clear on a branch target — which is
+ * exactly what a call through a NULL function pointer looks like, and is
+ * better evidence than the name it was mistaken for.
+ *
+ * Naming them here means the log says it once, correctly, instead of each
+ * reader re-deriving it from a header they have to find first.
+ */
+#if defined(CONFIG_CPU_CORTEX_M)
+static const char *arm_reason_str(uint32_t reason)
+{
+	switch (reason) {
+	/* MemManage */
+	case K_ERR_ARM_MEM_GENERIC:             return "MPU: generic";
+	case K_ERR_ARM_MEM_STACKING:            return "MPU: stacking (stack overflow)";
+	case K_ERR_ARM_MEM_UNSTACKING:          return "MPU: unstacking";
+	case K_ERR_ARM_MEM_DATA_ACCESS:         return "MPU: data access";
+	case K_ERR_ARM_MEM_INSTRUCTION_ACCESS:  return "MPU: instruction access";
+	/* BusFault */
+	case K_ERR_ARM_BUS_GENERIC:             return "bus: generic";
+	case K_ERR_ARM_BUS_STACKING:            return "bus: stacking";
+	case K_ERR_ARM_BUS_UNSTACKING:          return "bus: unstacking";
+	case K_ERR_ARM_BUS_PRECISE_DATA_BUS:    return "bus: precise data access "
+						       "(a wild pointer)";
+	case K_ERR_ARM_BUS_IMPRECISE_DATA_BUS:  return "bus: imprecise data access";
+	case K_ERR_ARM_BUS_INSTRUCTION_BUS:     return "bus: instruction fetch";
+	/* UsageFault */
+	case K_ERR_ARM_USAGE_GENERIC:           return "usage: generic";
+	case K_ERR_ARM_USAGE_DIV_0:             return "usage: divide by zero";
+	case K_ERR_ARM_USAGE_UNALIGNED_ACCESS:  return "usage: unaligned access";
+	case K_ERR_ARM_USAGE_STACK_OVERFLOW:    return "usage: STACK OVERFLOW";
+	case K_ERR_ARM_USAGE_NO_COPROCESSOR:    return "usage: no coprocessor";
+	case K_ERR_ARM_USAGE_ILLEGAL_EXC_RETURN:return "usage: illegal exception return";
+	case K_ERR_ARM_USAGE_ILLEGAL_EPSR:      return "usage: illegal EPSR — branched "
+						       "somewhere with the Thumb bit "
+						       "clear (a NULL function pointer "
+						       "does this)";
+	case K_ERR_ARM_USAGE_UNDEFINED_INSTRUCTION: return "usage: undefined instruction";
+	default:                                return NULL;
+	}
+}
+#endif
+
 static const char *reason_str(uint32_t reason)
 {
 	switch (reason) {
@@ -147,8 +198,18 @@ static const char *reason_str(uint32_t reason)
 	case K_ERR_STACK_CHK_FAIL:  return "STACK OVERFLOW";
 	case K_ERR_KERNEL_OOPS:     return "kernel oops";
 	case K_ERR_KERNEL_PANIC:    return "kernel panic";
-	default:                    return "unknown";
+	default:                    break;
 	}
+#if defined(CONFIG_CPU_CORTEX_M)
+	{
+		const char *arm = arm_reason_str(reason);
+
+		if (arm != NULL) {
+			return arm;
+		}
+	}
+#endif
+	return "unknown";
 }
 
 /*
@@ -178,6 +239,17 @@ void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 	if (esf != NULL) {
 		s_rec.pc = esf->basic.pc;
 		s_rec.lr = esf->basic.lr;
+		/*
+		 * The stacked xPSR is the *pre-fault* status word, so its IPSR
+		 * field says which mode the faulting code was running in: 0 is
+		 * thread mode, anything else is the exception number that was
+		 * active. Recorded because the frame's address alone cannot
+		 * tell those apart, and reading it as "guard-region overflow"
+		 * has now been wrong three times — most recently on a fault
+		 * taken in interrupt context, where the frame is on the ISR
+		 * stack for a completely ordinary reason.
+		 */
+		s_rec.cause = esf->basic.xpsr;
 	}
 #elif defined(CONFIG_XTENSA)
 	/*
@@ -301,6 +373,17 @@ void crash_record_report(void)
 		const uint32_t lo = s_rec.stack_start;
 		const uint32_t hi = s_rec.stack_start + s_rec.stack_size;
 		const bool     on_own_stack = (s_rec.frame >= lo && s_rec.frame < hi);
+#if defined(CONFIG_CPU_CORTEX_M)
+		/* IPSR, the low 9 bits of the stacked xPSR: 0 is thread mode,
+		 * anything else is the exception that was already active. */
+		const uint32_t ipsr = s_rec.cause & 0x1ffU;
+		const bool in_handler_mode = (ipsr != 0);
+#else
+		const uint32_t ipsr = 0;
+		const bool in_handler_mode = false;
+
+		ARG_UNUSED(ipsr);
+#endif
 
 		/*
 		 * Two different pictures, and reporting them as one is how the
@@ -322,6 +405,22 @@ void crash_record_report(void)
 			LOG_ERR("  stack 0x%08x + %u B, %u B headroom left "
 				"under the frame",
 				lo, s_rec.stack_size, s_rec.frame - lo);
+		} else if (in_handler_mode) {
+			/*
+			 * **Not an overflow, and saying so has cost time
+			 * three times now.** A fault taken in handler mode
+			 * stacks onto MSP, so the frame is on the interrupt
+			 * stack whatever the interrupted thread's own stack
+			 * looked like — and the thread named above is merely
+			 * whoever was running when the interrupt arrived, not
+			 * a participant.
+			 */
+			LOG_ERR("  stack 0x%08x + %u B — the frame is NOT on "
+				"it, but the fault was taken in handler mode "
+				"(exception %u): the frame is on the interrupt "
+				"stack and this thread is only who was "
+				"interrupted",
+				lo, s_rec.stack_size, ipsr);
 		} else {
 			LOG_ERR("  stack 0x%08x + %u B — the frame is NOT on it, "
 				"which is what a guard-region overflow looks "

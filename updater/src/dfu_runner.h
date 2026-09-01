@@ -27,8 +27,20 @@
  * here and is parsed by whichever transport claims it; see dfu_transport.h.
  * A pinned run uses a single transport, since a pin belongs to one of them or
  * to none.
+ *
+ * `passkey` NULL or "" falls back to config.txt's `ble_pin`. Otherwise it is
+ * the PIN the operator typed for this one target, and it wins — the same
+ * precedence `pin` has over `ble_name`, and for the same reason: whoever is
+ * looking at the device knows more than the config file does.
+ *
+ * **`pin` and `passkey` are unrelated things with confusingly similar names.**
+ * `pin` is an *address* — the peer picked out of a survey. `passkey` is the
+ * six digits a protected peer demands before it will answer. They are adjacent
+ * in this signature and must never be swapped; ble_pairing.h has why the
+ * config key is called `ble_pin` regardless.
  */
-int dfu_runner_start(const char *zip_path, const char *pin);
+int dfu_runner_start(const char *zip_path, const char *pin,
+		     const char *passkey);
 
 /* True if a DFU sequence is currently active. */
 bool dfu_runner_busy(void);

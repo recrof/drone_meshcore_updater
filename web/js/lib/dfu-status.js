@@ -36,6 +36,7 @@ export const STATE = {
   /* Appended, not inserted — see the note in dfu_status.h. It happens
      between DISCONNECTING and DONE despite the number. */
   VERIFYING: 11,
+  AWAITING_PIN: 12,
 };
 
 /* enum dfu_status_result */
@@ -54,6 +55,8 @@ export const RESULT = {
   FS_ERROR: 11,
   RETRIES_EXHAUSTED: 12,
   TARGET_REJECTED: 13,
+  AUTH_REQUIRED: 14,
+  AUTH_FAILED: 15,
 };
 
 /* Present tense, and phrased as what the device is doing rather than as the
@@ -71,6 +74,10 @@ export const STATE_LABEL = {
   [STATE.DONE]: "Complete",
   [STATE.FAILED]: "Failed",
   [STATE.VERIFYING]: "Checking that the target is running the new firmware",
+  /* Phrased as the thing the operator has to do, because it is the one
+   * state that stops until somebody does it — and the target is showing
+   * the answer only while this lasts. */
+  [STATE.AWAITING_PIN]: "Waiting for the PIN shown on the target",
 };
 
 /* Each of these is a real dead end someone has to act on, so they name the
@@ -93,7 +100,19 @@ export const RESULT_LABEL = {
   [RESULT.TARGET_REJECTED]: "the whole image was delivered, but the target is " +
     "still in its bootloader — it rejected the image, most likely on its own " +
     "CRC check. Re-check that the bundle matches this target and try again.",
+  /* Two labels, because the two ask for different things. Rolling them into
+   * one "authentication error" would send someone to correct a PIN they had
+   * never entered. */
+  [RESULT.AUTH_REQUIRED]: "the target will not talk unencrypted and no PIN was " +
+    "offered — set ble_pin under Config…, or flash it from the scanner and " +
+    "type the PIN when asked",
+  [RESULT.AUTH_FAILED]: "the target rejected the PIN",
 };
+
+/* Results the operator can answer by supplying a PIN. Named rather than
+ * compared inline: two call sites already ask this question and a third
+ * spelling of it is where the two would drift. */
+export const NEEDS_PIN = new Set([RESULT.AUTH_REQUIRED, RESULT.AUTH_FAILED]);
 
 /* States in which the device is actively working. DONE and FAILED are sticky
  * — they stay until the next run — so "is a DFU happening" cannot be "is the

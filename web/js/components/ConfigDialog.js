@@ -238,8 +238,14 @@ export default {
                 </button>
 
                 <template v-if="!f.editor">
+                  <!-- inputmode, not type="number": a PIN is a string of
+                       digits and not a quantity, so a spinner and a value that
+                       drops its leading zero would both be wrong. Absent on
+                       every other text field, where it binds to undefined and
+                       Vue omits the attribute. -->
                   <input v-if="f.type === 'text'" type="text" :id="'cfg-' + f.key"
                          v-model="values[f.key]" :maxlength="f.maxLength"
+                         :inputmode="f.inputmode"
                          :placeholder="f.placeholder" spellcheck="false">
 
                   <input v-else-if="f.type === 'int'" type="number" :id="'cfg-' + f.key"

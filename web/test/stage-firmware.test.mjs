@@ -428,6 +428,28 @@ t("STAGED_PART_NAME is derived from PART_LAYOUT",
       const clash = pairs.map(([slug]) => slug).filter(sl => commands.includes(sl));
       t("no board slug collides with a build.sh command", clash.length === 0,
         clash.join(","));
+
+      /*
+       * **A failed compile must not reach the stager.**
+       *
+       * `set -e` is suspended for everything inside `if ! run_one`, which is
+       * how `all` keeps going past one board — so without an explicit
+       * `|| return 1` a failed `west build` falls through to merge_hex, which
+       * succeeds, restages the *previous* build's artifacts under a fresh
+       * manifest entry, and returns 0. Seen for real: the ESP32-S3 failed to
+       * link and `./build.sh all` printed "all boards ok".
+       *
+       * It is the exact failure staging exists to prevent — a stale image
+       * served by a UI insisting it is the newest, with a matching version
+       * number, because the manifest is generated from the stale artifact
+       * too. And it is invisible: the output scrolls past and the summary
+       * line says everything is fine.
+       */
+      const buildsThenStages = [...script.matchAll(/west build [^\n]*\n\s*merge_hex/g)]
+        .filter(m => !/\|\|\s*return 1/.test(m[0]));
+      t("every build.sh path that stages checks the build first",
+        buildsThenStages.length === 0,
+        `${buildsThenStages.length} west build call(s) fall through to merge_hex`);
     }
 
     /* A board whose images are flashed as parts must publish where they go,

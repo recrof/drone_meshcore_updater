@@ -276,7 +276,15 @@ run_one() {
     build)
       shift || true
       ensure_esptool
-      west build -b "${BOARD}" "${APP}" --build-dir "${BUILD_DIR}" "$@"
+      # `|| return 1` is load-bearing. `set -e` is suspended for everything
+      # inside `if ! run_one`, which is how `all` keeps going past one board —
+      # so a failed compile falls straight through to merge_hex, which
+      # succeeds, restages the *previous* build's artifacts under a fresh
+      # manifest entry, and returns 0. The board then reports ok. Seen: the
+      # ESP32-S3 failed to link and `./build.sh all` printed "all boards ok".
+      # A stale artifact served by a UI insisting it is the newest is the one
+      # failure staging exists to prevent.
+      west build -b "${BOARD}" "${APP}" --build-dir "${BUILD_DIR}" "$@" || return 1
       merge_hex
       ;;
 
@@ -298,7 +306,7 @@ run_one() {
       sed -i.bak "s/^VERSION_TWEAK = ${old}/VERSION_TWEAK = ${new}/" "${V}" && rm -f "${V}.bak"
       echo "VERSION_TWEAK ${old} -> ${new}"
       ensure_esptool
-      west build -b "${BOARD}" "${APP}" --build-dir "${BUILD_DIR}"
+      west build -b "${BOARD}" "${APP}" --build-dir "${BUILD_DIR}" || return 1
       merge_hex
       ;;
     flash)
@@ -481,7 +489,10 @@ run_one() {
     *)
       # Pass-through for `-p`, `-t <target>`, etc.
       ensure_esptool
-      west build -b "${BOARD}" "${APP}" --build-dir "${BUILD_DIR}" "$@"
+      # `|| return 1` for the same reason as the `build` case above: a failure
+      # here would otherwise stage the previous build's artifacts and report
+      # success. This is the path `./build.sh all -p` takes.
+      west build -b "${BOARD}" "${APP}" --build-dir "${BUILD_DIR}" "$@" || return 1
       merge_hex
       ;;
   esac

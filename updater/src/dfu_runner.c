@@ -20,6 +20,7 @@
 
 #include "config.h"
 #include "ble_scanner.h"
+#include "ble_pairing.h"
 #include "dfu_transport.h"
 #include "firmware_zip.h"
 #include "firmware_map.h"
@@ -144,6 +145,14 @@ static char             s_path[DFU_PATH_MAX + 1];
  * room to spare, since a future transport may pin something longer. */
 #define DFU_PIN_MAX 40
 static char             s_pin[DFU_PIN_MAX + 1];
+/* The PIN the operator typed for this one target, empty to fall back to
+ * config.txt's `ble_pin`. Sized past a legal passkey deliberately — see
+ * APP_CONFIG_PIN_MAX; a wrong value has to arrive intact to be refused.
+ *
+ * Note the two neighbouring names mean unrelated things: `s_pin` above is the
+ * *address* of a pinned peer, `s_passkey` here is a credential. ble_pairing.h
+ * has why the config key is nevertheless called `ble_pin`. */
+static char             s_passkey[APP_CONFIG_PIN_MAX];
 
 /* How long a single transport gets to look, when there is more than one to
  * share the window with. Only used in that case — see find_target(). */
@@ -323,6 +332,12 @@ static void run_thread(void *a, void *b, void *c)
 	LOG_INF("DFU runner: cfg ble_name='%s' min_rssi=%d retries=%u",
 		cfg->ble_name, cfg->min_rssi, cfg->retries);
 
+	/* A PIN typed for this one target beats the fleet default, and for the
+	 * same reason a pinned address beats `ble_name`: the operator is
+	 * looking at the device and the config file is not. Also clears the
+	 * verdict from the previous run. */
+	ble_pairing_set_passkey(s_passkey[0] ? s_passkey : cfg->ble_pin);
+
 	/* Publish over GATT from here on. A browser watching this device has no
 	 * other way to tell a running transfer from a wedged one — the log
 	 * stream carries the detail, but only while someone is subscribed to it,
@@ -491,6 +506,31 @@ static void run_thread(void *a, void *b, void *c)
 				goto stopped;
 			}
 		}
+		/*
+		 * Authentication overrides whatever the transport concluded.
+		 *
+		 * A target that refuses an unencrypted link fails somewhere
+		 * downstream of that refusal — a characteristic that "went
+		 * missing", a link that dropped — and the transport reports
+		 * what it saw, which is true and useless. ble_pairing.c saw
+		 * the actual question, so its verdict wins.
+		 *
+		 * Straight to `fail`, not into the retry loop: every attempt
+		 * would ask the same peer the same question. On an unattended
+		 * `auto_flash` run that is the difference between one clear
+		 * report and five identical failures spread over a cooldown.
+		 */
+		int auth = ble_pairing_verdict();
+
+		if (r != DFU_OK && auth != DFU_STATUS_RESULT_NONE) {
+			LOG_ERR("DFU runner: %s",
+				auth == DFU_STATUS_RESULT_AUTH_REQUIRED
+					? "the target wants a PIN and none was offered"
+					: "the target rejected the PIN offered");
+			status_result = (enum dfu_status_result)auth;
+			goto fail;
+		}
+
 		switch (r) {
 		case DFU_OK:
 			LOG_INF("DFU runner: SUCCESS");
@@ -568,7 +608,8 @@ done:
 	k_mutex_unlock(&s_lock);
 }
 
-int dfu_runner_start(const char *zip_path, const char *pin)
+int dfu_runner_start(const char *zip_path, const char *pin,
+		     const char *passkey)
 {
 	/* NULL or "" selects auto-flash — the bundle is chosen from
 	 * ble_firmware_mapping once a target has been found.
@@ -586,6 +627,7 @@ int dfu_runner_start(const char *zip_path, const char *pin)
 	}
 	snprintf(s_path, sizeof(s_path), "%s", zip_path ? zip_path : "");
 	snprintf(s_pin,  sizeof(s_pin),  "%s", pin ? pin : "");
+	snprintf(s_passkey, sizeof(s_passkey), "%s", passkey ? passkey : "");
 	s_busy = true;
 
 	/* The radio is ours from here. survey_start() refuses while we are

@@ -21,7 +21,8 @@ import { inspectFirmware, isFirmwareName, TRANSPORT, transportForName,
          transportsFromMask, unsupportedReason }
   from "./lib/firmware-image.js";
 import { isLogPath } from "./lib/log-file.js";
-import { idleStatus, STATE as DFU_STATE } from "./lib/dfu-status.js";
+import { idleStatus, STATE as DFU_STATE, RESULT as DFU_RESULT, NEEDS_PIN }
+  from "./lib/dfu-status.js";
 
 export const smp = new SmpClient();
 
@@ -105,6 +106,10 @@ smp.addEventListener("disconnected", () => {
   deviceTransports.value = null;
   dfuStatus.value = idleStatus();
   dfuRate.value = 0;
+  /* A retry needs a link to be triggered over. Leaving the ask up would give
+   * the operator a dialog whose Send button cannot do anything. */
+  pinRequest.value = null;
+  lastRun = null;
   /* Stops the poll timer as well as the panel. Without this the interval
    * keeps firing against a dead link forever — harmless per tick, but it is
    * the poll that would otherwise silently keep running for the rest of the
@@ -145,12 +150,35 @@ smp.addEventListener("dfustatus", (e) => {
   if (next.active && !prev.active) {
     log(`DFU started on the device${next.file ? ` — ${next.file}` : ""}`);
   }
-  if (next.terminal && !prev.terminal) {
+  const ended = next.terminal && !prev.terminal;
+
+  if (ended) {
     log(`DFU ${next.ok ? "succeeded" : "failed"}: ${next.resultLabel}`,
         next.ok ? "ok" : "err");
   }
 
+  const asking = next.state === DFU_STATE.AWAITING_PIN &&
+                 prev.state !== DFU_STATE.AWAITING_PIN;
+
   dfuStatus.value = next;
+
+  /* Both asks are set *after* the assignment above, so the banner and the
+   * scanner panel have the run's real state before anything is rendered over
+   * them. Neither needs a macrotask boundary any more — the setTimeout that
+   * used to be here existed only to let the page paint before prompt() froze
+   * the main thread, and there is no prompt() on this path now.
+   *
+   * The live path renders off the state itself.
+   * What is logged is the moment this client *heard*, so a report of "the
+   * dialog was late" can be split into device-side and browser-side latency
+   * by comparing this line's timestamp with the device's own. */
+  if (asking) {
+    log(`${next.name || "the target"} is waiting for a PIN`, "warn");
+    /* A pairing held open now beats an offer to retry a run that is over:
+     * the digits on the target's screen belong to *this* pairing. */
+    pinRequest.value = null;
+  }
+  if (ended) offerPin(next);
 });
 
 smp.addEventListener("stream", (e) => {
@@ -344,6 +372,133 @@ export async function inspectFile(fullpath, size) {
   return fileInfo[fullpath];
 }
 
+/*
+ * The run this browser started, so a PIN can be offered for exactly that one.
+ *
+ * Kept here rather than passed through the status notification because the
+ * device does not know who asked: an auto_flash run, another browser, or this
+ * one all look identical on the wire. Cleared as soon as a terminal status is
+ * read, so a stale entry from an earlier flash cannot be re-triggered by
+ * somebody else's failure half an hour later.
+ */
+let lastRun = null;
+
+const rememberRun = (path, addr, label, pin = "") => {
+  lastRun = { path, addr, label, pin };
+};
+
+/*
+ * The target is displaying a PIN right now. PinDialog.js asks for it.
+ *
+ * These two are the whole client half of the live path: the dialog opens off
+ * `dfuStatus.state === AWAITING_PIN` on its own, so nothing here has to push
+ * it. That is deliberate — the first version called prompt() from the status
+ * handler, and a native modal is shown when the *browser* feels like it. From
+ * the field: the target displayed a PIN, no prompt, the PIN expired, and only
+ * then did the prompt appear, asking for a number that was already gone.
+ *
+ * A component renders on the frame it is asked to, cannot be deferred by a
+ * background tab, and does not block the main thread — which matters because
+ * this question has a 30 s clock that has to keep running behind it.
+ */
+export async function submitPin(pin) {
+  try {
+    const r = await smp.fsxSubmitPin(pin);
+    log(r?.taken === false ? "PIN was too late — the target stopped waiting"
+                           : "PIN sent", r?.taken === false ? "err" : "ok");
+    return r;
+  } catch (e) {
+    log(`PIN: ${e.message}`, "err");
+    return null;
+  }
+}
+
+/* Dismissing the dialog ends the pairing now rather than leaving the target
+ * displaying digits into a timeout nobody is watching. */
+export async function cancelPin() {
+  try {
+    await smp.fsxSubmitPin("");
+    log("PIN entry cancelled", "warn");
+  } catch (e) {
+    log(`PIN: ${e.message}`, "err");
+  }
+}
+
+/*
+ * A target refused the link. Ask for the PIN and run it again.
+ *
+ * Reactive on purpose: the device says whether a PIN is wanted, so nobody is
+ * asked for one when the target does not care — which is every target this
+ * project has flashed so far. The cost is one failed attempt before the
+ * question, and the firmware does not spend the retry budget on it (an
+ * authentication result is terminal), so that attempt is a single connection.
+ *
+ * Only for a run this browser started. A device flashing on its own has nobody
+ * at the keyboard by definition, and popping a prompt at whoever happens to be
+ * connected would be asking the wrong person.
+ */
+function offerPin(status) {
+  const run = lastRun;
+  lastRun = null;
+  if (!run || !NEEDS_PIN.has(status.result)) return;
+
+  /* A ref, not prompt().
+   *
+   * **This was the last prompt() on the PIN path and it was still firing**,
+   * over the top of the dialog that had replaced it. Two questions about the
+   * same six digits, from two different rendering systems, arriving in an
+   * order nobody could predict — the native one whenever the browser felt
+   * like showing it, which is the whole reason the live path stopped using
+   * it (see PinDialog.js). It read as random because it *was*: which one you
+   * saw first depended on whether the tab was frontmost.
+   *
+   * Both questions now go through the one dialog. */
+  pinRequest.value = {
+    ...run,
+    rejected: status.result === DFU_RESULT.AUTH_FAILED,
+  };
+}
+
+/*
+ * The retry ask: a run that ended asking for authentication, as opposed to a
+ * pairing being held open right now. PinDialog renders whichever is set.
+ *
+ * Kept apart from `dfuStatus` because it is this client's own bookkeeping —
+ * the device has finished and moved on, and a second browser watching the
+ * same device must not be asked to answer for a run it did not start.
+ */
+export const pinRequest = ref(null);
+
+/* Re-run the last flash with a PIN. */
+export async function submitRetryPin(pin) {
+  const run = pinRequest.value;
+  /* The dialog checks this too. Both, because the rule is the firmware's
+   * (`ble_pairing.c` accepts one to six digits and nothing else) and this is
+   * the last place it can be enforced before a run is spent finding out. */
+  if (!/^[0-9]{1,6}$/.test(pin)) {
+    log(`"${pin}" is not a PIN — one to six digits`, "err");
+    return;
+  }
+  pinRequest.value = null;
+  if (!run) return;
+
+  /* Before the trigger, not after: the run could in principle reach a terminal
+   * state while we are still awaiting the response, and a second rejection has
+   * to find this recorded or the operator gets one try and silence. */
+  rememberRun(run.path, run.addr, run.label, pin);
+  try {
+    await smp.fsxTriggerDfu(run.path, run.addr, pin);
+    log(`DFU re-triggered with a PIN: ${run.label}`, "ok");
+  } catch (e) {
+    lastRun = null;
+    log(`DFU trigger: ${e.message}`, "err");
+  }
+}
+
+export function cancelRetryPin() {
+  pinRequest.value = null;
+}
+
 export async function flashFile(fullpath) {
   /* A second, much cheaper check at flash time.
    *
@@ -395,10 +550,12 @@ export async function flashFile(fullpath) {
   if (!confirm(`Flash "${name}" to the DFU target?\n\n${how} ` +
                `Progress appears here as it happens; ` +
                `the device log has the detail.`)) return;
+  rememberRun(fullpath, "", name);
   try {
     await smp.fsxTriggerDfu(fullpath);
     log(`DFU triggered: ${fullpath}`, "ok");
   } catch (e) {
+    lastRun = null;
     log(`DFU trigger: ${e.message}`, "err");
   }
 }
@@ -700,6 +857,7 @@ export async function flashToTarget(fullpath, addr, label) {
                `Progress appears here as it happens; the device log has the detail.`)) {
     return false;
   }
+  rememberRun(fullpath, addr, who);
   try {
     await smp.fsxTriggerDfu(fullpath, addr);
     log(`DFU triggered: ${name} -> ${who}`, "ok");
@@ -709,6 +867,7 @@ export async function flashToTarget(fullpath, addr, label) {
     closeScanner();
     return true;
   } catch (e) {
+    lastRun = null;
     log(`DFU trigger: ${e.message}`, "err");
     return false;
   }
@@ -720,10 +879,12 @@ export async function autoFlash() {
                `against the rules in ble_firmware_mapping, and flash whichever ` +
                `bundle those rules select. Set the rules under Config… first.\n\n` +
                `Progress appears here as it happens; the device log has the detail.`)) return;
+  rememberRun("", "", "the target");
   try {
     await smp.fsxTriggerDfu("");
     log("auto-flash triggered — bundle chosen by ble_firmware_mapping", "ok");
   } catch (e) {
+    lastRun = null;
     log(`auto-flash: ${e.message}`, "err");
   }
 }

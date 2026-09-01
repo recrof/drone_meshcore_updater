@@ -28,11 +28,14 @@
 #include <zcbor_encode.h>
 #include <mgmt/mcumgr/util/zcbor_bulk.h>
 
+#include <errno.h>
 #include <string.h>
 #include <stdio.h>
 
 #include "fsx_mgmt.h"
 #include "firmware_inspect.h"
+#include "config.h"      /* APP_CONFIG_PIN_MAX */
+#include "ble_pairing.h"
 #include "dfu_runner.h"
 #include "survey.h"
 
@@ -415,10 +418,17 @@ static int fsx_trigger_dfu(struct smp_streamer *ctxt)
 
 	struct zcbor_string path_str = { 0 };
 	struct zcbor_string addr_str = { 0 };
+	struct zcbor_string pin_str = { 0 };
 	size_t decoded;
 	struct zcbor_map_decode_key_val dec[] = {
 		ZCBOR_MAP_DECODE_KEY_DECODER("path", zcbor_tstr_decode, &path_str),
 		ZCBOR_MAP_DECODE_KEY_DECODER("addr", zcbor_tstr_decode, &addr_str),
+		/* `pin` here is the *passkey*, while `addr` is what the rest of
+		 * the firmware calls a pin. The wire keys are named for what an
+		 * operator would call each — an address and a PIN — and the C
+		 * side keeps the two apart by never using the word twice in one
+		 * call; see ble_pairing.h. */
+		ZCBOR_MAP_DECODE_KEY_DECODER("pin", zcbor_tstr_decode, &pin_str),
 	};
 	if (zcbor_map_decode_bulk(zsd, dec, ARRAY_SIZE(dec), &decoded) != 0) {
 		return MGMT_ERR_EINVAL;
@@ -440,16 +450,68 @@ static int fsx_trigger_dfu(struct smp_streamer *ctxt)
 		return MGMT_ERR_EINVAL;
 	}
 
+	/* Absent `pin` falls back to config.txt's `ble_pin`. Oversized is
+	 * refused rather than clipped: a truncated PIN is a *wrong* PIN, and
+	 * the peer reports that as an authentication failure, which reads as
+	 * the operator having mistyped something they typed correctly. */
+	char pin[APP_CONFIG_PIN_MAX] = { 0 };
+	if (pin_str.len != 0 && !copy_path(pin, sizeof(pin), &pin_str)) {
+		return MGMT_ERR_EINVAL;
+	}
+
 	/* dfu_runner_start spawns a thread; returns quickly. Failures
 	 * (already busy, bad path) surface through the standard fs-error
 	 * `rc` field so the client can display them.
 	 */
-	int rc = dfu_runner_start(path, addr);
-	LOG_INF("TRIGGER_DFU path='%s' addr='%s' -> rc=%d", path, addr, rc);
+	int rc = dfu_runner_start(path, addr, pin);
+	/* The PIN is reported as present-or-not, never echoed. It reaches the
+	 * live log stream and the flash-backed log file, and there is no
+	 * reason for a credential to exist in either. */
+	LOG_INF("TRIGGER_DFU path='%s' addr='%s' pin=%s -> rc=%d", path, addr,
+		pin[0] ? "yes" : "no", rc);
 	if (rc < 0) {
 		smp_add_cmd_err(zse, FSX_MGMT_GROUP_ID, (uint16_t)-rc);
 	}
 	return MGMT_ERR_EOK;
+}
+
+/* ---------- submit_pin ---------- */
+static int fsx_submit_pin(struct smp_streamer *ctxt)
+{
+	zcbor_state_t *zse = ctxt->writer->zs;
+	zcbor_state_t *zsd = ctxt->reader->zs;
+
+	struct zcbor_string pin_str = { 0 };
+	size_t decoded;
+	struct zcbor_map_decode_key_val dec[] = {
+		ZCBOR_MAP_DECODE_KEY_DECODER("pin", zcbor_tstr_decode, &pin_str),
+	};
+	if (zcbor_map_decode_bulk(zsd, dec, ARRAY_SIZE(dec), &decoded) != 0) {
+		return MGMT_ERR_EINVAL;
+	}
+
+	/* Absent or empty means "cancel", which is what the operator dismissing
+	 * the prompt means. Oversized is refused rather than clipped, for the
+	 * same reason as everywhere else here: a truncated PIN is a wrong PIN,
+	 * and it burns the one pairing the target is displaying for. */
+	char pin[APP_CONFIG_PIN_MAX] = { 0 };
+	if (pin_str.len != 0 && !copy_path(pin, sizeof(pin), &pin_str)) {
+		return MGMT_ERR_EINVAL;
+	}
+
+	int rc = ble_pairing_submit(pin);
+
+	/* Never the digits. See fsx_trigger_dfu. */
+	LOG_INF("SUBMIT_PIN pin=%s -> rc=%d", pin[0] ? "yes" : "cancel", rc);
+
+	if (rc == -EINVAL) {
+		return MGMT_ERR_EINVAL;
+	}
+	/* -EALREADY is "nothing was waiting", which the client reads from
+	 * `taken` rather than from an error: the window closing is an ordinary
+	 * outcome, not a malformed request. */
+	return zcbor_tstr_put_lit(zse, "taken") && zcbor_bool_put(zse, rc == 0)
+		? MGMT_ERR_EOK : MGMT_ERR_EMSGSIZE;
 }
 
 /* ---------- stop_dfu ---------- */
@@ -583,6 +645,7 @@ static const struct mgmt_handler fsx_handlers[] = {
 	[FSX_MGMT_ID_INSPECT]     = { .mh_read = fsx_inspect,     .mh_write = NULL            },
 	[FSX_MGMT_ID_CAPS]        = { .mh_read = fsx_caps,        .mh_write = NULL            },
 	[FSX_MGMT_ID_SCAN]        = { .mh_read = NULL,            .mh_write = fsx_scan        },
+	[FSX_MGMT_ID_SUBMIT_PIN]  = { .mh_read = NULL,            .mh_write = fsx_submit_pin  },
 };
 
 static struct mgmt_group fsx_group = {
