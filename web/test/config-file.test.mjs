@@ -569,5 +569,77 @@ t("oversize file detected", encodedSize(serializeConfig(d, huge)) > CONFIG_MAX_B
   }
 }
 
+/* --- the narrow-screen editor -------------------------------------------
+ *
+ * Two rules that only exist on a phone, so nothing else in this suite can see
+ * them, and jsdom cannot either — it has no layout engine, and the markup is
+ * valid whichever way these fall.
+ */
+{
+  const rd = (rel) => readFileSync(new URL(rel, import.meta.url), "utf8");
+  const css = rd("../css/config.css");
+  const map = rd("../js/components/MappingEditor.js");
+  const narrow = css.slice(css.indexOf("@media (max-width: 640px)",
+                                       css.indexOf(".map-rule")));
+
+  /* The values keep the right margin they hold on a desktop. Left-aligned,
+     every row restarts at the left edge and they stop forming a column. */
+  t("the control column is end-justified on a narrow screen",
+    /\.cfg-row \.ctl \{[^}]*justify-self: stretch[^}]*justify-content: flex-end/s
+      .test(narrow));
+  t("and a text field takes the whole line",
+    /\.cfg-row input\[type=text\] \{[^}]*flex: 1 1 100%/.test(narrow));
+
+  /* An arrow means "these two, in this direction" and needs them side by
+     side. Once a rule stacks, it points at nothing — so there is a word that
+     replaces it, and exactly one of the pair may ever be visible. */
+  t("a mapping rule carries both the arrow and its stacked stand-in",
+    /class="arrow"/.test(map) && /class="lead lead-file"/.test(map));
+  t("the stand-in is hidden by default",
+    /\.map-rule \.lead-file \{ display: none; \}/.test(css));
+  t("and they swap on a narrow screen",
+    /\.map-rule \.arrow \{ display: none; \}/.test(narrow) &&
+    /\.map-rule \.lead-file \{ display: block; \}/.test(narrow));
+  t("each field gets a label of its own above it",
+    /\.map-rule \.lead \{ flex: 1 1 100%; \}/.test(narrow));
+
+  /* The unit belongs to the setting's name, not to the box. Trailing the
+     input its width varies per row — "dBm", "ms", "s" — so every field
+     started at a different left edge and a column of numbers that should be
+     scannable was ragged. Measured: with it moved, every number input shares
+     one left and one right edge at 360, 390 and 900. */
+  const dlg = rd("../js/components/ConfigDialog.js");
+  t("the unit is rendered beside the title",
+    /\{\{ f\.title \}\}<span class="unit" v-if="f\.unit">/.test(dlg));
+  t("and no longer trails the input",
+    !/<span class="unit" v-if="f\.unit">\{\{ f\.unit \}\}<\/span>/.test(dlg));
+  t("its style follows it into the label",
+    /\.cfg-row label \.unit \{/.test(css) && !/\.cfg-row \.ctl \.unit \{/.test(css));
+  /* The key moves into the disclosure rather than being dropped: a title, a
+     monospace key and an (i) do not share a line at 360px, but the key is
+     what you grep config.txt for, and the (i) button's tooltip does not exist
+     on a touch screen. Exactly one of the two copies may be visible. */
+  t("the key has a second home in the disclosure",
+    /class="key-echo">\{\{ f\.label \}\}/.test(dlg));
+  t("...hidden while the title line has room",
+    /\.cfg-help \.key-echo \{ display: none; \}/.test(css));
+  t("...and they swap on a narrow screen",
+    /\.cfg-row label \.key \{ display: none; \}/.test(narrow) &&
+    /\.cfg-help \.key-echo \{\s*display: block/.test(narrow));
+
+  /* The path is one fixed string that never changes, so in the header it is
+     furniture — but it is not furniture in "reading …" or "no … on the
+     device", which are the two places it tells you something. */
+  t("the header no longer repeats the config path",
+    !/<span class="path">\{\{ CONFIG_PATH \}\}<\/span>/.test(dlg));
+  t("...and it still names the file where that is the point",
+    (dlg.match(/\{\{ CONFIG_PATH \}\}/g) || []).length >= 2);
+
+  /* Every unit in the schema has to read as a parenthetical after a title. */
+  for (const f of CONFIG_SCHEMA.filter((x) => x.unit)) {
+    t(`  "${f.title} (${f.unit})" reads`, /^[a-zA-Z]{1,4}$/.test(f.unit), f.unit);
+  }
+}
+
 console.log(bad ? `\n${bad} FAILURES` : "\nall config-file tests passed");
 process.exit(bad ? 1 : 0);

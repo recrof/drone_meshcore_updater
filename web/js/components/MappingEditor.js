@@ -93,6 +93,11 @@ export default {
                spellcheck="false" placeholder="RAK"
                :aria-label="'Rule ' + (i + 1) + ' — BLE name fragment'">
         <span class="arrow">→</span>
+        <!-- The arrow's replacement when the rule stacks. An arrow says
+             "these two, in this direction" and needs them side by side; once
+             each field is on its own line it points at nothing. Both are in
+             the markup and CSS picks one, rather than a v-if on a width. -->
+        <span class="lead lead-file">flash</span>
         <input class="map-file" type="text" v-model="r.file" @input="push"
                spellcheck="false" placeholder="rak4631*.zip"
                :list="suggestions.length ? 'map-files' : null"

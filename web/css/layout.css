@@ -270,10 +270,21 @@ td.actions button:has(.icon),
   .dfu-subject { display: none; }
 }
 
-/* --- listing table --------------------------------------------- */
+/* --- listing table ---------------------------------------------
+ *
+ * Every rule below is scoped to .file-table, and that is not tidiness.
+ * These started as bare `table` / `thead` / `tbody td` selectors, which was
+ * true right up until a second table existed. The scanner's arrived and
+ * inherited all of it — most damagingly `tbody tr { display: grid }` from the
+ * narrow-screen block, which turns every cell into its own full-width row.
+ * On a phone the scanner rendered as a stack of one-cell rows with a header
+ * reading only "SIGNAL" (thead th:nth-child(2) is hidden here, and the
+ * scanner hides its own third), inconsistent borders, and most of the width
+ * unused. Nothing in the scanner's own stylesheet was wrong.
+ */
 main { flex: 1; overflow: auto; }
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-thead th {
+.file-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.file-table thead th {
   text-align: left;
   padding: 8px 14px 6px;
   color: var(--muted); font-weight: 500; font-size: 11px;
@@ -281,56 +292,76 @@ thead th {
   background: var(--bg); border-bottom: 1px solid var(--line);
   position: sticky; top: 0; z-index: 1;
 }
-tbody td {
+.file-table tbody td {
   padding: 9px 14px;
   border-bottom: 1px solid var(--line);
   vertical-align: middle;
 }
-tbody tr { position: relative; }
-tbody tr:hover td { background: var(--card); }
+.file-table tbody tr { position: relative; }
+.file-table tbody tr:hover td { background: var(--card); }
 
 /* Left stripe encodes entry type — dirs get an accent stripe, files stay quiet. */
-tbody td.name {
+.file-table tbody td.name {
   font-family: var(--mono); cursor: pointer; user-select: none;
   padding-left: 22px; position: relative;
 }
-tbody td.name::before {
+.file-table tbody td.name::before {
   content: ""; position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
   width: 4px; height: 16px; border-radius: 2px;
   background: var(--stripe-file);
 }
-tbody td.name.dir::before { background: var(--stripe-dir); }
-tbody td.name.dir::after  { content: "/"; color: var(--muted); }
+.file-table tbody td.name.dir::before { background: var(--stripe-dir); }
+.file-table tbody td.name.dir::after  { content: "/"; color: var(--muted); }
 
 /* The live config.txt opens the editor rather than downloading, so it gets its
    own stripe — same language as the dir stripe, different meaning. */
-tbody td.name.cfg::before { background: var(--warn); }
+.file-table tbody td.name.cfg::before { background: var(--warn); }
 /* Log files open the viewer. Same idea again: a stripe means "this row does
    something other than download". */
-tbody td.name.log::before { background: var(--muted); }
+.file-table tbody td.name.log::before { background: var(--muted); }
 
-td.size, td.actions {
+.file-table td.size, .file-table td.actions {
   color: var(--muted); font-variant-numeric: tabular-nums;
   font-family: var(--mono); font-size: 12px;
 }
-td.actions { text-align: right; white-space: nowrap; }
-td.actions button { margin-left: 5px; }
+.file-table td.actions { text-align: right; white-space: nowrap; }
+.file-table td.actions button { margin-left: 5px; }
 
 /* A phone cannot show name + size + three actions on one line without making
    all of them unhittable. Drop the size column, let the row breathe, and give
    the actions a line of their own. */
 @media (max-width: 640px) {
-  table { font-size: 14px; }
-  thead th:nth-child(2), tbody td.size { display: none; }
-  tbody td { padding: 10px 12px; }
-  tbody td.name { padding-left: 22px; }
-  tbody tr { display: grid; grid-template-columns: 1fr; }
-  tbody td.actions {
-    text-align: left; padding-top: 0; padding-bottom: 12px;
+  .file-table { font-size: 14px; }
+  .file-table thead th:nth-child(2), .file-table tbody td.size { display: none; }
+
+  /* The header cells give up their horizontal padding here, and the label
+     gets it back as a text-indent.
+     This looks like fussiness and is not. `tbody tr` below is display:grid,
+     which takes the row out of table layout — and a row that is no longer a
+     table-row is laid out against the table's *columns*, whose width the
+     still-table-formatted header cells decide. Their 14px of padding on each
+     side therefore came off every body row: the actions cell ended 28px short
+     of the table, and the buttons inside it sat 40px from the edge of the
+     screen against a 22px inset on the left. Measured in a real engine, at
+     360/390/430; it is 12px now, and the header label lines up with the file
+     names instead of sitting 8px left of them. text-indent because it moves
+     the text without touching the box. */
+  .file-table thead th { padding-left: 0; padding-right: 0; }
+  .file-table thead th:first-child { text-indent: 22px; }
+  .file-table tbody td { padding: 10px 12px; }
+  .file-table tbody td.name { padding-left: 22px; }
+  .file-table tbody tr { display: grid; grid-template-columns: 1fr; }
+  /* Right, not left. The actions get a line of their own here, and left-
+     aligned they sit directly under the file name — so the row reads as two
+     lines of the same sentence and the tap targets are hardest to reach
+     one-handed. Against the right edge they read as controls rather than as
+     continued text, and they land under the thumb. */
+  .file-table tbody td.actions {
+    text-align: right; padding-top: 0; padding-bottom: 12px;
     border-bottom: 1px solid var(--line);
   }
-  tbody td.name { border-bottom: none; }
-  td.actions button { margin: 0 6px 0 0; }
+  .file-table tbody td.name { border-bottom: none; }
+  .file-table td.actions button { margin: 0 0 0 6px; }
 }
 
 .empty {

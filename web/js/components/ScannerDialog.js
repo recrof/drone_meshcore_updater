@@ -247,9 +247,16 @@ export default {
 
           <table class="scan-table">
             <thead>
+              <!-- Name first, signal second. The name is what the operator
+                   is looking *for* — they came here with a device in mind and
+                   scan down the list matching a word. The signal is what they
+                   check once they have found the row, so it reads better as
+                   the answer to the name than as the thing standing in front
+                   of it. It also puts the two variable-width columns at the
+                   ends rather than sandwiching the name. -->
               <tr>
-                <th>Signal</th>
                 <th>{{ isBle ? "Device" : "Network" }}</th>
+                <th>Signal</th>
                 <th>{{ isBle ? "Address" : "Channel" }}</th>
                 <th></th>
               </tr>
@@ -268,7 +275,14 @@ export default {
               </tr>
               <template v-else v-for="r in rows" :key="r.id">
                 <tr class="scan-row" :class="[r.band, { hit: r.interesting }]">
-                  <td :title="r.bandLabel + ' — best ' + r.best + ' dBm over ' + r.n + ' sightings'">
+                  <td class="scan-name">
+                    {{ r.label }}
+                    <span class="scan-badge" v-if="r.dfu"
+                          title="Advertises the Nordic Legacy DFU service">DFU</span>
+                    <span class="scan-badge lock" v-if="!isBle && r.secure"
+                          title="Encrypted network">🔒</span>
+                  </td>
+                  <td class="scan-sig-cell" :title="r.bandLabel + ' — best ' + r.best + ' dBm over ' + r.n + ' sightings'">
                     <!-- The flex box is this span and not the <td>. A cell
                          given display:flex stops being a table-cell, so it
                          no longer stretches to the row's height or shares the
@@ -279,13 +293,6 @@ export default {
                       <Icon :name="r.bandIcon" :size="18"/>
                       <span class="scan-dbm">{{ r.rssi }}</span>
                     </span>
-                  </td>
-                  <td class="scan-name">
-                    {{ r.label }}
-                    <span class="scan-badge" v-if="r.dfu"
-                          title="Advertises the Nordic Legacy DFU service">DFU</span>
-                    <span class="scan-badge lock" v-if="!isBle && r.secure"
-                          title="Encrypted network">🔒</span>
                   </td>
                   <td class="scan-id">
                     <code v-if="isBle">{{ r.id }}</code>

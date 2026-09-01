@@ -163,9 +163,15 @@ export default {
     <div id="cfg-overlay" :class="{ shown: open }" v-if="open" @click.self="close">
       <div class="cfg-modal" role="dialog" aria-modal="true" aria-label="Updater configuration">
 
+        <!-- No path in this header. It is one fixed string that never changes,
+             so after the first read it is furniture — and it was taking the
+             width the two buttons need on a phone. It still appears where it
+             is load-bearing: while the file is being read, and when there is
+             none on the device. (Above the block, not inside it: a comment
+             between .cfg-head and the ✕ pushes them apart, and there is a
+             test that reads the distance between the two.) -->
         <div class="cfg-head">
           <span class="title">CONFIGURATION</span>
-          <span class="path">{{ CONFIG_PATH }}</span>
           <span class="grow"></span>
           <button class="small" @click="toggleAllHelp"
                   :title="allHelp ? 'Collapse every description' : 'Expand every description'">
@@ -203,8 +209,16 @@ export default {
               <div class="cfg-name">
                 <!-- Custom editors are a group of inputs, not one labelable
                      control, so they get an aria-label instead of a for=. -->
+                <!-- The unit belongs to the *name* of the setting, not to the
+                     box you type in. It used to trail the input, where its
+                     width varied per row ("dBm", "ms", "s") and pushed every
+                     field to a different left edge — so a column of numbers
+                     that should have been scannable was ragged instead.
+                     Beside the title it is also read before the value rather
+                     than after it, which is the order the question comes in:
+                     "minimum signal in what?" then "-75". -->
                 <label :for="f.editor ? null : 'cfg-' + f.key">
-                  {{ f.title }}
+                  {{ f.title }}<span class="unit" v-if="f.unit">({{ f.unit }})</span>
                   <span class="key">{{ f.label }}</span>
                 </label>
                 <button class="cfg-info" @click="toggleHelp(f)"
@@ -241,7 +255,6 @@ export default {
                     </option>
                   </select>
 
-                  <span class="unit" v-if="f.unit">{{ f.unit }}</span>
                 </template>
               </div>
 
@@ -256,6 +269,11 @@ export default {
               <div class="note err" v-if="errors[f.key]">{{ errors[f.key] }}</div>
 
               <div class="cfg-help" :id="'help-' + f.key" v-show="helpOpen(f)">
+                <!-- The config.txt key, for the screens too narrow to carry
+                     it on the title line. It is not decoration there — it is
+                     what you grep the file for — so it moves rather than
+                     being dropped, and CSS shows exactly one of the two. -->
+                <div class="key-echo">{{ f.label }}</div>
                 <div class="desc">{{ f.desc.replace(/\\s+/g, " ").trim() }}</div>
                 <div class="note" v-if="fieldNote(f)">{{ fieldNote(f) }}</div>
               </div>

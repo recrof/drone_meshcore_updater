@@ -93,12 +93,18 @@
   grid-column: 2; justify-self: end;
   display: flex; align-items: center; gap: 8px;
 }
-.cfg-row .ctl .unit {
-  font-family: var(--mono); font-size: 11px; color: var(--muted);
+/* Sits in the label now, next to the title — see ConfigDialog.js. Quieter
+   than the title and not monospace: the mono face in this row is reserved for
+   the config.txt key, which is a literal you type, and a unit is not. */
+.cfg-row label .unit {
+  font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 4px;
 }
 
 /* The folded-away half. */
 .cfg-help { grid-column: 1 / -1; padding-top: 2px; }
+/* The narrow-screen home of the config.txt key — hidden while the title line
+   still has room for it. See the media query below. */
+.cfg-help .key-echo { display: none; }
 .cfg-row .desc {
   color: var(--muted); font-size: 12px; line-height: 1.5; max-width: 72ch;
 }
@@ -196,6 +202,8 @@
 .map-rule .map-file { flex: 2 1 16ch; }
 .map-rule.incomplete input:placeholder-shown { border-color: var(--danger); }
 .map-rule .map-ops { display: flex; gap: 3px; margin-left: auto; }
+/* The mobile stand-in for the arrow — see the narrow-screen block. */
+.map-rule .lead-file { display: none; }
 .map-rule .map-ops button { padding: 1px 6px; font-size: 11px; }
 
 .map-foot {
@@ -394,7 +402,13 @@ a.flash-note { color: var(--accent); }
   font-size: 13px; color: var(--fg); margin: 0 0 10px;
 }
 
-.scan-table { width: 100%; border-collapse: collapse; }
+/* font-size is stated, not inherited. It used to come from layout.css's bare
+   `table { font-size: 13px }`, which was scoped to .file-table once the
+   listing's rules turned out to be styling this table too — correct, but it
+   left this one taking the body size, a point larger, which is what pushed
+   the fixed columns below over their widths on a phone. Every em length in
+   the narrow-screen block is measured against this number. */
+.scan-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .scan-table th {
   text-align: left; font-size: 11px; font-weight: 600; color: var(--muted);
   text-transform: uppercase; letter-spacing: 0.08em;
@@ -469,6 +483,51 @@ a.flash-note { color: var(--accent); }
   /* The address is the first thing worth dropping on a narrow screen: it is
      the longest column and the least useful for telling two rows apart. */
   .scan-table th:nth-child(3), .scan-table td.scan-id { display: none; }
+
+  /* It stays a table here — three columns fit on a phone once the address is
+     gone, and the whole value of this screen is comparing rows down a column.
+     Stated explicitly because it did not used to be: the listing's own narrow
+     rules were written against a bare `tbody tr` and turned every cell in
+     here into its own full-width row. They are scoped now (see layout.css),
+     and these give the columns their proportions rather than leaving three
+     variable-width cells to fight over the line. */
+  .scan-table { table-layout: fixed; }
+  /* Fixed rather than auto, because these names have no spaces in them —
+     "BLESmart_0000025128FFB2" is one word as far as a browser is concerned, so
+     auto layout widens the table to fit it and the whole panel scrolls
+     sideways. Fixed pins the two known-width columns and lets the name wrap
+     inside what is left. Wrapping and not an ellipsis: two devices in a room
+     often differ only in their last few characters. */
+  .scan-table td { padding: 8px 6px; }
+  .scan-table td.scan-name { overflow-wrap: anywhere; }
+
+  /* The two fixed columns, sized to their content with room around it rather
+     than to the smallest number that fits. Both were too tight: the table
+     overflowed the panel by a few pixels — enough for a horizontal scrollbar
+     — and the Flash button ended up against the signal reading on one side
+     and the edge of the screen on the other.
+
+     **In px, and that is not a style choice.** With table-layout: fixed the
+     column widths are taken from the *first row* — the header — so an `em`
+     here resolves against the `th`'s font-size, which is 11px, and not
+     against the 13px the cells below are set in. Written as 9em the actions
+     column came out 99px rather than the 117px intended, the 89px button plus
+     its 14px offset overflowed the cell by 4px, and the button ended up
+     8px from the edge of the screen instead of lining up with the panel's
+     12px gutter. Measured, not guessed: 18 + 6 + three mono digits is 50px,
+     and icon + gap + "Flash…" inside 6/12px of padding is 89px. */
+  .scan-table th:nth-child(2), .scan-table td.scan-sig-cell { width: 64px; }
+  .scan-table th:last-child, .scan-table td.actions { width: 106px; }
+
+  /* The outer edges of the table carry no padding of their own, so the first
+     column lines up with the lede above it and the button's right edge lines
+     up with everything else against the panel's 12px gutter. The gap the
+     button needs from the signal column comes from the cell's left padding,
+     where it is one number and not the sum of two. */
+  .scan-table th:first-child, .scan-table td.scan-name { padding-left: 0; }
+  .scan-table th:last-child, .scan-table td.actions {
+    padding-left: 14px; padding-right: 0;
+  }
 }
 
 /* --- touch / small screens -------------------------------------- */
@@ -487,15 +546,53 @@ a.flash-note { color: var(--accent); }
 
   /* Label above control rather than beside it — 28ch of monospace input does
      not share a line with a title on a 360px screen. */
+  /* Label above control rather than beside it — 28ch of monospace input does
+     not share a line with a title on a 360px screen.
+
+     The control keeps the right edge it has on a desktop, where it is the
+     second grid column. Dropping it to the left was the obvious thing to do
+     when it moved onto its own line and it was wrong: the eye then has to
+     start again at the left margin for every row, and the values stop forming
+     a column you can run down. Stretched and end-justified, so a checkbox or
+     a number sits under the right margin and a text field, which has nothing
+     to align with, takes the whole line. */
+  /* The config.txt key leaves the title line. A title, a monospace key and an
+     (i) is three things competing for one line at 360px, and the key is the
+     one a reader does not need in order to recognise the setting — it matters
+     when you go to edit the file by hand, which is not what this screen is
+     for. It moves into the disclosure rather than disappearing: dropping it
+     would leave no way at all to learn a key from a phone, and the (i)
+     button's tooltip does not exist on a touch screen. */
+  .cfg-row label .key { display: none; }
+  .cfg-help .key-echo {
+    display: block; font-family: var(--mono); font-size: 11px;
+    color: var(--muted); margin-bottom: 3px;
+  }
+
   .cfg-row { grid-template-columns: 1fr; gap: 8px; padding: 12px 0; }
-  .cfg-row .ctl { grid-column: 1; justify-self: start; flex-wrap: wrap; }
-  .cfg-row input[type=text] { width: 100%; max-width: none; }
+  .cfg-row .ctl {
+    grid-column: 1; justify-self: stretch; justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+  .cfg-row input[type=text] { flex: 1 1 100%; width: 100%; max-width: none; }
+  .cfg-row select { max-width: 100%; }
   .cfg-row input[type=number] { width: 8ch; }
   .cfg-row input[type=checkbox] { width: 22px; height: 22px; }
 
+  /* A rule is one sentence — "name contains X → flash Y" — and on one line it
+     reads as one. Stacked, it does not: the two connective words were left
+     where a single-line layout put them, so "name contains" became a heading
+     and the arrow ended up alone on a line of its own, pointing at nothing.
+     Each field gets its own label above it instead, and the arrow — which only
+     means anything *between* two things — is dropped for the word it stood
+     for. */
   .map-rule { gap: 6px; }
+  .map-rule .lead { flex: 1 1 100%; }
+  .map-rule .arrow { display: none; }
+  .map-rule .lead-file { display: block; }
   .map-rule .map-name, .map-rule .map-file { flex: 1 1 100%; }
-  .map-rule .map-ops { margin-left: 0; }
+  /* Right, with the values, for the same reason as .ctl above. */
+  .map-rule .map-ops { margin-left: auto; }
 
   .flash-step { gap: 8px; }
   .logv-bar { padding: 8px 12px; }

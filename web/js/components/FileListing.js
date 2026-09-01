@@ -98,7 +98,7 @@ export default {
   },
   template: /* html */ `
     <main>
-      <table>
+      <table class="file-table">
         <thead>
           <tr><th>Name</th><th>Size</th><th></th></tr>
         </thead>

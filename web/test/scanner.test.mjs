@@ -300,12 +300,79 @@ t("Icon.js defines radar", /\n  radar:/.test(icons));
     /@media \(max-width: 640px\)[\s\S]{0,1600}\.theme-menu \{[^}]*left: 0[^}]*right: auto/.test(layout));
   t("and can never be wider than the screen",
     /\.theme-menu \{[\s\S]{0,200}max-width: calc\(100vw/.test(layout));
+
+  /* table-layout: fixed takes its column widths from the *header* row, so an
+     `em` there resolves against the th's 11px and not the 13px of the cells
+     below. Written as 9em the actions column came out 99px instead of 117,
+     and the 89px Flash button overflowed its cell — which is what put it hard
+     against the edge of the screen. Measured in a real engine; the units are
+     the part a reader would "tidy" back. */
+  const cfg = read("web/css/config.css");
+  const fixedCols = [...cfg.matchAll(/\.scan-table th:(?:nth-child\(2\)|last-child)[^{]*\{([^}]*)\}/g)]
+    .map((m) => m[1]).filter((d) => /width:/.test(d));
+  t("the scanner's fixed columns are sized in px, not em",
+    fixedCols.length === 2 && fixedCols.every((d) => /width:\s*\d+px/.test(d)),
+    fixedCols.map((d) => d.trim()).join(" | "));
   /* Same class of check, same reason: the wrapped header lays out fine at any
      position, so only the rules say which position was intended. */
   t("the wrapped header breaks at one known place",
     /@media \(max-width: 640px\)[\s\S]{0,900}header \.grow \{ flex-basis: 100%/.test(layout));
   t("and keeps the action at the far end of its row",
     /@media \(max-width: 640px\)[\s\S]{0,1400}header \.conn \{ margin-left: auto/.test(layout));
+
+  /* --- the listing's rules must not reach the scanner's table -----------
+   *
+   * layout.css styles the file listing, and it did so with bare `table`,
+   * `thead th` and `tbody tr` selectors — correct right up until a second
+   * table existed. The scanner's inherited the lot. The worst of it was
+   * `tbody tr { display: grid; grid-template-columns: 1fr }` in the narrow
+   * block, which turns every cell into its own full-width row: on a phone the
+   * scanner rendered as a stack of one-cell rows, with a header reading only
+   * "SIGNAL" (layout.css hides th:nth-child(2), config.css hides the third),
+   * borders on cells that should not have had them, and most of the width
+   * unused. Nothing in config.css was wrong, which is what made it hard to
+   * place.
+   *
+   * jsdom cannot see this — it has no layout engine, and the markup is valid
+   * either way — so the selectors are the only thing there is to hold. */
+  {
+    /* Selectors only: everything before a { that is not inside a block. */
+    const decls = layout.replace(/\/\*[\s\S]*?\*\//g, "")
+                        .replace(/\{[^{}]*\}/g, "{}");
+    const sels = [...decls.matchAll(/(^|[};])\s*([^{};@]+?)\s*\{/gm)]
+      .flatMap((m) => m[2].split(",").map((x) => x.trim()))
+      .filter(Boolean);
+    /* Deliberately generic: a glyph beside a word centres the same way in
+       any table, and the scanner's Flash button wants it too. */
+    const SHARED = ["td.actions button:has(.icon)", ".flash-step button:has(.icon)"];
+    const leaks = sels.filter((sel) =>
+      !SHARED.includes(sel) && /^(table|thead|tbody|td|tr)\b/.test(sel));
+    t("no listing rule is written against a bare table selector",
+      leaks.length === 0, leaks.join(" | "));
+    t("the listing table is the thing they are scoped to",
+      /class="file-table"/.test(read("web/js/components/FileListing.js")));
+    /* A display:grid row is no longer a table-row, so it is sized against the
+       columns the *header* cells define — their horizontal padding comes off
+       every body row and pushes that row's own content inward. It cost the
+       listing 28px of width on a phone: the actions ended 40px from the edge
+       of the screen against a 22px inset on the left. Whoever restores that
+       padding for symmetry with the desktop rule will not see why the buttons
+       drifted, so it is written down here as well as in the comment. */
+    t("the narrow listing header carries no horizontal padding",
+      /@media \(max-width: 640px\)[\s\S]{0,2600}\.file-table thead th \{ padding-left: 0; padding-right: 0/.test(layout));
+  }
+
+  /* The user's order: what you are looking *for* first, the judgement about
+     it second. */
+  {
+    const heads = [...dialog.matchAll(/<th>([\s\S]*?)<\/th>/g)].map((m) => m[1].trim());
+    t("the device name is the first column", /Device/.test(heads[0] ?? ""), heads[0]);
+    t("the signal meter is the second", heads[1] === "Signal", heads[1]);
+    const cells = [...dialog.matchAll(/<td class="(scan-name|scan-sig-cell|scan-id|actions)"/g)]
+      .map((m) => m[1]);
+    t("and the cells are in the same order as the headers",
+      cells.join(",") === "scan-name,scan-sig-cell,scan-id,actions", cells.join(","));
+  }
 }
 
 /* --- every dialog closes the same three ways ---------------------------
