@@ -398,7 +398,7 @@ t("a subscription the host will not release is reclaimed, not surrendered",
 /* --- the client asks while the digits are still on screen --------------- */
 
 const pinDialog = read("web/js/components/PinDialog.js");
-const appJs     = read("web/js/app.js");
+const appJs     = read("web/js/App.js");
 
 /*
  * **Not prompt().** It was, and the reported failure is exactly what a native

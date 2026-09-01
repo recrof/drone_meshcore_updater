@@ -194,5 +194,78 @@ for (const file of files) {
   }
 }
 
+/*
+ * --- every path a test opens, spelled the way the file is spelled ---------
+ *
+ * **macOS cannot catch this and CI is the first thing that can.**
+ * The developer filesystem here is case-insensitive, so
+ * `read("web/js/app.js")` opens `App.js` quite happily and every local run is
+ * green. On the Linux runner it is ENOENT, and the suite does not fail a
+ * check — it dies mid-file with a stack trace, after the passing lines have
+ * already scrolled past, which reads like a broken runner rather than a typo.
+ *
+ * So the comparison cannot be "does this open": it has to walk the path one
+ * component at a time against readdirSync() and insist on an exact match.
+ * That check gives the same answer on both platforms, which is the only kind
+ * worth having here.
+ *
+ * The repo already has this rule for a device: `config.txt` is lowercase
+ * everywhere because LittleFS is case-sensitive and a mis-cased file is one
+ * the firmware silently never reads. This is the same rule for the host.
+ */
+{
+  const ROOT = resolve(WEB, "..");
+  const testDir = join(WEB, "test");
+
+  /* Any quoted string that looks like a repo-relative file. Crude on purpose,
+   * in the same spirit as the regex above: a name that resolves case-exactly
+   * is fine however it was written, and one that does not is the bug. */
+  const CANDIDATE = /["'`]((?:\.\.?\/)?[A-Za-z0-9_./-]+\.(?:mjs|js|json|css|html|c|h|cpp|hpp|conf|dtsi|overlay|txt|yml|S))["'`]/g;
+
+  /* Where a test's paths are resolved from: read() takes repo-relative,
+   * dynamic import() takes test-relative. Try both, and only complain when a
+   * path resolves under exactly one of them modulo case. */
+  const BASES = [ROOT, testDir];
+
+  const exactUnder = (base, rel) => {
+    let cur = base;
+    for (const part of rel.split("/")) {
+      if (part === "." || part === "") continue;
+      if (part === "..") { cur = dirname(cur); continue; }
+      let entries;
+      try { entries = readdirSync(cur); } catch { return null; }
+      if (entries.includes(part)) { cur = join(cur, part); continue; }
+      const near = entries.filter((e) => e.toLowerCase() === part.toLowerCase());
+      return near.length ? { wrong: part, right: near[0] } : null;
+    }
+    return { ok: true };
+  };
+
+  /* Comments are stripped first, the same reason ble-pairing.test.mjs and
+   * dfu-loop.test.mjs strip them: prose about a path is not a path. Without
+   * this, the block above fails on its own worked example — which it did on
+   * the first run, and is a fair demonstration that the check works. */
+  const codeOf = (src) => src
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+
+  for (const f of readdirSync(testDir).filter((n) => n.endsWith(".mjs")).sort()) {
+    const src = codeOf(readFileSync(join(testDir, f), "utf8"));
+    const wrong = [];
+    for (const m of src.matchAll(CANDIDATE)) {
+      const rel = m[1];
+      const tries = BASES.map((b) => exactUnder(b, rel));
+      /* Resolved exactly somewhere: fine. Nowhere at all: not a repo path
+       * (a generated name, a fixture written at run time, a URL fragment) and
+       * not this test's business. Only a case-near miss counts. */
+      if (tries.some((r) => r && r.ok)) continue;
+      const near = tries.find((r) => r && r.wrong);
+      if (near) wrong.push(`${rel} -> ${near.right}`);
+    }
+    t(`${f}: paths match the files on a case-sensitive filesystem`,
+      wrong.length === 0, wrong.join(", "));
+  }
+}
+
 console.log(bad ? `\n${bad} FAILURES` : "\nall self-call checks passed");
 process.exit(bad ? 1 : 0);
