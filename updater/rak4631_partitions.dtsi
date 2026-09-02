@@ -1,0 +1,124 @@
+/*
+ * Flash partition table for the RAKwireless RAK4631 (rak4631/nrf52840).
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Shared by the application image and the MCUboot image, the same reasoning as
+ * nrf52840_partitions.dtsi and rram_partitions.dtsi: sysbuild builds MCUboot
+ * as its own Zephyr image with its own devicetree, so one fragment is what
+ * stops the two disagreeing about where the slots are.
+ *
+ * ---- Why this is not nrf52840_partitions.dtsi --------------------------
+ *
+ * Same SoC, same bootloader family, **different application start**, and the
+ * difference is not ours to choose. Adafruit's bootloader hands the region
+ * above the MBR and SoftDevice to the application, and the RAK4631's
+ * bootloader is built against **SoftDevice S140 6.1.1** where the XIAO
+ * nRF52840's is built against 7.3.0:
+ *
+ *     RAK4631   MCU_SUB_VARIANT=nrf52840 -> SD_VERSION 6.1.1 -> 0x26000
+ *     XIAO      (Seeed ship 7.3.0)                           -> 0x27000
+ *
+ * Both numbers were read out of sources rather than assumed: the RAK figure
+ * from `Adafruit_nRF52_Bootloader` (the OTAFIX fork RAK ships, whose Makefile
+ * defaults SD_VERSION to 6.1.1 for this part) and confirmed twice over — by
+ * the linker script the previous Arduino updater used for this board
+ * (`ORIGIN = 0x26000`), and by Zephyr's own
+ * `nrf52840_partition_uf2_sdv6.dtsi`, which describes exactly this layout.
+ *
+ * **4 KB is a whole flash page, so getting it wrong is not a rounding error.**
+ * An image linked for 0x27000 and started at 0x26000 begins executing 4 KB
+ * before its vector table.
+ *
+ * ---- The table ---------------------------------------------------------
+ *
+ *   0x026000   40K  boot_partition   MCUboot, chainloaded by the UF2 loader
+ *   0x030000  388K  slot0_partition  (image-0)
+ *   0x091000  388K  slot1_partition  (image-1)
+ *   0x0F2000    8K  (slack)
+ *   0x0F4000   48K  the UF2 bootloader  unchanged
+ *
+ * 388 KB slots deliberately match the XIAO nRF52840's rather than growing to
+ * fill the extra 4 KB this board starts with. The two nRF52840 boards then
+ * have one image-size limit between them instead of two that differ by a page
+ * — and "does the image still fit" is a question worth having one answer to.
+ * The remaining 8 KB is slack above slot1; slots must be equal and
+ * page-aligned, and 0xC4000 does not halve onto a 4 KB boundary.
+ *
+ * ---- What this deletes and why -----------------------------------------
+ *
+ * The RAK4631 board includes `nordic/nrf52840_partition.dtsi`, which is the
+ * table for a board whose *only* bootloader is MCUboot at address 0. Every
+ * node in it is in the wrong place here, `boot_partition` most of all: MCUboot
+ * links at whatever `boot_partition` says, and at 0x0 that is on top of the
+ * MBR and SoftDevice the UF2 bootloader is still using. Both images would
+ * still build.
+ *
+ * `storage_partition` is deleted rather than kept for the same reason it was
+ * dropped on the XIAO: `CONFIG_SETTINGS_FILE` points at a path that does not
+ * exist on this device, nothing in updater/src/ calls settings_*, and
+ * BT_SETTINGS is off. There was never anything on it.
+ *
+ * Firmware bundles do not live in flash0 at all — they are on the 2 MB
+ * GD25Q16 on the RAK15001, which is what makes 388 KB slots workable.
+ */
+
+/delete-node/ &boot_partition;
+/delete-node/ &slot0_partition;
+/delete-node/ &slot1_partition;
+/delete-node/ &storage_partition;
+
+&flash0 {
+	partitions {
+		/*
+		 * The stock table this replaces uses `zephyr,mapped-partition`
+		 * on each child and leaves the parent bare. Ours is
+		 * `fixed-partitions`, matching every other board here — and it
+		 * is not cosmetic: NCS's `dt_partition_addr()` (used by
+		 * zip.cmake to place the DFU package) accepts a mapped
+		 * partition or a `fixed-partitions` subpartition and nothing
+		 * else. Redefining the children without saying which kind they
+		 * are fails configuration with "Node is not a (mapped)
+		 * partition or subpartition", pointing at slot0.
+		 */
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		/* The factory MBR + SoftDevice S140 6.1.1. Zephyr uses none of
+		 * it, and it is still not free: Adafruit's bootloader decides
+		 * the application start at *run time* from whether a
+		 * SoftDevice is present, so an image linked below 0x26000 is
+		 * silently wrong on any board that still has one. Declared
+		 * read-only so the region is visibly spoken for rather than
+		 * looking like 152 KB going spare. */
+		softdevice_partition: partition@0 {
+			label = "softdevice";
+			read-only;
+			reg = <0x00000000 0x00026000>;
+		};
+
+		boot_partition: partition@26000 {
+			label = "mcuboot";
+			reg = <0x00026000 DT_SIZE_K(40)>;
+		};
+
+		slot0_partition: partition@30000 {
+			label = "image-0";
+			reg = <0x00030000 DT_SIZE_K(388)>;
+		};
+
+		slot1_partition: partition@91000 {
+			label = "image-1";
+			reg = <0x00091000 DT_SIZE_K(388)>;
+		};
+
+		/* The Adafruit UF2 bootloader. Read-only and never written by
+		 * anything here; declared for the same reason as above. */
+		uf2_boot_partition: partition@f4000 {
+			label = "uf2";
+			read-only;
+			reg = <0x000f4000 DT_SIZE_K(48)>;
+		};
+	};
+};

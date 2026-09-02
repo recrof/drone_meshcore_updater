@@ -175,5 +175,46 @@ if (single === null) {
     /v-if="installReady"/.test(hdr) && /@click="installApp"/.test(hdr));
 }
 
+/* --- the cache version must move when the shell does --------------------- */
+
+/*
+ * sw.js has always said "bump CACHE when anything in PRECACHE changes", and
+ * that stayed a comment until it was broken in the obvious way: a component
+ * was added to PRECACHE, CACHE was not bumped, and an already-installed
+ * worker kept serving the shell it had. The new file was fetched from the
+ * network *because it was absent from the old cache*, so it rendered — and
+ * asked its cached, older Icon.js for a glyph that did not exist there yet.
+ * The result was `<path d="">`: an empty SVG, no error, no warning, and the
+ * text beside it updating normally.
+ *
+ * The shell is served cache-only precisely so that generations cannot mix
+ * (see sw.js), which means nothing self-heals on a later reload either. So
+ * the digest below covers every precached file's *contents*, not just the
+ * list of names — a changed Icon.js has to move it, or the check is only
+ * watching the half of the problem that was visible this time.
+ */
+{
+  const { createHash } = await import("node:crypto");
+
+  const listed = [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  const h = createHash("sha256");
+  for (const rel of listed.slice().sort()) {
+    /* "./" is the navigation entry; it resolves to index.html, which is
+       listed separately, and hashing it twice adds nothing. */
+    if (rel === "./") continue;
+    h.update(rel); h.update("\0");
+    h.update(readFileSync(join(WEB, rel))); h.update("\0");
+  }
+  const want = h.digest("hex").slice(0, 16);
+  const got = (sw.match(/const SHELL_DIGEST = "([0-9a-f]*)"/) || [])[1];
+
+  t("sw.js records a shell digest", typeof got === "string" && got.length === 16);
+  /* The hint is passed only on failure: this file's t() prints `extra`
+   * whatever the verdict, unlike the other suites'. */
+  t("...and it matches the files actually in the precache", got === want,
+    got === want ? "" :
+      `the shell changed — bump CACHE, then set: const SHELL_DIGEST = "${want}";`);
+}
+
 console.log(bad ? `\n${bad} FAILURES` : "\nall pwa tests passed");
 process.exit(bad ? 1 : 0);

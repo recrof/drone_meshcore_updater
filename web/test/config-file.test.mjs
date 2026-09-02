@@ -32,11 +32,17 @@ const FIRMWARE_DEFAULTS = {
   scan_timeout: 0,
   scan_debug: false, wifi_ota: true, pkt_gap_ms: 4, erase_pause_ms: 100,
   erase_inflight: 0,
-  /* Both default off, and both for the same reason rather than by habit:
-   * auto_flash arms the device at power-on, and ext_antenna points the radio
-   * at a connector that may have nothing on it. A wrong default for either is
-   * a device that misbehaves in the field with a config.txt that looks fine. */
-  auto_flash: false, ext_antenna: false,
+  /* All three default off, and for the same reason rather than by habit:
+   * auto_flash arms the device at power-on, ext_antenna points the radio at a
+   * connector that may have nothing on it, and fast_charge doubles the current
+   * into somebody's cell. A wrong default for any of them is a device that
+   * misbehaves in the field with a config.txt that looks fine.
+   *
+   * fast_charge off is also the *status quo*: nothing in this firmware ever
+   * drove the XIAO nRF52840's HICHG pin, so it has always charged at 50 mA.
+   * Defaulting it on would change hardware behaviour on every deployed device
+   * as a side effect of adding a key. */
+  auto_flash: false, ext_antenna: false, fast_charge: false,
 };
 const d = defaults();
 t("schema has exactly the firmware keys",

@@ -475,7 +475,18 @@ t("the WiFi survey stops when nobody polls",
   /SURVEY_IDLE_TIMEOUT_MS/.test(wifiC) && /k_work_reschedule/.test(wifiC));
 t("closing the panel stops the poll timer",
   /clearInterval/.test(store) && /closeScanner/.test(store));
-t("disconnecting stops it too", /disconnected[\s\S]{0,700}closeScanner\(\)/.test(store));
+/* The handler body, not a character window around the word "disconnected".
+ * The window was 700 and broke the first time an unrelated line was added to
+ * the same handler — a proximity heuristic measures how *near* the call is,
+ * where the claim is only that it is *in* there. */
+const disconnectHandler = (() => {
+  const i = store.indexOf('smp.addEventListener("disconnected"');
+  if (i < 0) return "";
+  const j = store.indexOf("\n});", i);
+  return j < 0 ? store.slice(i) : store.slice(i, j);
+})();
+t("the disconnect handler was found", disconnectHandler.length > 0);
+t("disconnecting stops it too", /closeScanner\(\)/.test(disconnectHandler));
 t("a DFU and a BLE survey cannot share the radio",
   /RADIO_SURVEY/.test(scanC) && /EBUSY/.test(scanH + scanC));
 

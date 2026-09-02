@@ -430,6 +430,76 @@ t("STAGED_PART_NAME is derived from PART_LAYOUT",
         clash.join(","));
 
       /*
+       * --- the matrix's geometry against the partition fragments --------
+       *
+       * `low`, `slot0` and `limit` in build.yml are the merged-image check's
+       * only reference points, and **the check is weak in one direction on
+       * purpose**: `assert slot0 in m` passes for any address inside the
+       * image, so a wrong slot0 does not fail — it stops testing anything.
+       *
+       * That is not hypothetical. The nRF52840 was repartitioned (slot0
+       * 0x33000 -> 0x31000) and this row was not, so CI went on asserting
+       * that *something* was at 0x33000, which was true and meaningless.
+       *
+       * The comparison is base-relative — `& 0xffffff` — because the MG24's
+       * flash is mapped at 0x08000000 while its fragment counts from 0.
+       * Both fragment shapes are read: the two nRF52840 boards declare a
+       * whole table (`boot_partition: partition@27000`), the nRF54L and MG24
+       * modify the board's nodes (`&slot0_partition { reg = <0x10000 ...> }`).
+       */
+      /* Matrix rows only: the Espressif job is a `west build -b` invocation
+       * with no geometry keys at all, because a parts board's offsets live in
+       * PART_LAYOUT and are checked separately (see below). */
+      const matrixRows = [...workflow.matchAll(
+        /^\s*- board:\s*([a-z0-9_]+\/[a-z0-9_/]+)\s*\n((?:\s+(?!- board:)\w+:.*\n|\s*#.*\n)*)/gm)]
+        .map(([, board, body]) => {
+          const field = (k) => new RegExp(`^\\s*${k}:\\s*"?([^"\\s#]+)`, "m").exec(body)?.[1];
+          return { board, slug: field("slug"), low: field("low"),
+                   slot0: field("slot0"), limit: field("limit") };
+        })
+        .filter(r => r.low && r.slot0);
+
+      t("the matrix rows were parsed", matrixRows.length >= 4,
+        `found ${matrixRows.length}`);
+
+      const FRAGMENTS = {
+        xiao_nrf54lm20a: "updater/rram_partitions.dtsi",
+        xiao_ble: "updater/nrf52840_partitions.dtsi",
+        rak4631: "updater/rak4631_partitions.dtsi",
+        xiao_mg24: "updater/mg24_partitions.dtsi",
+      };
+      /* An address for `<name>_partition`, written either way. Returns null
+       * when the fragment does not set it at all — which is a legitimate
+       * answer (the nRF54L leaves boot_partition exactly as the board has
+       * it), and is why a missing one is skipped rather than failed. */
+      const partAddr = (src, name) => {
+        const declared = new RegExp(`${name}_partition:\\s*partition@([0-9a-f]+)`).exec(src);
+        if (declared) return parseInt(declared[1], 16);
+        const modified =
+          new RegExp(`&${name}_partition\\s*\\{[^}]*reg\\s*=\\s*<\\s*(0x[0-9a-f]+)`, "i")
+            .exec(src);
+        return modified ? parseInt(modified[1], 16) : null;
+      };
+
+      for (const row of matrixRows) {
+        const rel = FRAGMENTS[row.slug];
+        if (!rel) {
+          t(`${row.slug}: build.yml row names a partition fragment`, false,
+            "add it to FRAGMENTS in this test");
+          continue;
+        }
+        const src = readFileSync(join(ROOT, rel), "utf8");
+        for (const [key, node] of [["low", "boot"], ["slot0", "slot0"]]) {
+          const want = partAddr(src, node);
+          if (want === null) continue;
+          const got = parseInt(row[key], 16) & 0xffffff;
+          t(`${row.slug}: build.yml ${key} matches ${rel.split("/").pop()}`,
+            got === want,
+            `yml 0x${got.toString(16)} vs dtsi 0x${want.toString(16)}`);
+        }
+      }
+
+      /*
        * **A failed compile must not reach the stager.**
        *
        * `set -e` is suspended for everything inside `if ! run_one`, which is

@@ -1,0 +1,19 @@
+/*
+ * Devicetree overlay for the MCUboot image on rak4631.
+ *
+ * Selected by updater/sysbuild/CMakeLists.txt — sysbuild only ever looks for
+ * one file name per image (sysbuild/<image>.overlay), which cannot serve six
+ * boards with different flash.
+ *
+ * Same two jobs as its XIAO counterpart: give the bootloader the same
+ * partition table the application uses, and link it into boot_partition
+ * rather than wherever the board's `zephyr,code-partition` points — which on
+ * this board is `slot0_partition` of a table the fragment below deletes.
+ */
+#include "../rak4631_partitions.dtsi"
+
+/ {
+	chosen {
+		zephyr,code-partition = &boot_partition;
+	};
+};

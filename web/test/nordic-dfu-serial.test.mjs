@@ -29,7 +29,7 @@
  */
 import {
   NordicSerialDfu, hciPacket, crc16, initPacket, padToWord, touchReset,
-  ADAFRUIT_DEVICE_TYPE, APP_START, DFU_PACKET_MAX_SIZE, MAX_IMAGE_SIZE,
+  ADAFRUIT_DEVICE_TYPE, BOOTLOADERS, bootloaderFor, DFU_PACKET_MAX_SIZE,
   IMAGE_ALIGNMENT, TOUCH_BAUD,
 } from "../js/lib/nordic-dfu-serial.js";
 import { SerialLink } from "../js/lib/serial.js";
@@ -91,7 +91,11 @@ t("crc16 matches the CCITT-FALSE check value",
 const OP = { INIT: 1, START: 3, DATA: 4, STOP: 5 };
 
 class FakeBootloader {
-  constructor({ skipAckAfter = 0, port = null } = {}) {
+  constructor({ skipAckAfter = 0, port = null,
+                maxImage = BOOTLOADERS.xiao_ble.maxImage } = {}) {
+    /* DFU_IMAGE_MAX_SIZE_FULL, which the real bootloader computes from its
+     * own CODE_REGION_1_START — so it is per board, not a constant. */
+    this.maxImage = maxImage;
     /* Needed so a rejected START can do what the real one does: disappear. */
     this.port = port;
     this.reset = false;
@@ -168,8 +172,8 @@ class FakeBootloader {
        * `APP_ERROR_CHECK` turns into a system reset, so neither is reportable
        * over the wire — the device just goes away. */
       if (sizes.some(n => n % 4 !== 0)) return this.die(`image size ${sizes[2]} is not word-sized`);
-      if (sizes.reduce((a, b) => a + b, 0) > MAX_IMAGE_SIZE) {
-        return this.die(`image is larger than the dual-bank ceiling`);
+      if (sizes.reduce((a, b) => a + b, 0) > this.maxImage) {
+        return this.die(`image is larger than DFU_IMAGE_MAX_SIZE_FULL`);
       }
       this.declared = { mode: u32(body, 4), appSize: sizes[2] };
     } else if (op === OP.INIT) {
@@ -227,7 +231,7 @@ async function dfuOver(boot) {
   boot.port = port;
   const link = new SerialLink(port);
   await link.open();
-  return { link, dfu: new NordicSerialDfu(link, () => {}) };
+  return { link, dfu: new NordicSerialDfu(link, () => {}, BOOTLOADERS.xiao_ble) };
 }
 
 /* Long enough to wrap the three-bit sequence counter and to cross a flash
@@ -313,8 +317,9 @@ t("padToWord leaves an already-aligned image alone", (() => {
   const boot = new FakeBootloader();
   const { link, dfu } = await dfuOver(boot);
   let err = null;
-  try { await dfu.flash(new Uint8Array(MAX_IMAGE_SIZE + 4)); } catch (e) { err = e; }
-  t("an image past the dual-bank ceiling is refused by the client", !!err);
+  try { await dfu.flash(new Uint8Array(BOOTLOADERS.xiao_ble.maxImage + 4)); }
+  catch (e) { err = e; }
+  t("an image past the board's ceiling is refused by the client", !!err);
   t("nothing was sent to the device", boot.declared === null && !boot.reset);
   t("and it names a route that has no such limit", /uf2|probe/i.test(err?.message ?? ""),
     (err?.message ?? "").slice(-80));
@@ -327,9 +332,21 @@ t("padToWord leaves an already-aligned image alone", (() => {
  * the bootloader's `master` branch — but the shipped bootloader is 0.6.1,
  * which has no dual-bank mode. Reading the version the board actually runs is
  * not optional. */
-t("everything this repo builds fits under the single-bank ceiling",
-  (48 + 368) * 1024 < MAX_IMAGE_SIZE,
-  `slots ${(48 + 368) * 1024} vs ceiling ${MAX_IMAGE_SIZE}`);
+for (const [name, bl] of Object.entries(BOOTLOADERS)) {
+  t(`${name}: everything this repo builds fits under the single-bank ceiling`,
+    (48 + 388) * 1024 < bl.maxImage,
+    `slots ${(48 + 388) * 1024} vs ceiling ${bl.maxImage}`);
+}
+
+/* A profile is required, not defaulted. The two boards write the application
+ * a flash page apart, so a default would put one board's image out of place on
+ * the other — cleanly, and with nothing on the wire to say so. */
+{
+  let err = null;
+  try { new NordicSerialDfu({}, () => {}); } catch (e) { err = e; }
+  t("constructing without a bootloader profile is refused", !!err,
+    (err?.message ?? "no error").slice(0, 60));
+}
 
 /* --- the init packet the vendor's fork requires ------------------------- */
 
@@ -413,19 +430,54 @@ t("everything this repo builds fits under the single-bank ceiling",
 
 /* --- the address the image is written at ------------------------------- */
 
-/* The protocol carries no addresses at all, so this constant is the only
- * thing tying `merged.hex` to where the bootloader puts it. It must agree
- * with the partition table, which is the file MCUboot is linked against. */
+/*
+ * The protocol carries no addresses at all, so these constants are the only
+ * thing tying `merged.hex` to where the bootloader puts it. Each must agree
+ * with its board's partition table, which is the file MCUboot is linked
+ * against.
+ *
+ * **Two boards, one page apart.** The XIAO nRF52840's bootloader is built
+ * against SoftDevice S140 7.3.0 and the RAK4631's against 6.1.1, so they start
+ * the application at 0x27000 and 0x26000. Getting them the wrong way round
+ * builds, flashes and verifies, and boots nothing.
+ */
 {
   const { readFileSync } = await import("node:fs");
   const { fileURLToPath } = await import("node:url");
   const { dirname, resolve, join } = await import("node:path");
   const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-  const dtsi = readFileSync(join(ROOT, "updater/nrf52840_partitions.dtsi"), "utf8");
-  const boot = /boot_partition:\s*partition@([0-9a-f]+)/.exec(dtsi);
-  t("APP_START matches where nrf52840_partitions.dtsi starts MCUboot",
-    parseInt(boot?.[1] ?? "0", 16) === APP_START,
-    `dtsi 0x${boot?.[1]} vs APP_START 0x${APP_START.toString(16)}`);
+
+  const FRAGMENTS = {
+    xiao_ble: "updater/nrf52840_partitions.dtsi",
+    rak4631: "updater/rak4631_partitions.dtsi",
+  };
+
+  /* Every board with this usb method needs an entry, and vice versa: an entry
+   * with no board is dead, and a board with no entry cannot be flashed. */
+  t("a fragment is named for every bootloader profile",
+    JSON.stringify(Object.keys(FRAGMENTS).sort()) ===
+      JSON.stringify(Object.keys(BOOTLOADERS).sort()),
+    `${Object.keys(FRAGMENTS)} vs ${Object.keys(BOOTLOADERS)}`);
+
+  for (const [name, rel] of Object.entries(FRAGMENTS)) {
+    const dtsi = readFileSync(join(ROOT, rel), "utf8");
+    const boot = /boot_partition:\s*partition@([0-9a-f]+)/.exec(dtsi);
+    const want = parseInt(boot?.[1] ?? "0", 16);
+    t(`${name}: appStart matches where ${rel.split("/").pop()} starts MCUboot`,
+      want === BOOTLOADERS[name].appStart,
+      `dtsi 0x${boot?.[1]} vs profile 0x${BOOTLOADERS[name].appStart.toString(16)}`);
+  }
+
+  /* The two must not be the same number: if a refactor ever collapses them,
+   * every assertion above still passes against one fragment read twice. */
+  t("the two boards really are a flash page apart",
+    BOOTLOADERS.xiao_ble.appStart - BOOTLOADERS.rak4631.appStart === 0x1000,
+    `${BOOTLOADERS.xiao_ble.appStart} - ${BOOTLOADERS.rak4631.appStart}`);
+
+  /* And the lookup refuses what it does not know rather than defaulting. */
+  t("an unknown board gets no profile", bootloaderFor("some_other_board") === null);
+  t("...and a known one does, by name from a full target",
+    bootloaderFor("rak4631/nrf52840") === BOOTLOADERS.rak4631);
 }
 
 console.log(bad ? `\n${bad} FAILURES` : "\nall nordic-dfu-serial tests passed");

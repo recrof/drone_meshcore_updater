@@ -7,31 +7,47 @@
  * swapping boards cannot silently swap the colours — which would turn
  * "DONE_FAIL red" into "DONE_FAIL blue" with nothing failing to build.
  *
- * ---- Two boards' worth of LED, and they are not the same shape ---------
+ * ---- Three boards' worth of LED, and they are not the same shape -------
  *
  * Both XIAO nRF parts carry an RGB LED as three gpio-leds, common-anode, so
- * the pin sinks and physical LOW is lit. The XIAO ESP32S3 has **one** LED.
- * That is not a smaller version of the same thing: colour is what separates
- * DONE_OK from DONE_FAIL, and on one LED both are simply "on".
+ * the pin sinks and physical LOW is lit. The RAK4631 has **two**, green and
+ * blue, and no red. The XIAO ESP32S3 has **one**. Those are not smaller
+ * versions of the same thing: colour is what separates DONE_OK from
+ * DONE_FAIL, and on one LED both are simply "on".
  *
- * So there are two renderers, chosen at build time by which aliases the board
- * supplies, and the mono one re-encodes the distinctions colour used to carry
- * as blink *patterns*:
+ * So there are three renderers, chosen at build time by which aliases the
+ * board supplies:
  *
- *   state          RGB board                    mono board
- *   IDLE           blue, slow blink ~1 Hz       slow blink ~1 Hz
- *   SMP_ACTIVE     blue, fast blink ~4 Hz       fast blink ~4 Hz
- *   DFU_RUNNING    green, 600 ms -> 30 ms       600 ms -> 30 ms
- *   DONE_OK        green solid                  solid
- *   DONE_FAIL      red solid                    blink-blink-pause
+ *   state          RGB board                two-colour            mono board
+ *   IDLE           blue, slow ~1 Hz         blue, slow ~1 Hz      slow ~1 Hz
+ *   SMP_ACTIVE     blue, fast ~4 Hz         blue, fast ~4 Hz      fast ~4 Hz
+ *   DFU_RUNNING    green, 600 -> 30 ms      green, 600 -> 30 ms   600 -> 30 ms
+ *   DONE_OK        green solid              green solid           solid
+ *   DONE_FAIL      red solid                BOTH, blink-blink-    blink-blink-
+ *                                           pause                 pause
  *
- * DONE_FAIL is the one that had to change. Everything else was already
- * distinguishable by rate alone, and only the two terminal states collided —
- * which are exactly the two you read the LED to tell apart. A repeating
- * double flash is the conventional way to say "fault" with one indicator and
- * it cannot be confused with any of the even-duty patterns above it.
+ * **DONE_FAIL is the only thing either fallback has to invent**, and that is
+ * deliberate. Everything above it is already distinguishable by rate; only the
+ * two terminal states collide, and they are exactly the two you read the LED
+ * to tell apart. A repeating double flash is the conventional way to say
+ * "fault" with one indicator and cannot be confused with any of the even-duty
+ * patterns above it.
  *
- * A board supplying neither set of aliases is a build error rather than a
+ * The two-colour board keeps the RGB column verbatim everywhere it can, so a
+ * RAK4631 and a XIAO sitting side by side read the same — blue is waiting,
+ * green is working, and nobody has to learn a second vocabulary. Lighting
+ * *both* for a failure is the one appearance no other state produces. Green
+ * was available and was not used: it already means "this went well" in the two
+ * states either side, and a failure indicator borrowing the success colour is
+ * the one confusion worth spending a pattern to avoid.
+ *
+ * **An earlier version of this board used the mono renderer on its green LED
+ * and left the blue unclaimed.** Nothing was ambiguous about it, and it was
+ * still wrong: it made the same firmware on two boards in the same room say
+ * "idle" in two different colours. Consistency across boards is worth more
+ * than a spare pin.
+ *
+ * A board supplying no usable set of aliases is a build error rather than a
  * device with a dark LED: a silently unlit status indicator on a device that
  * is usually not in the room is indistinguishable from a device that is not
  * running.
@@ -48,14 +64,23 @@ LOG_MODULE_REGISTER(led, LOG_LEVEL_INF);
 		      DT_NODE_EXISTS(DT_ALIAS(green_led)) && \
 		      DT_NODE_EXISTS(DT_ALIAS(blue_led)))
 
-#if !LED_HAVE_RGB && !DT_NODE_EXISTS(DT_ALIAS(status_led))
-#error "This board supplies no LED aliases. Give the board overlay either \
-red-led/green-led/blue-led (RGB) or status-led (single LED)."
+/* Green and blue but no red — the RAK4631. See the header. */
+#define LED_HAVE_DUO (!LED_HAVE_RGB &&                       \
+		      DT_NODE_EXISTS(DT_ALIAS(green_led)) && \
+		      DT_NODE_EXISTS(DT_ALIAS(blue_led)))
+
+#if !LED_HAVE_RGB && !LED_HAVE_DUO && !DT_NODE_EXISTS(DT_ALIAS(status_led))
+#error "This board supplies no LED aliases. Give the board overlay \
+red-led/green-led/blue-led (RGB), green-led/blue-led (two-colour), or \
+status-led (single LED)."
 #endif
 
 #if LED_HAVE_RGB
 static const struct gpio_dt_spec s_blue  = GPIO_DT_SPEC_GET(DT_ALIAS(blue_led), gpios);
 static const struct gpio_dt_spec s_red   = GPIO_DT_SPEC_GET(DT_ALIAS(red_led), gpios);
+static const struct gpio_dt_spec s_green = GPIO_DT_SPEC_GET(DT_ALIAS(green_led), gpios);
+#elif LED_HAVE_DUO
+static const struct gpio_dt_spec s_blue  = GPIO_DT_SPEC_GET(DT_ALIAS(blue_led), gpios);
 static const struct gpio_dt_spec s_green = GPIO_DT_SPEC_GET(DT_ALIAS(green_led), gpios);
 #else
 static const struct gpio_dt_spec s_status = GPIO_DT_SPEC_GET(DT_ALIAS(status_led), gpios);
@@ -131,6 +156,9 @@ void led_init(void)
 	configure(&s_blue);
 	configure(&s_red);
 	configure(&s_green);
+#elif LED_HAVE_DUO
+	configure(&s_blue);
+	configure(&s_green);
 #else
 	configure(&s_status);
 #endif
@@ -196,6 +224,74 @@ static uint32_t render(enum led_state st, uint32_t step)
 	}
 }
 
+#elif LED_HAVE_DUO
+
+/*
+ * Green and blue, no red.
+ *
+ * **Every state renders exactly as it does on an RGB board except the one
+ * that cannot.** That is the whole design goal: someone who knows what a XIAO
+ * looks like should not have to learn a second vocabulary to read a RAK4631
+ * sitting next to it. Blue is the device waiting, green is the device working
+ * — same colours, same rates, same meaning.
+ *
+ * DONE_FAIL is the exception, because red is the thing this board does not
+ * have. It lights **both** LEDs in the mono renderer's double-flash pattern,
+ * which is the one appearance nothing else here produces — no other state
+ * drives both pins at once. Reusing green would have been worse than a new
+ * pattern: green already means "this went well" in the two states either side
+ * of it, and a failure indicator that borrows the success colour is the one
+ * confusion worth spending a pattern to avoid.
+ */
+static void write_gb(bool g, bool b)
+{
+	gpio_pin_set_dt(&s_green, g);
+	gpio_pin_set_dt(&s_blue,  b);
+}
+
+/* Shared with the mono renderer below — see the comment there for the timing. */
+static const bool k_fail_pattern[] = { true, false, true, false, false, false };
+
+static uint32_t render(enum led_state st, uint32_t step)
+{
+	bool phase = step & 1U;
+
+	switch (st) {
+	case LED_STATE_IDLE:
+		write_gb(false, phase);
+		return 500;
+
+	case LED_STATE_SMP_ACTIVE:
+		write_gb(false, phase);
+		return 125;
+
+	case LED_STATE_DFU_RUNNING: {
+		uint8_t pct = (uint8_t)atomic_get(&s_progress);
+		if (pct >= 100) {
+			write_gb(true, false);
+			return 1000;
+		}
+		write_gb(phase, false);
+		return dfu_half_ms(pct);
+	}
+
+	case LED_STATE_DONE_OK:
+		write_gb(true, false);
+		return 1000;
+
+	case LED_STATE_DONE_FAIL: {
+		bool on = k_fail_pattern[step % ARRAY_SIZE(k_fail_pattern)];
+
+		write_gb(on, on);
+		return 150;
+	}
+
+	default:
+		write_gb(false, false);
+		return 500;
+	}
+}
+
 #else /* single LED */
 
 /* blink, blink, pause — read at the 150 ms tick below, so the whole cycle is
@@ -240,7 +336,7 @@ static uint32_t render(enum led_state st, uint32_t step)
 	}
 }
 
-#endif /* LED_HAVE_RGB */
+#endif /* LED_HAVE_RGB / LED_HAVE_DUO */
 
 static void led_thread(void *a, void *b, void *c)
 {

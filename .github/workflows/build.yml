@@ -62,7 +62,19 @@ jobs:
           - board: xiao_ble/nrf52840
             slug: xiao_ble
             low: "0x27000"    # under it sits the Adafruit UF2 bootloader
-            slot0: "0x33000"
+            slot0: "0x31000"
+            limit: "0xf4000"  # uf2_boot_partition — overwriting it bricks USB
+          # The second nRF52840, and the numbers are NOT the ones above.
+          # RAK's bootloader is built against SoftDevice S140 6.1.1 where
+          # Seeed's is 7.3.0, so the application region starts one flash page
+          # lower. `slot0 in m` is a weak assertion — it passes for any address
+          # inside the image — so a row copied from the XIAO would look fine
+          # while checking nothing. stage-firmware.test.mjs holds all three
+          # numbers to updater/rak4631_partitions.dtsi.
+          - board: rak4631/nrf52840
+            slug: rak4631
+            low: "0x26000"    # MBR + SoftDevice S140 6.1.1 sit below it
+            slot0: "0x30000"
             limit: "0xf4000"  # uf2_boot_partition — overwriting it bricks USB
           # The XIAO MG24 *is* a row here, unlike the Espressif boards, and the
           # reason is only about the compiler: this is a Cortex-M33, so the ARM

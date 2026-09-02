@@ -15,6 +15,7 @@
  */
 
 import * as CBOR from "./cbor.js";
+import { BATTERY_SERVICE, BATTERY_CHAR, parseBattery } from "./battery-status.js";
 import {
   DFU_STATUS_SERVICE, DFU_STATUS_CHAR, parseDfuStatus,
 } from "./dfu-status.js";
@@ -38,6 +39,7 @@ export const LOG_CHAR    = "da2e782b-fbce-4e01-ae9e-261174997c48";
 /* Live DFU progress — src/dfu_status.h. Re-exported so callers have one
  * import for the transport; the layout and labels live in dfu-status.js. */
 export { DFU_STATUS_SERVICE, DFU_STATUS_CHAR };
+export { BATTERY_SERVICE, BATTERY_CHAR } from "./battery-status.js";
 
 export const STREAM_OP = {
   START: 0x01, FINISH: 0x02, ABORT: 0x03,
@@ -129,8 +131,14 @@ export function describeSmpError(group, cmd, body) {
 export const OS_ID  = { ECHO: 0, RESET: 5, INFO: 7 };
 export const FSX_ID = {
   LIST: 0, MKDIR: 1, RMDIR: 2, MOVE: 3, STATVFS: 4, TRIGGER_DFU: 5, STOP_DFU: 6,
-  INSPECT: 7, CAPS: 8, SCAN: 9, SUBMIT_PIN: 10,
+  INSPECT: 7, CAPS: 8, SCAN: 9, SUBMIT_PIN: 10, BATTERY: 11,
 };
+
+/* enum battery_source in updater/src/battery.h. Bare ints on the wire, so a
+ * renumber on one side is invisible until a device reports the wrong kind of
+ * measurement; battery.test.mjs holds the two together. */
+export const BATTERY_SOURCE = { NONE: 0, DIVIDER: 1, PMIC: 2 };
+
 
 /* Link quality bands, in dBm. The thresholds are the operator-facing point of
  * the scanner, so they live here rather than in a component: they are quoted
@@ -205,6 +213,7 @@ export class SmpClient extends EventTarget {
     this._onLogValue = null;
 
     this.dfuStatusChar = null;     // live DFU progress, subscribed on connect
+    this.batteryChar = null;       // battery changes, subscribed on connect
     this._onDfuStatusValue = null;
     this._dfuStatusWarned = false;
     this.streamAckResolver = null;
@@ -232,7 +241,7 @@ export class SmpClient extends EventTarget {
     this.device = await navigator.bluetooth.requestDevice({
       filters: [{ services: [SMP_SERVICE] }],
       optionalServices: [SMP_SERVICE, STREAM_SERVICE, LOG_SERVICE,
-                         DFU_STATUS_SERVICE],
+                         DFU_STATUS_SERVICE, BATTERY_SERVICE],
     });
     this.device.addEventListener("gattserverdisconnected", () => {
       this.log("disconnected", "err");
@@ -246,6 +255,8 @@ export class SmpClient extends EventTarget {
       this._logSink = null;
       this.dfuStatusChar = null;
       this._onDfuStatusValue = null;
+      this.batteryChar = null;
+      this._onBatteryValue = null;
       this.dispatchEvent(new CustomEvent("disconnected"));
     });
 
@@ -520,6 +531,27 @@ export class SmpClient extends EventTarget {
   fsxCaps() {
     return this.request(MGMT_OP.READ_REQ, GRP.FSX, FSX_ID.CAPS, {});
   }
+  /* Read the battery, on a board that has one to read.
+   *
+   * Resolves to `{ src, mv, pct, chg?, ext? }`. `src` of BATTERY_SOURCE.NONE
+   * is a complete, successful answer — this board cannot measure a battery —
+   * and `mv`/`pct` are then absent. Three of the six boards are in that state
+   * and it is a hardware fact, so it must not be rendered as a failure.
+   *
+   * **`chg` and `ext` are absent when the device cannot tell, and absent is
+   * not false.** A resistor divider sees a voltage and nothing else: a full
+   * cell on USB reads exactly like a full cell running itself flat. Only the
+   * nPM1300 boards answer them. Render a missing one as unknown — showing "on
+   * battery" for a device that is plugged in is a worse lie than showing
+   * nothing, because it is the one an operator would act on.
+   *
+   * Firmware predating this command answers with an error, which the caller
+   * reads the same as "no battery hardware": older builds genuinely could not
+   * report one, so the two are the same fact from the outside.
+   */
+  fsxBattery() {
+    return this.request(MGMT_OP.READ_REQ, GRP.FSX, FSX_ID.BATTERY, {});
+  }
   /* Start a run. `addr` is optional and switches to manual mode: reach that
    * exact peer instead of taking whatever passes `ble_name` and `min_rssi`.
    * Pass an `addr` back verbatim from fsxScan() — the string format is the
@@ -671,6 +703,64 @@ export class SmpClient extends EventTarget {
       this._emitDfuStatus(await this.dfuStatusChar.readValue());
     } catch { /* notifications will fill it in */ }
     return true;
+  }
+
+  /*
+   * Subscribe to battery changes.
+   *
+   * Subscribed for the whole session like the DFU status, and for the same
+   * reason: it is cheap. The firmware only notifies when the reading actually
+   * moves — a charger in or out, or a voltage step past its threshold — so on
+   * a device sitting still this is silent for hours.
+   *
+   * Absent on firmware predating src/battery_status.c, which is not an error:
+   * the caller falls back to polling fsxBattery(), which is what every build
+   * before this one did.
+   */
+  async startBatteryStatus() {
+    if (this.batteryChar) return true;
+    if (!this.gatt?.connected) throw new Error("not connected");
+    try {
+      const svc = await this.gatt.getPrimaryService(BATTERY_SERVICE);
+      this.batteryChar = await svc.getCharacteristic(BATTERY_CHAR);
+    } catch {
+      this.batteryChar = null;
+      return false;
+    }
+    this._onBatteryValue = (e) => this._emitBattery(e.target.value);
+    this.batteryChar.addEventListener("characteristicvaluechanged", this._onBatteryValue);
+    await this.batteryChar.startNotifications();
+
+    /* The firmware pushes the current reading on subscribe, so no read is
+     * needed here — but one costs nothing and closes the gap if that ever
+     * changes. The characteristic is readable precisely so this works. */
+    try {
+      this._emitBattery(await this.batteryChar.readValue());
+    } catch { /* the subscribe push will fill it in */ }
+    return true;
+  }
+
+  async stopBatteryStatus() {
+    const c = this.batteryChar;
+    if (!c) return;
+    this.batteryChar = null;
+    try { await c.stopNotifications(); } catch { /* link already gone */ }
+    if (this._onBatteryValue) {
+      c.removeEventListener("characteristicvaluechanged", this._onBatteryValue);
+    }
+    this._onBatteryValue = null;
+  }
+
+  _emitBattery(dv) {
+    /* parseBattery returns null for "no battery hardware", an unknown version
+     * or a short record. All three mean the same thing to a UI — show
+     * nothing — so they are one event with a null payload rather than three
+     * cases the caller has to learn. */
+    let battery = null;
+    try {
+      battery = parseBattery(dv);
+    } catch { battery = null; }
+    this.dispatchEvent(new CustomEvent("battery", { detail: battery }));
   }
 
   async stopDfuStatus() {

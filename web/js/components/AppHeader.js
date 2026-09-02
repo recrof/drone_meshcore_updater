@@ -4,10 +4,11 @@ import {
 } from "../store.js";
 import ThemePicker from "./ThemePicker.js";
 import Icon from "./Icon.js";
+import BatteryGauge from "./BatteryGauge.js";
 
 export default {
   name: "AppHeader",
-  components: { ThemePicker, Icon },
+  components: { ThemePicker, Icon, BatteryGauge },
   setup() {
     return {
       connected, connecting, deviceName, bluetoothAvailable,
@@ -44,6 +45,12 @@ export default {
               :name="connected ? 'bluetooth_connected' : 'bluetooth_disabled'"/>
         {{ connected ? deviceName : "not connected" }}
       </span>
+      <!-- Beside the device name, because that is what it describes: the
+           updater's own cell, not the target's. It renders nothing at all
+           when the device has no way to measure one — three of the six boards
+           — rather than showing an empty meter, which would read as a flat
+           battery on a device that is fine. -->
+      <BatteryGauge v-if="connected" />
       <span class="grow"></span>
       <!-- Appearance sits left of the action, not right of it: Connect is what
            people reach for on every visit, and putting a colour picker between

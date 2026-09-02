@@ -38,6 +38,7 @@
 #include "ble_pairing.h"
 #include "dfu_runner.h"
 #include "survey.h"
+#include "battery.h"
 
 #include <zephyr/bluetooth/addr.h>
 
@@ -410,6 +411,45 @@ static int fsx_caps(struct smp_streamer *ctxt)
 	return ok ? MGMT_ERR_EOK : MGMT_ERR_EMSGSIZE;
 }
 
+/* ---------- battery ---------- */
+static int fsx_battery(struct smp_streamer *ctxt)
+{
+	zcbor_state_t *zse = ctxt->writer->zs;
+	struct battery_status st;
+
+	int rc = battery_read(&st);
+
+	/* -ENOTSUP is the answer, not an error: this board has no battery
+	 * hardware, which the client renders by omitting the indicator. Any
+	 * other failure is a board that *should* have answered and did not, and
+	 * that must not be reported as "no battery" — a broken sensor and an
+	 * absent one look identical from the outside otherwise. */
+	if (rc == -ENOTSUP) {
+		return zcbor_tstr_put_lit(zse, "src") &&
+		       zcbor_uint32_put(zse, (uint32_t)BATTERY_SOURCE_NONE)
+			       ? MGMT_ERR_EOK : MGMT_ERR_EMSGSIZE;
+	}
+	if (rc != 0) {
+		smp_add_cmd_err(zse, FSX_MGMT_GROUP_ID, (uint16_t)-rc);
+		return MGMT_ERR_EOK;
+	}
+
+	bool ok = zcbor_tstr_put_lit(zse, "src") && zcbor_uint32_put(zse, (uint32_t)st.source)
+	       && zcbor_tstr_put_lit(zse, "mv")  && zcbor_uint32_put(zse, st.millivolts)
+	       && zcbor_tstr_put_lit(zse, "pct") && zcbor_uint32_put(zse, st.percent);
+
+	/* Omitted rather than sent false where the board cannot tell. See the
+	 * command's contract in fsx_mgmt.h. */
+	if (ok && st.charging_known) {
+		ok = zcbor_tstr_put_lit(zse, "chg") && zcbor_bool_put(zse, st.charging);
+	}
+	if (ok && st.external_power_known) {
+		ok = zcbor_tstr_put_lit(zse, "ext") && zcbor_bool_put(zse, st.external_power);
+	}
+
+	return ok ? MGMT_ERR_EOK : MGMT_ERR_EMSGSIZE;
+}
+
 /* ---------- trigger_dfu ---------- */
 static int fsx_trigger_dfu(struct smp_streamer *ctxt)
 {
@@ -646,6 +686,7 @@ static const struct mgmt_handler fsx_handlers[] = {
 	[FSX_MGMT_ID_CAPS]        = { .mh_read = fsx_caps,        .mh_write = NULL            },
 	[FSX_MGMT_ID_SCAN]        = { .mh_read = NULL,            .mh_write = fsx_scan        },
 	[FSX_MGMT_ID_SUBMIT_PIN]  = { .mh_read = NULL,            .mh_write = fsx_submit_pin  },
+	[FSX_MGMT_ID_BATTERY]     = { .mh_read = fsx_battery,     .mh_write = NULL            },
 };
 
 static struct mgmt_group fsx_group = {

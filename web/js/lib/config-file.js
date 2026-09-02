@@ -494,6 +494,19 @@ export const CONFIG_SCHEMA = [
   },
 
   {
+    key: "fast_charge",
+    label: "fast_charge",
+    title: "Charge the battery faster",
+    type: "bool",
+    def: false,
+    desc: `Use the higher of the two charge currents the board's charger offers —
+           100 mA instead of 50 mA on the XIAO nRF52840. Only some boards can
+           choose; on one that cannot, this is accepted and logged as unsupported.
+           Off is the charger's own default. Leave it off for a very small cell,
+           where 100 mA may be more than 1C.`,
+  },
+
+  {
     key: "ble_tx_power",
     label: "ble_tx_power",
     title: "Bluetooth transmit power",

@@ -80,3 +80,30 @@
  * sysbuild/mcuboot.overlay — see that file for why it is not inline here.
  */
 #include "../rram_partitions.dtsi"
+
+/*
+ * The nPM1300's I2C pins — the fifth bug found in these vendored board files.
+ *
+ * The vendored `xiao_nrf54lm20a_nrf54lm20a-common.dtsi` bit-bangs the PMIC bus
+ * on P1.15/P1.16. **Upstream Zephyr's own copy of this board says P1.18 (SDA)
+ * and P1.17 (SCL)** — the board reached the Zephyr tree after this project
+ * vendored it, so there is now a second source, and it disagrees.
+ *
+ * Symptom: `npm13xx_charger_init()` writes to the chip in its very first step,
+ * so with the wrong pins it NAKs and the device never becomes ready:
+ *
+ *     <err> battery: battery sensor charger is not ready
+ *
+ * **Nothing could have caught this short of hardware.** P1.15/P1.16 are used
+ * by nothing else in the build, so there is no pin conflict to detect; the bus
+ * simply talked to two idle GPIOs and got no answer. Note also that the
+ * sibling xiao_nrf54l15 uses P1.15 as its *battery-read enable*, which is a
+ * good way to end up with this exact wrong pair by copying.
+ *
+ * Overridden here rather than in the board file, for the same reason as the
+ * LED polarity above: a board refresh must not be able to quietly undo it.
+ */
+&pmic_i2c {
+	sda-gpios = <&gpio1 18 GPIO_ACTIVE_HIGH>;
+	scl-gpios = <&gpio1 17 GPIO_ACTIVE_HIGH>;
+};

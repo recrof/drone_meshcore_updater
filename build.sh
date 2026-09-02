@@ -55,6 +55,7 @@ APP="updater"
 BOARDS="
 nrf54:xiao_nrf54lm20a/nrf54lm20a/cpuapp
 nrf52:xiao_ble/nrf52840
+rak4631:rak4631/nrf52840
 mg24:xiao_mg24/efr32mg24b220f1536im48
 esp32s3:xiao_esp32s3/esp32s3/procpu
 esp32c5:xiao_esp32c5/esp32c5/hpcore

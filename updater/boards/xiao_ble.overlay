@@ -68,3 +68,93 @@
 		};
 	};
 };
+
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/adc/nrf-saadc.h>
+
+/*
+ * ---- Battery ------------------------------------------------------------
+ *
+ * A 1M/510k divider from BAT+ to P0.31 (AIN7), gated by P0.14. Both pins are
+ * board-internal — P0.31 is not in the XIAO connector's D0-D10 map — and
+ * neither is claimed by anything else in this build.
+ *
+ * **P0.14 is active low**: driving it low connects the bottom of the divider,
+ * which is what Seeed's own wiki code does and what the previous Arduino
+ * updater's variant did. The polarity lives in the phandle flag so that
+ * battery.c never learns it, the same arrangement as `antenna-gpios` and for
+ * the same reason a vendored LED polarity became Trap 1b.
+ *
+ * The divider is left permanently enabled, because Zephyr's voltage-divider
+ * driver asserts `power-gpios` at init and only releases it under
+ * CONFIG_PM_DEVICE, which is off here. That matches the predecessor, which
+ * held P0.14 low for the life of the board *deliberately*: with the divider
+ * open, P0.14 sits at (1510/510)*(4.2-3.3)+3.3 = 5.9 V above the 3.6 V the
+ * pin is rated for. The standing cost is ~2.8 uA through 1.51M, which is
+ * nothing next to a BLE radio.
+ *
+ * The ratio here is the physical part values. The predecessor used a flat
+ * multiplier of 3.0 where these give 2.961 — 1.3%, or 55 mV at a full cell,
+ * comfortably inside the SAADC's own untrimmed error. If a reading ever
+ * disagrees with a multimeter, these two numbers are the whole fix.
+ *
+ * **The acquisition time is not the default.** A 1M/510k pair is ~338k of
+ * source impedance and the SAADC's 10 us default cannot charge its sampling
+ * capacitor through that — the reading comes back low, plausibly, with
+ * nothing to indicate why. 40 us is Nordic's figure for this range.
+ */
+&adc {
+	status = "okay";
+
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@7 {
+		reg = <7>;
+		zephyr,gain = "ADC_GAIN_1_5";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 40)>;
+		zephyr,input-positive = <NRF_SAADC_AIN7>;
+		zephyr,resolution = <12>;
+	};
+};
+
+/ {
+	vbatt: vbatt {
+		compatible = "voltage-divider";
+		io-channels = <&adc 7>;
+		output-ohms = <510000>;
+		full-ohms = <1510000>;
+		power-gpios = <&gpio0 14 GPIO_ACTIVE_LOW>;
+		power-on-sample-delay-us = <1000>;
+	};
+
+	zephyr,user {
+		/* The BQ25100's ~CHG output. Low while charging, high-impedance
+		 * otherwise, hence the pull-up here rather than in battery.c. */
+		charging-gpios = <&gpio0 17 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+
+		/*
+		 * The BQ25100's HICHG input, on P0.13 — 100 mA when driven
+		 * low, 50 mA when left alone. Active-low, so `fast_charge`
+		 * asserts it and battery.c never learns which way round it is.
+		 *
+		 * The pin resolves through the previous Arduino updater's
+		 * `g_ADigitalPinMap`: `PIN_CHARGING_CURRENT (22)` is D22, which
+		 * that table maps to P0.13 and labels HICHG. That variant drove
+		 * it low unconditionally at boot; here it is a config key,
+		 * because 100 mA into a very small cell is the operator's
+		 * decision and a config.txt is shared across a fleet.
+		 *
+		 * **The off state is `GPIO_DISCONNECTED`, not an inactive
+		 * output.** HICHG is sampled against a resistor, so releasing
+		 * the pin and driving it inactive are different things — see
+		 * battery_charge_current_apply().
+		 */
+		charge-high-gpios = <&gpio0 13 GPIO_ACTIVE_LOW>;
+	};
+
+	aliases {
+		battery-voltage = &vbatt;
+	};
+};

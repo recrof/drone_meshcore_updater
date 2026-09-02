@@ -93,6 +93,7 @@ export const entriesWithDfu = (index) => index.boards.filter(b => b.dfu);
 export const BOARD_LABELS = {
   xiao_nrf54lm20a: "XIAO nRF54LM20A",
   xiao_ble: "XIAO nRF52840",
+  rak4631: "RAK4631",
   xiao_esp32s3: "XIAO ESP32-S3",
   xiao_esp32c5: "XIAO ESP32-C5",
   xiao_mg24: "XIAO MG24",

@@ -87,21 +87,81 @@ const ACK_TIMEOUT_MS = 5000;
 const POLL_MS = 200;
 
 /*
- * The application's start address, which is also where this image is written.
+ * ---- Where the application starts, per board ---------------------------
  *
- * The Adafruit bootloader hands the region above the MBR and SoftDevice to the
- * application: `CODE_REGION_1_START` is `is_sd_existed() ? SD_SIZE_GET(MBR_SIZE)
- * : MBR_SIZE`, decided at run time. The XIAO nRF52840 ships SoftDevice S140
- * 7.3.0, so that resolves to 0x27000 — the same number
- * `updater/nrf52840_partitions.dtsi` starts MCUboot at, which is why
- * `merged.hex` can be sent as-is.
+ * The Adafruit bootloader hands the region above the MBR and SoftDevice to
+ * the application: `CODE_REGION_1_START` is `is_sd_existed() ?
+ * SD_SIZE_GET(MBR_SIZE) : MBR_SIZE`, decided at *run time*. So the number
+ * depends on which SoftDevice the board's bootloader was built against, and
+ * **the two nRF52840 boards here do not agree**:
  *
- * **It resolves to 0x1000 on a board whose SoftDevice has been erased**, and
- * then the image lands 0x26000 low, flashes cleanly and boots nothing. The
- * protocol carries no addresses, so nothing on the wire would say so; the
- * caller checks the image's own start address instead.
+ *     xiao_ble   Seeed ship S140 7.3.0   ->  0x27000
+ *     rak4631    RAK build S140 6.1.1    ->  0x26000
+ *
+ * One flash page apart, which is not a rounding error: an image written
+ * 0x1000 low starts executing before its own vector table. The protocol
+ * carries no addresses at all, so nothing on the wire would say so — the
+ * caller checks the image's own start against the board's entry instead.
+ *
+ * Both numbers match what `updater/nrf52840_partitions.dtsi` and
+ * `updater/rak4631_partitions.dtsi` start MCUboot at, which is why
+ * `merged.hex` can be sent as-is; `nordic-dfu-serial.test.mjs` holds each
+ * entry to its fragment.
+ *
+ * **Either resolves to 0x1000 on a board whose SoftDevice has been erased**,
+ * and then the image lands a SoftDevice low, flashes cleanly and boots
+ * nothing. That is a provisioning state this client cannot detect and does
+ * not try to.
+ *
+ * ---- And how much of it there is ---------------------------------------
+ *
+ * `DFU_IMAGE_MAX_SIZE_FULL`, which the bootloader computes as
+ * `BOOTLOADER_REGION_START - CODE_REGION_1_START - DFU_APP_DATA_RESERVED`.
+ * Both constants below are read out of the bootloader's own Makefile and are
+ * the same for every nRF52840 build of it, so the ceiling is *derived* here
+ * rather than written down twice — the xiao_ble figure this replaces was a
+ * literal 798720, and the formula reproduces it exactly.
+ *
+ * An earlier revision had 397312, which was the **dual-bank** ceiling read
+ * out of the bootloader's `master` branch. Neither board runs a dual-bank
+ * build: the XIAO's 0.6.1 has no `dfu_dual_bank.c` at all, and RAK's 0.9.2
+ * fork compiles `dfu_single_bank.c` (its Makefile names the file). The number
+ * was wrong and comfortably too small, which is the harmless direction and
+ * not a reason to have guessed at the version.
  */
-export const APP_START = 0x27000;
+
+/** `BOOTLOADER_REGION_START` in dfu_types.h — the same on every nRF52840
+ *  build of this bootloader, debug builds excepted (they move it to 0xEA000,
+ *  and a debug bootloader is not something that ships). */
+const BOOTLOADER_REGION_START = 0xf4000;
+
+/** `DFU_APP_DATA_RESERVED` for MCU_SUB_VARIANT=nrf52840: "App reserved 40KB
+ *  (8+32) to match circuitpython for 840", in the bootloader's Makefile. */
+const DFU_APP_DATA_RESERVED = 10 * 4096;
+
+const bootloader = (appStart, softDevice) => ({
+  appStart,
+  softDevice,
+  maxImage: BOOTLOADER_REGION_START - appStart - DFU_APP_DATA_RESERVED,
+});
+
+/**
+ * Keyed on the board name, like PROBE_TARGETS in probe-targets.js and for the
+ * same reason: two boards share one `usb` method in the manifest because they
+ * are *reached* identically, and the thing that differs is not on the wire.
+ * An unknown board is refused rather than defaulted — writing an image at
+ * another board's offset is the failure this table exists to prevent.
+ */
+export const BOOTLOADERS = {
+  xiao_ble: bootloader(0x27000, "S140 7.3.0"),
+  rak4631: bootloader(0x26000, "S140 6.1.1"),
+};
+
+export const boardName = (target) => String(target ?? "").split("/")[0];
+
+/** The profile for a board target, or null if this client has never heard of
+ *  it. Callers must treat null as "do not flash", not as "use the default". */
+export const bootloaderFor = (target) => BOOTLOADERS[boardName(target)] ?? null;
 
 /*
  * ---- This bootloader is single-bank ------------------------------------
@@ -143,21 +203,7 @@ export const APP_START = 0x27000;
 /** `IS_WORD_SIZED(SIZE)` — `((SIZE & 3) == 0)`, in `dfu_bank_internal.h`. */
 export const IMAGE_ALIGNMENT = 4;
 
-/**
- * `DFU_IMAGE_MAX_SIZE_FULL`, worked out for this board.
- *
- *     CODE_REGION_1_START       0x27000   (SoftDevice S140 7.3.0 is present)
- *     BOOTLOADER_REGION_START   0xF4000
- *     DFU_REGION_TOTAL_SIZE     0xCD000 = 839680
- *     DFU_APP_DATA_RESERVED      10*4096 =  40960   (nRF52840, from the Makefile)
- *     ..._MAX_SIZE_FULL                    798720
- *
- * This was 397312 for one revision of this file, which was the *dual-bank*
- * ceiling read out of `master`. The board runs 0.6.1, which has no dual-bank
- * mode; the number was wrong and comfortably too small, which is the harmless
- * direction but not a reason to have guessed at the version.
- */
-export const MAX_IMAGE_SIZE = 798720;
+
 
 /** Round up to a word with the erased value. The bootloader will not take a
  *  size that is not a multiple of four, and `merged.hex` ends wherever the
@@ -332,9 +378,25 @@ export class NordicSerialDfu {
    * @param link  a SerialLink (or anything with writeFrame/readFrame/flush)
    * @param log   optional (message, cls) sink
    */
-  constructor(link, log = () => {}) {
+  /**
+   * @param link    a SerialLink (or anything with writeFrame/readFrame/flush)
+   * @param log     optional (message, cls) sink
+   * @param profile an entry from BOOTLOADERS — which board's bootloader is on
+   *                the other end. Required, and deliberately not defaulted:
+   *                the two boards that speak this protocol write the
+   *                application a flash page apart, and a default would pick
+   *                one of them silently for the other.
+   */
+  constructor(link, log = () => {}, profile = null) {
+    if (!profile || typeof profile.appStart !== "number") {
+      throw new Error(
+        "NordicSerialDfu needs a bootloader profile — see BOOTLOADERS. " +
+        "Defaulting to one board's offsets would write another board's image " +
+        "a flash page out of place, cleanly and silently.");
+    }
     this.link = link;
     this.log = log;
+    this.profile = profile;
     this.seq = 0;
     this.lastAck = null;
   }
@@ -468,18 +530,20 @@ export class NordicSerialDfu {
     if (padded.length !== image.length) {
       this.log(`padded to a word: ${padded.length} bytes`);
     }
-    if (padded.length > MAX_IMAGE_SIZE) {
+    if (padded.length > this.profile.maxImage) {
       throw new Error(
         `the image is ${padded.length} bytes and this bootloader takes at most ` +
-        `${MAX_IMAGE_SIZE} for an application update — it dual-banks, so it needs ` +
-        `room for two copies. Nothing has been sent. Flash it with a probe, or ` +
-        `by dropping merged.uf2 onto the bootloader's drive, which has no such limit.`);
+        `${this.profile.maxImage} for an application update — the region between ` +
+        `0x${this.profile.appStart.toString(16)} and the bootloader, less the 40 KB ` +
+        `it reserves for application data. Nothing has been sent. Flash it with a ` +
+        `probe, or by dropping merged.uf2 onto the bootloader's drive, which has no ` +
+        `such limit.`);
     }
     image = padded;
 
     this.seq = 0;
     this.lastAck = null;
-    this.log(`sending ${image.length} bytes to 0x${APP_START.toString(16)}`);
+    this.log(`sending ${image.length} bytes to 0x${this.profile.appStart.toString(16)}`);
     /* Elapsed time is kept for the *failure* message. Every way this can go
      * wrong looks the same from here — the board stops answering — and where
      * in the sequence it happened is most of the diagnosis. */

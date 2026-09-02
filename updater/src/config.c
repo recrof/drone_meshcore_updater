@@ -86,6 +86,7 @@ static void apply_defaults(struct app_config *c)
 	 * is the only choice that works with nothing plugged into the
 	 * connector. */
 	c->ext_antenna    = false;
+	c->fast_charge    = false;
 	/* On: the ESP32 board exists to reach ElegantOTA targets, so making
 	 * that the thing you have to switch on would be backwards. Costs
 	 * nothing on a board with no WiFi radio. */
@@ -194,6 +195,8 @@ static void apply_kv(struct app_config *c, const char *key, const char *val)
 		c->scan_debug = parse_bool(val);
 	} else if (!strcmp(key, "auto_flash")) {
 		c->auto_flash = parse_bool(val);
+	} else if (!strcmp(key, "fast_charge")) {
+		c->fast_charge = parse_bool(val);
 	} else if (!strcmp(key, "ext_antenna")) {
 		/* Accepts the words as well as 0/1, because "internal" and
 		 * "external" are what this switch is called everywhere else —

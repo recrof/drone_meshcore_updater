@@ -1,7 +1,8 @@
 import { ref, computed, watch } from "../vue.js";
 import Icon from "./Icon.js";
 import { SerialLink } from "../lib/serial.js";
-import { NordicSerialDfu, touchReset, APP_START, DFU_BAUD } from "../lib/nordic-dfu-serial.js";
+import { NordicSerialDfu, touchReset, bootloaderFor, DFU_BAUD }
+  from "../lib/nordic-dfu-serial.js";
 import { EspRomLoader, enterDownloadMode, USB_JTAG_SERIAL, chipForBoard } from "../lib/esptool.js";
 import { parseIntelHex, flatten, lowAddress, highAddress } from "../lib/intel-hex.js";
 import { fmtSize } from "../lib/format.js";
@@ -125,19 +126,35 @@ export default {
        * image starting anywhere else would be written shifted, flash cleanly,
        * and boot nothing.
        */
+      /*
+       * Which board, and therefore which offset. Two boards speak this
+       * protocol and they do not share an application start — see
+       * BOOTLOADERS. Refused rather than defaulted: a board this client has
+       * never heard of is exactly the case where guessing writes the image a
+       * flash page out of place, cleanly.
+       */
+      const profile = bootloaderFor(props.entry.board);
+      if (!profile) {
+        throw new Error(
+          `this client does not know where the bootloader on ` +
+          `'${props.entry.board}' starts the application, so it will not ` +
+          `write to it. Use the .uf2 instead — the drag-and-drop path needs ` +
+          `no such table.`);
+      }
+
       const lo = lowAddress(chunks);
-      if (lo !== APP_START) {
+      if (lo !== profile.appStart) {
         throw new Error(
           `the staged image starts at 0x${lo.toString(16)}, but this bootloader writes ` +
-          `the application at 0x${APP_START.toString(16)}. Flashing it would put every ` +
-          `byte at the wrong address. This is a build or staging fault, not something ` +
-          `to retry.`);
+          `the application at 0x${profile.appStart.toString(16)} (SoftDevice ` +
+          `${profile.softDevice}). Flashing it would put every byte at the wrong ` +
+          `address. This is a build or staging fault, not something to retry.`);
       }
-      const image = flatten(chunks, APP_START);
+      const image = flatten(chunks, profile.appStart);
       log(`${fmtSize(image.length)} spanning 0x${lo.toString(16)}..` +
           `0x${highAddress(chunks).toString(16)}`);
 
-      const dfu = new NordicSerialDfu(link, log);
+      const dfu = new NordicSerialDfu(link, log, profile);
       const onProgress = track("Writing");
       await dfu.flash(image, onProgress);
       log("bootloader accepted the image and is validating it", "ok");

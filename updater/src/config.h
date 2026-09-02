@@ -204,6 +204,22 @@ struct app_config {
 	 */
 	bool     ext_antenna;
 
+	/* Charge the battery at the higher of the two currents the board's
+	 * charger IC offers, where it offers a choice.
+	 *
+	 * Off by default, which is the charger's own default and what this
+	 * firmware has always done — nothing here drove the pin at all, so the
+	 * XIAO nRF52840 has been charging at 50 mA. On is 100 mA there.
+	 *
+	 * A key rather than an unconditional boot-time write, which is what the
+	 * previous Arduino updater did: the right current depends on the cell
+	 * somebody actually fitted, and doubling it for every existing device
+	 * is not a decision firmware should take on its own. Accepted on every
+	 * board and reported as unsupported where there is no such control, for
+	 * the same reason as `ext_antenna` — one config.txt is copied across a
+	 * fleet of mixed boards. */
+	bool     fast_charge;
+
 	/* Try the WiFi/ElegantOTA transport as well as BLE.
 	 *
 	 * On by default, but it is not free: a scan cycle that finds no BLE

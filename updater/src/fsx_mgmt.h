@@ -197,6 +197,34 @@ enum fsx_mgmt_cmd {
 	 * so a prompt the operator left sitting simply misses the window.
 	 */
 	FSX_MGMT_ID_SUBMIT_PIN  = 10,
+
+	/* READ {} — the battery, on a board that can measure one.
+	 *
+	 *   rsp: { "src":uint, "mv":uint, "pct":uint,
+	 *          "chg":bool?, "ext":bool? }
+	 *
+	 * `src` is enum battery_source: 0 none, 1 resistor divider, 2 PMIC. Zero
+	 * is the whole answer — `mv` and `pct` are absent — and it is a hardware
+	 * fact rather than a failure, so it comes back as a successful response
+	 * and not an error. Three of the six boards are in that state.
+	 *
+	 * `chg` (charging now) and `ext` (external power attached) are **absent
+	 * when the board cannot tell**, which is not the same as false and must
+	 * not be rendered as it. A bare divider sees a voltage and nothing else:
+	 * a full cell on USB and a full cell on its own read identically, so
+	 * guessing would put a plug icon on a device that is running itself flat.
+	 * Only the nPM1300 boards answer these.
+	 *
+	 * `pct` is inferred from `mv` against a LiPo curve and sags under load —
+	 * see battery.h. Both are sent because the voltage is the one a
+	 * multimeter can contradict, and a divider ratio is the one part of this
+	 * that no test can check.
+	 *
+	 * A read, and cheap: a few milliseconds of ADC or I2C. Safe to poll, but
+	 * there is nothing to poll *for* during a DFU — the client asks on
+	 * connect and on a timer, not per progress notification.
+	 */
+	FSX_MGMT_ID_BATTERY     = 11,
 };
 
 /* Directory entry type constants used in `list` response. */

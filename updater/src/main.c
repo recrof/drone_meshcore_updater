@@ -32,6 +32,8 @@
 #include "config.h"
 #include "ble_tx_power.h"
 #include "antenna.h"
+#include "battery.h"
+#include "battery_status.h"
 #include "dfu_runner.h"
 #include "ble_scanner.h"
 #include "ble_pairing.h"
@@ -448,9 +450,12 @@ int main(void)
 		cfg->min_rssi, cfg->retry_cooldown, cfg->wedge_cooldown,
 		cfg->ble_tx_power, cfg->wifi_tx_power,
 		cfg->scan_timeout, cfg->scan_debug, cfg->pkt_gap_ms);
-	LOG_INF("cfg: auto_flash=%d ext_antenna=%d (switch %s)",
+	LOG_INF("cfg: auto_flash=%d ext_antenna=%d (switch %s) fast_charge=%d (%s)",
 		cfg->auto_flash, cfg->ext_antenna,
-		antenna_switchable() ? "present" : "absent on this board");
+		antenna_switchable() ? "present" : "absent on this board",
+		cfg->fast_charge,
+		battery_charge_current_selectable() ? "selectable"
+						   : "fixed on this board");
 
 	/* Before the radio, not after. The antenna path should already be
 	 * right the first time the controller keys up — advertising starts
@@ -458,6 +463,26 @@ int main(void)
 	 * advertisements go out of the wrong one. On a board with no switch
 	 * this reports -ENOTSUP and says so only if `ext_antenna` was set. */
 	antenna_apply(cfg->ext_antenna);
+
+	/* One line at boot, before anything spends the cell. On a board with no
+	 * battery hardware this says so once rather than staying quiet, because
+	 * "no battery line in the log" and "battery hardware that failed to
+	 * initialise" would otherwise look the same in a log read afterwards —
+	 * which is the only way this device's logs are ever read. */
+	/* Before the battery is asked anything, and before the radio: this is a
+	 * charger setting, so it should be right for the whole of the run rather
+	 * than corrected after the first reading. Silently a no-op on a board
+	 * whose charge current is fixed. */
+	battery_charge_current_apply(cfg->fast_charge);
+
+	battery_log_state("boot");
+
+	/* Start sampling, and publish changes over GATT. Before bt_ready(), and
+	 * that is fine in both directions: the service is registered statically
+	 * by BT_GATT_SERVICE_DEFINE whatever happens here, and all this does is
+	 * schedule the first sample — which is wanted early, so the boot line
+	 * above is not the only reading a client can get for the next 10 s. */
+	battery_status_init();
 
 	rc = bt_ready();
 	if (rc) {

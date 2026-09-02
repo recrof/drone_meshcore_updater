@@ -31,8 +31,26 @@
 
 /* Bump on every shell change — the suffix is what invalidates the precache.
  * Restarted at v1 with the rename: the old counter belonged to a name that
- * no longer exists, and there were no deployed caches to keep continuity with. */
-const CACHE = "drone-meshcore-updater-v19";
+ * no longer exists, and there were no deployed caches to keep continuity with.
+ *
+ * **SHELL_DIGEST below is what makes that an enforced rule instead of a note.**
+ * It is a hash of every precached file's *contents*, checked by
+ * web/test/pwa.test.mjs; change any shell file without bumping both and the
+ * test fails and prints the replacement line.
+ *
+ * It exists because the rule was written here in prose and then broken in the
+ * obvious way. A new component (BatteryGauge.js) was added to PRECACHE and
+ * CACHE was not bumped, so an already-installed worker kept serving the shell
+ * it had — including an Icon.js from before the battery glyphs existed. The
+ * new file was fetched from the network *because it was not in the old
+ * cache*, so the component rendered perfectly, called for an icon its cached
+ * Icon.js had never heard of, and drew `<path d="">`. An empty SVG: no error,
+ * no warning, the percentage beside it updating normally.
+ *
+ * That is precisely the mixed-generation failure the cache-only note below
+ * describes, and it arrived through the one door nothing was watching. */
+const CACHE = "drone-meshcore-updater-v22";
+const SHELL_DIGEST = "f0830a1bf1888ddf";
 
 /*
  * The release firmware staged by CI at firmware/. Kept in its own cache,
@@ -70,6 +88,7 @@ const PRECACHE = [
   "js/lib/cmsis-dap.js",
   "js/lib/dialog.js",
   "js/lib/config-file.js",
+  "js/lib/battery-status.js",
   "js/lib/dfu-status.js",
   "js/lib/esptool.js",
   "js/lib/firmware-image.js",
@@ -90,6 +109,7 @@ const PRECACHE = [
   "js/lib/theme.js",
   "js/lib/usb-flashers.js",
   "js/components/AppHeader.js",
+  "js/components/BatteryGauge.js",
   "js/components/BleUpdate.js",
   "js/components/ConfigDialog.js",
   "js/components/DfuStatus.js",

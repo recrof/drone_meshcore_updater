@@ -50,9 +50,21 @@ export const FLASHERS = {
     label: "Nordic serial DFU",
     api: "webserial",
     artifact: ARTIFACT.HEX,
+    /* Deliberately says "a USB drive" and not which one.
+     *
+     * Two boards use this method now and neither the LED colour nor the drive
+     * name is shared: the XIAO's bootloader pulses an orange LED and mounts
+     * XIAO-BOOT (XIAO-SENSE on the sense variant), the RAK4631's pulses green
+     * and mounts RAK4631. The old text named one of the three, which was
+     * wrong for two of the boards it was shown to — and a precise instruction
+     * that does not match what is in front of you is worse than a general one,
+     * because it reads as "you are looking at the wrong thing".
+     *
+     * The board's own name is already on the screen beside this list, from
+     * BOARD_LABELS, so nothing is lost. */
     prepare: [
-      "Double-tap the RESET button. The orange LED will start pulsing slowly — " +
-      "that is the bootloader, and a drive called XIAO-SENSE may appear.",
+      "Double-tap the RESET button. The bootloader's LED starts pulsing " +
+      "slowly and a USB drive appears — that is it waiting.",
       "Pick the board's serial port when the browser asks.",
     ],
     reboot: {

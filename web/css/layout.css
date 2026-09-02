@@ -11,6 +11,25 @@ header .title {
   text-transform: uppercase; color: var(--muted);
 }
 header .device { font-family: var(--mono); font-size: 13px; }
+/* The updater's own battery. Colour comes from the band class the component
+   sets, never from --accent: see tokens.css at --ok for why a status colour
+   cannot be a user preference. */
+header .battery {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--mono);
+  font-size: 12px;
+  /* Both the SVG (currentColor) and the percentage take this. */
+  color: var(--ok);
+}
+header .battery.warn   { color: var(--warn); }
+header .battery.danger { color: var(--danger); }
+header .battery .icon { display: block; }
+/* Tabular figures: the number changes under a poll and a proportional font
+   would shift the text beside it every time it crossed 100 -> 99. */
+header .battery .pct { font-variant-numeric: tabular-nums; }
+
 header .grow { flex: 1; }
 /* Was an abstract dot with a box-shadow ring pulsing off it. It is a
    bluetooth glyph now, so the pulse had to move onto the glyph — a ring

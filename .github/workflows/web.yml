@@ -139,6 +139,27 @@ jobs:
       - name: DFU re-run tests
         run: node web/test/dfu-loop.test.mjs
 
+      # The status LED, across boards. Three renderers picked at build time
+      # from a board's aliases, and nothing enforces that they agree — every
+      # combination compiles and every combination lights something, so the
+      # failure is a device working correctly in a vocabulary the person
+      # holding it does not know. The RAK4631 shipped exactly that once: the
+      # single-LED renderer on its green pin, which was unambiguous alone and
+      # meant two boards in the same room said "idle" in different colours.
+      - name: LED scheme tests
+        run: node web/test/led-scheme.test.mjs
+
+      # Battery monitoring. Three boards can measure one and three cannot, and
+      # the important half is what a board that *cannot* does: `chg`/`ext` are
+      # omitted rather than sent false, because a resistor divider reads a full
+      # cell on USB exactly like a full cell running itself flat, and "not
+      # charging" is the one of those two an operator would act on. Also holds
+      # the battery glyph names against Icon.js — an unknown name renders an
+      # empty <svg>, so the meter disappears while the percentage beside it
+      # keeps updating.
+      - name: Battery tests
+        run: node web/test/battery.test.mjs
+
       # The BLE PIN path, which is dormant on every board this project owns —
       # none of the five requires authentication — so none of the defects it
       # covers can be found by using the thing. The sharpest is that

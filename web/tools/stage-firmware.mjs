@@ -82,6 +82,15 @@ export const USB_METHODS = {
    * Nordic Legacy DFU over its CDC port after a 1200-baud touch. */
   xiao_ble: "nordic-serial-dfu",
 
+  /* The same bootloader, on RAKwireless's fork of it — so the same method,
+   * the same protocol and the same artifact. **Not the same addresses**:
+   * this one is built against SoftDevice S140 6.1.1 rather than 7.3.0, so
+   * the application starts at 0x26000 and not 0x27000. That belongs to the
+   * flasher, which looks it up per board (BOOTLOADERS in
+   * nordic-dfu-serial.js) rather than to this table, which only answers
+   * "how is the board reached". */
+  rak4631: "nordic-serial-dfu",
+
   /* The Espressif ROM loader over USB-Serial-JTAG. Note neither of these has
    * a single-file artifact at all — see `parts` below. */
   xiao_esp32s3: "esptool",

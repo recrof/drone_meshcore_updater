@@ -46,6 +46,68 @@ export const deviceBoard = ref(null);
  * Null until answered, and on firmware too old to answer — which the
  * inspector reads as "make no compatibility claim" rather than as a guess. */
 export const deviceTransports = ref(null);
+
+/* The battery, or null where the device has no way to measure one — which is
+ * three of the six boards and a hardware fact, so the indicator is absent
+ * rather than empty. Shape is fsxBattery()'s response: { src, mv, pct, chg?,
+ * ext? }, where a missing `chg`/`ext` means the device cannot tell and must
+ * not be drawn as false. */
+export const battery = ref(null);
+
+/*
+ * **Pushed where the firmware can push, polled only where it cannot.**
+ *
+ * The device notifies when the reading actually moves — a charger in or out,
+ * or a voltage step past its own threshold — so the events that happen in an
+ * instant arrive in an instant. That is the whole reason the GATT service
+ * exists: making a poll fast enough to feel immediate would spend an SMP
+ * round trip over the DFU's own radio (Trap 4) many times a minute, almost
+ * always to learn that nothing changed.
+ *
+ * The poll stays as the fallback for firmware predating src/battery_status.c,
+ * and as the thing that tracks slow drift on a device whose level is falling
+ * by less than the notify threshold. It is deliberately slow — a cell moves
+ * over tens of minutes — and it is skipped entirely while a run is in flight.
+ *
+ * When notifications are working the poll is stretched rather than stopped:
+ * a subscription that dies quietly (a dropped CCC, a firmware fault) would
+ * otherwise freeze the indicator at its last value with nothing to say so.
+ */
+const BATTERY_POLL_MS = 60000;
+const BATTERY_POLL_PUSHED_MS = 300000;
+let batteryTimer = null;
+let batteryPushed = false;
+
+async function readBattery() {
+  if (!connected.value) return;
+  try {
+    const b = await smp.fsxBattery();
+    /* src 0 is "no hardware" — a complete answer, and the same outcome as
+     * firmware too old to have the command. Both mean: show nothing. */
+    battery.value = (b && b.src) ? b : null;
+  } catch {
+    battery.value = null;
+  }
+}
+
+function startBatteryPoll() {
+  stopBatteryPoll();
+  batteryTimer = setInterval(() => {
+    /* Not during a run. See BATTERY_POLL_MS. */
+    if (!dfuActive.value) readBattery();
+  }, batteryPushed ? BATTERY_POLL_PUSHED_MS : BATTERY_POLL_MS);
+}
+
+/* A pushed reading. `null` means the device says it cannot measure one, or
+ * sent something this client cannot read — both render as no indicator, so
+ * they are one case here. */
+smp.addEventListener("battery", (e) => {
+  battery.value = e.detail;
+});
+
+function stopBatteryPoll() {
+  if (batteryTimer) { clearInterval(batteryTimer); batteryTimer = null; }
+}
 /* Fixed: the folder controls were removed from the toolbar, so nothing
  * changes this. Kept as a ref because refresh() and FileListing both read
  * it, and because the firmware path could still become configurable. */
@@ -104,6 +166,9 @@ smp.addEventListener("disconnected", () => {
   mtuInfo.value = "—";
   deviceBoard.value = null;
   deviceTransports.value = null;
+  battery.value = null;
+  batteryPushed = false;
+  stopBatteryPoll();
   dfuStatus.value = idleStatus();
   dfuRate.value = 0;
   /* A retry needs a link to be triggered over. Leaving the ask up would give
@@ -245,6 +310,25 @@ export async function connect() {
       log("this firmware does not report its transports — assuming Bluetooth only");
       deviceTransports.value = null;
     }
+
+    /* Once at connect, then on the slow timer. Asked after the transport
+     * caps so that a device with neither answers both questions in one
+     * exchange rather than delaying the file listing. */
+    /* Subscribe first: the firmware pushes the current reading on subscribe,
+     * so this usually fills the indicator without a separate round trip. The
+     * read below then only does work on firmware too old to have the
+     * service. */
+    batteryPushed = false;
+    try {
+      batteryPushed = await smp.startBatteryStatus();
+    } catch { batteryPushed = false; }
+    if (!batteryPushed) await readBattery();
+    if (battery.value) {
+      const b = battery.value;
+      log(`battery: ${b.mv} mV (~${b.pct}%)` +
+          (b.chg === undefined ? "" : b.chg ? ", charging" : ", not charging"));
+    }
+    startBatteryPoll();
 
     await refresh();
   } catch (e) {

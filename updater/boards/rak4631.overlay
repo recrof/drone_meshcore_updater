@@ -1,0 +1,243 @@
+/*
+ * Devicetree overlay for the RAKwireless RAK4631 (rak4631/nrf52840), with a
+ * RAK15001 WisBlock Flash module in the IO slot.
+ *
+ * Sixth board. Same silicon as the XIAO nRF52840 and the same chainloaded
+ * Adafruit bootloader, so nothing in the application changes; what is here is
+ * hardware plumbing plus three things the upstream board file does not do.
+ *
+ * ---- 1. The filesystem flash is not on the module ----------------------
+ *
+ * The RAK4631 core has no external flash at all. The 2 MB **GigaDevice
+ * GD25Q16** lives on a RAK15001 in the WisBlock IO slot, and without one this
+ * board is not an updater: firmware bundles are 300-500 KB each and flash0
+ * has no room to spare once it holds two MCUboot slots. A board built without
+ * the module fails at `LittleFS mounted` and says so at boot, which is the
+ * right failure — it is a missing part, not a misconfiguration.
+ *
+ * The pins are already correct upstream and were not chosen here: Zephyr's
+ * `rak4631_nrf52840-pinctrl.dtsi` routes QSPI to SCK P0.03, CSN P0.26, IO0
+ * P0.30, IO1 P0.29, IO2 P0.28, IO3 P0.02 — the same six the previous Arduino
+ * updater drove this exact module with. `&qspi` is already `okay` there too.
+ * All that is missing is the flash node.
+ *
+ * **Single-lane on purpose.** Zephyr defaults `readoc`/`writeoc` to FAST_READ
+ * (0x0B) and PP (0x02), which work whether or not the IO slot carries the two
+ * quad lines to the module — and that is the one fact about this hardware not
+ * settled from a source that could be read. The chip supports quad; the
+ * previous implementation ran it in quad and worked, which is good evidence
+ * the module wires all four. But this board is being added without one on the
+ * desk, and the failure mode of guessing wrong is a filesystem that reads
+ * garbage rather than one that reads slowly.
+ *
+ * Nothing here is waiting on that: at 16 MHz single-lane the bus does ~2 MB/s,
+ * and the measured ceiling on the most-tuned board in this project is 830 KB/s
+ * reading — set by littlefs's transaction count, not by the wire (see
+ * common.dtsi's cache-size). If a run ever proves the quad lines are there,
+ * `readoc = "read4o"; writeoc = "pp4o";` plus a real
+ * `quad-enable-requirements` is the whole change.
+ *
+ * ---- 2. The LED polarity is wrong upstream ------------------------------
+ *
+ * `rak4631_nrf52840.dts` declares both LEDs `GPIO_ACTIVE_LOW`. Two
+ * independent vendor sources say otherwise, and they agree with each other:
+ * RAK's own Arduino variant (`LED_STATE_ON 1`) and the bootloader RAK ships
+ * for this board (`src/boards/wiscore_rak4631_board/board.h`, also
+ * `LED_STATE_ON 1`). So the pins source rather than sink and the polarity is
+ * inverted here — the same fix, for the same reason, as the vendored nRF54L
+ * board files (Trap 1b). Corrected in the overlay rather than in the board
+ * files so that a Zephyr update cannot quietly undo it.
+ *
+ * ---- 3. Two LEDs, so the two-colour renderer ----------------------------
+ *
+ * There is no red LED on this board — green on P1.03 and blue on P1.04 — so it
+ * supplies `green-led` and `blue-led` and led.c picks its two-colour renderer.
+ * That keeps every state looking exactly as it does on the XIAO nRF52840:
+ * blue slow-blinking is standby, blue fast is a client connected, green
+ * blinking is a transfer in progress, green solid is done. Only DONE_FAIL has
+ * to differ, and it lights both LEDs in a double flash rather than borrowing
+ * green from the two success states either side of it.
+ *
+ * **This shipped once as `status-led` on the green pin**, which used led.c's
+ * mono renderer and left the blue unclaimed. Nothing about it was ambiguous
+ * and it was still the wrong call: the same firmware on two boards in the same
+ * room said "idle" in two different colours. The XIAO's scheme is also the one
+ * the Arduino updater used, so a person carrying both reads one vocabulary.
+ *
+ * Aliasing red-led to the green pin — the other way to fill an RGB shape — is
+ * worse than either: `write_all(true,false,false)` for DONE_FAIL and
+ * `write_all(false,true,false)` for DONE_OK would drive the *same* LED, and
+ * the two states you read the LED to tell apart would render identically.
+ *
+ * ---- 4. The console is USB CDC -----------------------------------------
+ *
+ * The board file chooses `uart1` (P0.16/P0.15), which needs a USB-serial
+ * adapter wired to the WisBlock base. The connector a person actually plugs
+ * in goes to the nRF52840's native USB, so the console follows it — the same
+ * arrangement as the XIAO nRF52840, and what the previous Arduino updater
+ * used. It also makes `src/usb_dfu_touch.c` meaningful here: that file is
+ * gated on `CONFIG_SOC_NRF52840 AND CONFIG_USBD_CDC_ACM_CLASS`, so on a
+ * UART-console build it would silently not be compiled in.
+ *
+ * This is `boards/common/usb/cdc_acm_serial.dtsi` inlined rather than
+ * included: that file is found relative to a *board* directory, which this
+ * overlay is not in.
+ */
+
+#include "../common.dtsi"
+#include "../rak4631_partitions.dtsi"
+
+/ {
+	chosen {
+		/* The application lives in slot0; MCUboot's own image overrides
+		 * this to boot_partition (sysbuild/mcuboot_rak4631.overlay).
+		 * The board's default points at slot0_partition of a table this
+		 * fragment deletes, so it has to be re-chosen either way. */
+		zephyr,code-partition = &slot0_partition;
+
+		zephyr,console = &board_cdc_acm_uart;
+		zephyr,shell-uart = &board_cdc_acm_uart;
+		zephyr,uart-mcumgr = &board_cdc_acm_uart;
+		zephyr,bt-mon-uart = &board_cdc_acm_uart;
+		zephyr,bt-c2h-uart = &board_cdc_acm_uart;
+	};
+
+	/* led.c asks by colour. Supplying green and blue but no red selects its
+	 * two-colour renderer, which matches the XIAO's scheme everywhere it
+	 * can — see the header. */
+	aliases {
+		green-led = &green_led;
+		blue-led = &blue_led;
+	};
+};
+
+&zephyr_udc0 {
+	board_cdc_acm_uart: board_cdc_acm_uart {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};
+
+/* Polarity, not pin choice — see the header. */
+&green_led {
+	gpios = <&gpio1 3 GPIO_ACTIVE_HIGH>;
+};
+
+&blue_led {
+	gpios = <&gpio1 4 GPIO_ACTIVE_HIGH>;
+};
+
+/*
+ * The RAK15001's GD25Q16, as one LittleFS volume over the whole part.
+ *
+ * `jedec-id` is the chip's answer to 0x9F: GigaDevice 0xC8, type 0x40,
+ * capacity 0x15. `size` is in **bits**, not bytes — 16777216 is 2 MiB, the
+ * same value the XIAO's 2 MB P25Q16H carries.
+ *
+ * 2 MB is roughly four firmware bundles, a quarter of the nRF54L board's
+ * 8 MB. Worth knowing before loading a library onto one.
+ */
+&qspi {
+	gd25q16: gd25q16@0 {
+		compatible = "nordic,qspi-nor";
+		reg = <0>;
+		sck-frequency = <16000000>;
+		jedec-id = [c8 40 15];
+		size = <16777216>;
+
+		/* No quad mode is selected above, so there is no Quad Enable
+		 * bit to set. Saying so is not the same as leaving it out: the
+		 * property defaults to "S1B6", which would have the driver
+		 * write a status register on a chip whose QE bit is somewhere
+		 * else entirely (GD25Q16C keeps it in S2 bit 1). */
+		quad-enable-requirements = "NONE";
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			lfs_partition: partition@0 {
+				label = "littlefs_storage";
+				reg = <0x00000000 DT_SIZE_M(2)>;
+			};
+		};
+	};
+};
+
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/adc/nrf-saadc.h>
+
+/*
+ * ---- Battery ------------------------------------------------------------
+ *
+ * VBAT reaches P0.05 (AIN3) through a fixed divider — no enable pin, unlike
+ * the XIAO, so it is always connected and there is nothing to gate. P0.05 is
+ * unclaimed in this build.
+ *
+ * **The ratio below is the physical parts, 1.0M + 1.5M — measured, after a
+ * first attempt that reasoned its way to the wrong number.**
+ *
+ * RAK's own example code is self-contradictory about this board: it states
+ * `VBAT_DIVIDER (0.4F)` — "1.5M + 1M on VBAT" — and then applies a
+ * compensation of 1.73, where a 0.4 divider needs 2.5. Only one can be right.
+ *
+ * The first version here took 1.73 as the survivor, on the grounds that it is
+ * what MeshCore effectively uses on this exact board:
+ *
+ *     variants/rak4631/RAK4631Board.h
+ *     #define ADC_MULTIPLIER (3 * 1.73 * 1.187 * 1000)     // 1.5040 mV/LSB
+ *
+ * and that the Adafruit/Seeed core defaults to a 3.6 V range rather than the
+ * 3.0 that expression implies (`wiring_analog_nRF52.c`, AR_DEFAULT), which
+ * makes their compensation 1.5040/0.87891 = 1.711.
+ *
+ * **On hardware that read 4314 mV against a multimeter's 4169** — 3.5% high.
+ * The implied true ratio is 1.711 x 4169/4314 = 1.654, which is the
+ * *comment's* 1.5M + 1M pair (1.667) and not the code's 1.73, to within 0.8%.
+ * So the stale half was the constant, not the comment, and the reasoning that
+ * picked it was wrong in a way no amount of further reading would have
+ * settled: **two vendor numbers disagreed and only hardware could say which.**
+ *
+ * 1.667 is what is encoded, rather than the 1.654 the single measurement
+ * implies exactly, because the 0.8% between them is smaller than the SAADC's
+ * own untrimmed gain error (spec: +/-3%). Calibrating it away would bake one
+ * chip's error into a constant every board shares. Expect roughly +33 mV at a
+ * full cell; if that ever matters, `full-ohms` is the one line to change.
+ *
+ * Acquisition time is 40 us rather than the 10 us default for the same reason
+ * as on the XIAO: ~630k of source impedance cannot charge the SAADC's
+ * sampling capacitor in 10 us, and the failure is a low reading with nothing
+ * to say why.
+ *
+ * No charge-status input: the charger sits on the WisBlock base board and
+ * exposes nothing to the module, so battery.c reports "charging: unknown"
+ * here rather than inventing an answer from the voltage.
+ */
+&adc {
+	status = "okay";
+
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@3 {
+		reg = <3>;
+		zephyr,gain = "ADC_GAIN_1_5";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 40)>;
+		zephyr,input-positive = <NRF_SAADC_AIN3>;
+		zephyr,resolution = <12>;
+	};
+};
+
+/ {
+	vbatt: vbatt {
+		compatible = "voltage-divider";
+		io-channels = <&adc 3>;
+		output-ohms = <1500000>;
+		full-ohms = <2500000>;
+	};
+
+	aliases {
+		battery-voltage = &vbatt;
+	};
+};

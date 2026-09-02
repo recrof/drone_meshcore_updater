@@ -27,6 +27,7 @@
 #include "dfu_client.h"
 #include "dfu_status.h"
 #include "survey.h"
+#include "battery.h"
 #include "app.h"
 
 LOG_MODULE_REGISTER(dfu_runner, LOG_LEVEL_INF);
@@ -322,6 +323,19 @@ static void run_thread(void *a, void *b, void *c)
 		LOG_INF("DFU runner: begin path=%s", s_path);
 	}
 	led_set_state(LED_STATE_DFU_RUNNING);
+
+	/* Recorded at the start of every run, and only recorded. A Legacy DFU
+	 * has no resume (Trap 2) and some targets erase in place before the
+	 * first byte arrives, so a transfer that dies of a flat cell can leave
+	 * the target with no application — which is exactly the failure whose
+	 * cause is unrecoverable from the log afterwards unless the level was
+	 * written down before it happened.
+	 *
+	 * It does not block the run. The device is on a mast because nobody can
+	 * reach it, and refusing to try is its own failure mode; the operator
+	 * decides, from a number the UI shows them, not from a threshold picked
+	 * here. */
+	battery_log_state("dfu");
 
 	/* Reload config.txt — users edit + re-upload it while the device
 	 * is running, and we want those changes to apply without a

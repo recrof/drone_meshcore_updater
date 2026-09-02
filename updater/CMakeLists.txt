@@ -25,6 +25,9 @@ target_sources(app PRIVATE
   src/selfconfirm.c
   src/config.c
   src/antenna.c
+  src/battery.c
+  src/battery_curve.c
+  src/battery_status.c
   src/ble_scanner.c
   src/ble_pairing.c
   src/survey.c
