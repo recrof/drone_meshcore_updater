@@ -574,6 +574,177 @@ export const CONFIG_SCHEMA = [
            unsticks when its own watchdog fires, 60-120 s on stock Adafruit
            bootloaders, so raise this if failures repeat immediately.`,
   },
+
+  /* ---- MeshCore status messages over LoRa (RAK4631 only) --------------
+   *
+   * Every key here is inert on a board with no radio: CONFIG_LORA is off,
+   * APP_LORA_STATUS is unselectable, and config.c still parses them, so a
+   * config.txt is portable between boards. They are shown regardless for
+   * the same reason ext_antenna is — a per-board form would need the
+   * firmware to describe itself, and the descriptions say where they apply.
+   */
+  {
+    section: "MeshCore status (RAK4631)",
+    key: "lora_channel",
+    label: "lora_channel",
+    title: "Channel to announce on",
+    type: "text",
+    def: "#drone-updater",
+    maxLength: 31,
+    placeholder: "(off)",
+    desc: `Hashtag channel for progress messages. The key is derived from the
+           name — sha256(name) — so this is the whole setup and there is no
+           secret to distribute. Empty switches the radio off entirely. Add the
+           same name in your MeshCore client to hear them.`,
+    check: (v) => (v === "" || /^#?[^\s]{1,30}$/.test(v)
+      ? null
+      : "no spaces — the name is hashed exactly as typed"),
+  },
+  {
+    key: "lora_sender",
+    label: "lora_sender",
+    title: "Name shown before the message",
+    type: "text",
+    def: "drone-updater",
+    maxLength: 23,
+    desc: `Rendered as "name: message". Clients split on the first ": ", so a
+           colon here costs every message its attribution — the firmware
+           refuses one rather than sending a name nobody chose.`,
+    check: (v) => (v.includes(":") ? "may not contain \":\"" : null),
+  },
+  {
+    key: "lora_freq",
+    label: "lora_freq",
+    title: "Frequency",
+    type: "text",
+    def: "",
+    unit: "MHz",
+    placeholder: "(unset — nothing is transmitted)",
+    desc: `⚠ Required before anything is sent. There is no default on purpose:
+           the right carrier depends on your region and your mesh, and an unset
+           one keeps the radio silent rather than guessing. Must match the mesh
+           exactly — decimals matter, 910.425 and 910 are different networks,
+           and the wrong one transmits perfectly and is heard by nobody.`,
+    check: (v) => {
+      if (v === "") return null;      /* unset is valid, and is the default */
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 100 && n <= 1000
+        ? null : "MHz, between 100 and 1000";
+    },
+  },
+  {
+    key: "lora_bw",
+    label: "lora_bw",
+    title: "Bandwidth",
+    type: "int",
+    def: 62,
+    min: 7,
+    max: 500,
+    unit: "kHz",
+    desc: `62 means 62.5. Only the radio's own steps exist — 7, 10, 15, 20, 31,
+           41, 62, 125, 250, 500 — and anything else is refused at send time
+           rather than rounded to a neighbour.`,
+  },
+  {
+    key: "lora_sf",
+    label: "lora_sf",
+    title: "Spreading factor",
+    type: "int",
+    def: 7,
+    min: 5,
+    max: 12,
+    desc: `Match the mesh. Higher reaches further and costs air time: one
+           message is ~255 ms at SF7/62.5 kHz and roughly doubles per step.`,
+  },
+  {
+    key: "lora_cr",
+    label: "lora_cr",
+    title: "Coding rate",
+    type: "int",
+    def: 5,
+    min: 5,
+    max: 8,
+    desc: `The denominator of MeshCore's 4/N. 5 means 4/5.`,
+  },
+  {
+    key: "lora_tx_power",
+    label: "lora_tx_power",
+    title: "LoRa TX power",
+    type: "int",
+    def: 22,
+    min: -9,
+    max: 22,
+    unit: "dBm",
+    desc: `The SX1262's ceiling is +22. Unrelated to ble_tx_power — different
+           radio, different band.`,
+  },
+  {
+    key: "lora_events",
+    label: "lora_events",
+    title: "What to announce",
+    type: "text",
+    def: "target,progress,verify,done",
+    desc: `Comma-separated: target, progress, verify, done. Empty announces
+           nothing while leaving the channel configured. Start with "done"
+           alone when bringing a new mesh up — progress messages transmit in
+           the middle of a DFU stream, which is the one moment worth being
+           careful about.`,
+  },
+  {
+    key: "lora_hello",
+    label: "lora_hello",
+    title: "Announce at boot",
+    type: "bool",
+    def: false,
+    desc: `Sends "online" once at power-on. On the bench it proves the channel,
+           the key and the modem with no target involved; in flight it is the
+           only positive signal that the updater booted and reached the mesh.`,
+  },
+  {
+    key: "lora_path_hash",
+    label: "lora_path_hash",
+    title: "Path hash width",
+    type: "int",
+    def: 2,
+    min: 1,
+    max: 3,
+    unit: "B",
+    desc: `How many bytes of its own hash each repeater appends when it relays
+           one of these messages. Travels inside the packet, so it needs no
+           agreement with the mesh — it is the same thing MeshCore nodes call
+           hash_mode, where mode N means N+1 bytes. 1 is MeshCore's default and
+           is enough to route, but collides often enough that you cannot always
+           tell which repeater relayed; 2 buys that for one byte per hop. 4 is
+           reserved by the protocol.`,
+  },
+  {
+    key: "lora_epoch",
+    label: "lora_epoch",
+    title: "Clock at boot",
+    type: "int",
+    def: 0,
+    min: 0,
+    max: 4294967295,
+    unit: "s",
+    placeholder: "(unknown)",
+    desc: `Unix seconds, added to uptime to timestamp each message. There is no
+           RTC on this board, so left at 0 the messages still work — the
+           timestamp's real job is keeping each packet's hash distinct so
+           repeaters do not suppress it — but clients will render them as 1970.
+           Set it to the current epoch when you edit this file.`,
+  },
+  {
+    key: "lora_min_gap_ms",
+    label: "lora_min_gap_ms",
+    title: "Minimum gap between messages",
+    type: "int",
+    def: 3000,
+    min: 0,
+    max: 60000,
+    unit: "ms",
+    desc: `Backstop under the per-event rules, so no combination of retries and
+           progress edges can monopolise a shared channel.`,
+  },
 ];
 
 /* Flat key → descriptor lookup. */

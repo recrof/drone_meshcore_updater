@@ -43,6 +43,16 @@ extern "C" {
  */
 #define APP_CONFIG_MAPPING_MAX 192
 
+/* "#drone-updater" and a little room. MeshCore hashes the name as typed, so a
+ * trailing space or a smart quote is a different channel — the length is not
+ * the thing to be generous about. */
+#define APP_CONFIG_CHANNEL_MAX 32
+
+/* The name shown before the colon in every message. Kept well under the 50
+ * characters MeshCore clients will accept as a sender prefix; anything longer
+ * is displayed as part of the message instead of as a name. */
+#define APP_CONFIG_SENDER_MAX 24
+
 struct app_config {
 	/* Substring filter for advertised BLE name. Empty = accept any peer
 	 * that exposes the Legacy DFU service. Multiple substrings may be
@@ -273,6 +283,104 @@ struct app_config {
 	 * page and drifts. 2-3 is the usable range.
 	 */
 	uint8_t  erase_inflight;
+
+	/* ---- MeshCore status messages over LoRa (RAK4631 only) -----------
+	 *
+	 * See lora_status.h for what is sent and when, and meshcore_grp.h for
+	 * the packet. These keys do nothing on a board with no radio.
+	 */
+
+	/* Hashtag channel to transmit on, e.g. "#drone-updater". The key is
+	 * derived from the name — sha256(name)[0:16] — so this is the whole
+	 * configuration: there is no separate secret to distribute.
+	 *
+	 * ⚠ Empty is the off switch. Nothing is derived, nothing is queued and
+	 * the radio is never keyed, which is the right default for the five
+	 * boards that have no LoRa and for anyone who has not chosen a channel.
+	 *
+	 * A leading '#' is added if absent, matching MeshCore's own handling of
+	 * a bare region name.
+	 */
+	char     lora_channel[APP_CONFIG_CHANNEL_MAX];
+
+	/* The "<sender>: " prefix inside each message. Clients split on the
+	 * first ": ", so a name containing a colon loses its attribution and
+	 * the whole line renders as an unattributed message. */
+	char     lora_sender[APP_CONFIG_SENDER_MAX];
+
+	/* Carrier frequency in Hz. config.txt takes MHz — `lora_freq=910.425`
+	 * — because that is the unit every MeshCore client displays.
+	 *
+	 * ⚠ 0 means UNSET, and unset means silent: lora_tx_send() refuses it,
+	 * so a device nobody has configured never transmits. There is
+	 * deliberately no default, because the right carrier depends on a
+	 * region and a mesh that the firmware cannot know. */
+	uint32_t lora_freq_hz;
+
+	/* Bandwidth in kHz, as clients show it: 7, 10, 15, 20, 31, 41, 62,
+	 * 125, 250 or 500. 62 means 62.5. */
+	uint16_t lora_bw_khz;
+
+	/* Spreading factor, 5-12. */
+	uint8_t  lora_sf;
+
+	/* Coding-rate denominator, 5-8, for the 4/N MeshCore shows. */
+	uint8_t  lora_cr;
+
+	/* TX power in dBm. The RAK4631's SX1262 goes to +22. */
+	int8_t   lora_tx_power;
+
+	/* Which events transmit; see the LORA_EVT_* bits in lora_status.h.
+	 * config.txt takes a comma-separated list:
+	 *   lora_events=target,progress,verify,done
+	 * An absent key means all four. `lora_events=` with nothing after it
+	 * means none, which is a quieter off switch than clearing the channel.
+	 */
+	uint8_t  lora_events;
+
+	/* Hard minimum between transmissions, milliseconds. A backstop under
+	 * the per-event rules in lora_status.c, so that no combination of
+	 * retries and progress edges can monopolise a shared channel. At
+	 * SF7/62.5 kHz one message is ~255 ms of air time. */
+	uint16_t lora_min_gap_ms;
+
+	/* How many bytes of its own hash each relaying repeater appends to the
+	 * packet's path, 1 to 3.
+	 *
+	 * This is the sender's call and it rides in the packet, so it needs no
+	 * agreement with the mesh — MeshCore nodes expose the same thing as
+	 * their `hash_mode` CLI setting, where mode N means N+1 bytes.
+	 *
+	 * 2 by default. One byte is MeshCore's own default and is enough to
+	 * route, but it collides often enough that a listener cannot always
+	 * say *which* repeater relayed a packet; the second byte buys that
+	 * attribution for one extra byte per hop. 4 is reserved by MeshCore
+	 * (isValidPathLen) and refused here.
+	 */
+	uint8_t  lora_path_hash;
+
+	/* Unix seconds at boot, or 0. There is no RTC on this board, so
+	 * message timestamps are this plus uptime. Left at 0 the messages
+	 * still work — the value's real job is keeping each packet's hash
+	 * distinct so repeaters do not suppress it as a duplicate — but
+	 * clients will render them as 1970. The web client can write the
+	 * current time here when it uploads a bundle.
+	 */
+	uint32_t lora_epoch;
+
+	/* Transmit one "online" message at boot.
+	 *
+	 * On the bench this is the whole bring-up test: it proves the channel
+	 * name, the key derivation, the modem settings and the antenna in one
+	 * shot, with no DFU target and no second board involved. If this lands
+	 * in a client, everything downstream of it is a formatting question.
+	 *
+	 * Left on by default because it is just as useful in flight — it is
+	 * the only positive signal that the updater powered up and reached the
+	 * mesh, and silence otherwise means "no target found yet", which looks
+	 * identical to a device that never booted.
+	 */
+	bool     lora_hello;
 };
 
 /* Reset to compile-time defaults, then overlay whatever config.txt

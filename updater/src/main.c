@@ -30,6 +30,7 @@
 #include "crash_record.h"
 #include "selfconfirm.h"
 #include "config.h"
+#include "lora_status.h"
 #include "ble_tx_power.h"
 #include "antenna.h"
 #include "battery.h"
@@ -489,6 +490,21 @@ int main(void)
 		led_set_state(LED_STATE_DONE_FAIL);
 		return rc;
 	}
+
+	/* The LoRa radio, and the "online" message if lora_hello is set.
+	 *
+	 * **After bt_ready(), deliberately.** This ran before it once, and that
+	 * ordering puts a second radio — the newest and least proven code in
+	 * the firmware — ahead of the transport every other feature depends on.
+	 * A hang or a brownout in here then costs the device its Bluetooth as
+	 * well, and a device with no Bluetooth cannot be asked what went wrong:
+	 * the log, the config editor and the DFU trigger all arrive over it.
+	 *
+	 * Nothing is lost by the move. The radio is only needed once a DFU is
+	 * under way, which cannot happen before the transport is up, and the
+	 * boot message is not so urgent that it should outrank being reachable.
+	 * Compiles to nothing on the boards with no radio. */
+	lora_status_boot();
 
 	/*
 	 * Unattended operation: power-on is the trigger.

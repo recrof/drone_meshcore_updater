@@ -53,6 +53,23 @@ if(CONFIG_SOC_NRF52840 AND CONFIG_USBD_CDC_ACM_CLASS)
   target_sources(app PRIVATE src/usb_dfu_touch.c)
 endif()
 
+# MeshCore status messages over LoRa. Three files rather than one: the packet
+# encoder is portable C with no Zephyr in it — updater/tests/meshcore_grp/
+# compiles that same file on the host and checks its output against an
+# independent decoder — the crypto is one shim with a PSA and an OpenSSL side,
+# and only lora_tx.c touches the radio.
+#
+# Gated on the app symbol, which depends on CONFIG_LORA, which only the
+# RAK4631 turns on. See updater/Kconfig.
+if(CONFIG_APP_LORA_STATUS)
+  target_sources(app PRIVATE
+    src/lora_status.c
+    src/lora_tx.c
+    src/meshcore_grp.c
+    src/meshcore_crypto_psa.c
+  )
+endif()
+
 target_include_directories(app PRIVATE src)
 
 # The ElegantOTA transport, and the only file here that is not board-neutral.

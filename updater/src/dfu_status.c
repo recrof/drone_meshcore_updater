@@ -32,6 +32,12 @@
 #include <string.h>
 
 #include "dfu_status.h"
+/* The LoRa mirror of this record. Compiles to nothing on a board with no
+ * radio (lora_status.h supplies empty inlines), so the calls below are
+ * unconditional and this file keeps one code path. Each is a bounded amount
+ * of work on the caller's thread — an edge test and at most a queue put —
+ * never a transmission; see lora_status.h. */
+#include "lora_status.h"
 #include "dfu_client.h"
 
 static struct bt_uuid_128 svc_uuid = BT_UUID_INIT_128(
@@ -276,6 +282,7 @@ void dfu_status_begin(uint8_t retries)
 	k_spin_unlock(&lock, key);
 
 	mark_dirty(true);
+	lora_status_begin(retries);
 }
 
 void dfu_status_bundle(const char *path)
@@ -309,6 +316,7 @@ void dfu_status_attempt(uint8_t attempt)
 	k_spin_unlock(&lock, key);
 
 	mark_dirty(true);
+	lora_status_attempt(attempt);
 }
 
 void dfu_status_set_state(enum dfu_status_state state)
@@ -320,6 +328,7 @@ void dfu_status_set_state(enum dfu_status_state state)
 
 	if (changed) {
 		mark_dirty(true);
+		lora_status_state(state);
 	}
 }
 
@@ -335,6 +344,7 @@ void dfu_status_target(const char *name)
 	k_spin_unlock(&lock, key);
 
 	mark_dirty(true);
+	lora_status_target(name);
 }
 
 void dfu_status_progress(uint8_t percent, uint32_t sent, uint32_t total)
@@ -346,6 +356,7 @@ void dfu_status_progress(uint8_t percent, uint32_t sent, uint32_t total)
 	k_spin_unlock(&lock, key);
 
 	mark_dirty(false);
+	lora_status_progress(percent, sent, total);
 }
 
 void dfu_status_finish(enum dfu_status_result result)
@@ -359,6 +370,7 @@ void dfu_status_finish(enum dfu_status_result result)
 	k_spin_unlock(&lock, key);
 
 	mark_dirty(true);
+	lora_status_finish(result);
 }
 
 void dfu_status_reset(void)

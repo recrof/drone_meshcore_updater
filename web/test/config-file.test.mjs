@@ -43,6 +43,25 @@ const FIRMWARE_DEFAULTS = {
    * Defaulting it on would change hardware behaviour on every deployed device
    * as a side effect of adding a key. */
   auto_flash: false, ext_antenna: false, fast_charge: false,
+
+  /* MeshCore status messages. The radio values are one specific mesh
+   * (910.425 MHz, 62.5 kHz, SF7, 4/5) rather than a regional band plan,
+   * because a status message is only useful if it lands on the network the
+   * operator is standing in — wrong-but-plausible defaults would transmit
+   * successfully and be heard by nobody.
+   *
+   * lora_epoch is 0 because this board has no RTC. The messages work anyway;
+   * the timestamp's real job is keeping each packet's hash distinct.
+   *
+   * lora_hello is off: transmitting is the one thing this firmware does that
+   * nobody asked for, and on by default it would happen on the first boot
+   * after a flash, before there is any evidence the image is healthy.
+   */
+  lora_channel: "#drone-updater", lora_sender: "drone-updater",
+  lora_freq: "", lora_bw: 62, lora_sf: 7, lora_cr: 5,
+  lora_tx_power: 22, lora_events: "target,progress,verify,done",
+  lora_hello: false, lora_epoch: 0, lora_min_gap_ms: 3000,
+  lora_path_hash: 2,
 };
 const d = defaults();
 t("schema has exactly the firmware keys",
