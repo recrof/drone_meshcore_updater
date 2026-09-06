@@ -265,11 +265,45 @@ static void apply_kv(struct app_config *c, const char *key, const char *val)
 			{"done", LORA_EVT_DONE},
 		};
 		uint8_t bits = 0;
+		const char *p = val;
 
-		for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
-			if (strstr(val, names[i].name) != NULL) {
-				bits |= names[i].bit;
+		/* Exact tokens, not substrings.
+		 *
+		 * This was strstr() over the whole value, which is wrong in
+		 * both directions: `no-progress` *enabled* progress, and any
+		 * unrecognised value — a typo like `don`, or a reasonable
+		 * guess like `all` — matched nothing and silently produced 0,
+		 * which is indistinguishable from the documented "empty means
+		 * none". The operator gets total radio silence with nothing in
+		 * the log to explain it, on a device whose whole purpose is to
+		 * talk.
+		 */
+		while (*p != '\0') {
+			const char *end;
+			size_t len;
+			bool known = false;
+
+			while (*p == ' ' || *p == '\t' || *p == ',') p++;
+			if (*p == '\0') break;
+			end = p;
+			while (*end != '\0' && *end != ',') end++;
+			len = (size_t)(end - p);
+			while (len > 0 && (p[len - 1] == ' ' || p[len - 1] == '\t')) len--;
+
+			for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
+				if (len == strlen(names[i].name) &&
+				    strncmp(p, names[i].name, len) == 0) {
+					bits |= names[i].bit;
+					known = true;
+					break;
+				}
 			}
+			if (!known && len > 0) {
+				LOG_WRN("config.txt: lora_events has no event "
+					"called \"%.*s\" — expected target, "
+					"progress, verify or done", (int)len, p);
+			}
+			p = end;
 		}
 		c->lora_events = bits;
 		return;

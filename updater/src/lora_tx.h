@@ -23,6 +23,25 @@
 extern "C" {
 #endif
 
+/*
+ * The modem settings for one transmission.
+ *
+ * Passed by value rather than read from app_config inside the send, because
+ * the caller runs on its own thread and app_config_load() — which the DFU
+ * runner calls before *every* attempt — begins by memset'ing the live config
+ * to defaults before re-parsing it. A pointer held across that window can be
+ * read mid-wipe: tx_power reads back 0 and the status message goes out at
+ * 0 dBm instead of +22, which from a drone is indistinguishable from being
+ * out of range.
+ */
+struct lora_tx_params {
+	uint32_t freq_hz;
+	uint16_t bw_khz;
+	uint8_t sf;
+	uint8_t cr;
+	int8_t tx_power;
+};
+
 /* Bind the radio device. Returns 0, -ENODEV if the node is missing or the
  * driver did not come up. Safe to call more than once. */
 int lora_tx_init(void);
@@ -42,7 +61,7 @@ int lora_tx_init(void);
  *
  * Returns 0, or a negative errno from the driver.
  */
-int lora_tx_send(const uint8_t *frame, size_t len);
+int lora_tx_send(const struct lora_tx_params *p, const uint8_t *frame, size_t len);
 
 #ifdef __cplusplus
 }

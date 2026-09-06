@@ -44,13 +44,26 @@ struct evt {
  * and the thread drains far faster than a DFU generates them. */
 K_MSGQ_DEFINE(s_q, sizeof(struct evt), 6, 4);
 
-/* Run state. Only touched from the hooks, which are serialised by the fact
- * that a run is driven by one worker thread; the queue is the thread
- * boundary. */
+/* Run state.
+ *
+ * Guarded, because the hooks do NOT all run on one thread: dfu_status.c's
+ * setters are called from the DFU worker and from the Bluetooth RX thread, so
+ * the read-modify-write of the high-water mark below can interleave, and a
+ * target name can be read while it is half-written. Same discipline as
+ * dfu_status.c, and for the same reason. (An earlier comment here claimed a
+ * single worker thread serialised these; that was wrong, and contradicted
+ * lora_status.h two files away.) */
+static struct k_spinlock s_lock;
 static char s_name[LORA_NAME_MAX];
 static uint8_t s_attempt;
 static uint8_t s_retries;
-static uint8_t s_high_pct;    /* high-water mark across the whole run */
+/* The furthest this run has ever got, in whole percent. Maintained even when
+ * progress messages are switched off, because the failure message reports it
+ * — see lora_status_progress(). */
+static uint8_t s_high_pct;
+/* The last 25/50/75 bucket announced, so each is sent at most once per run.
+ * Distinct from s_high_pct: this one gates transmission, that one is data. */
+static uint8_t s_high_bucket;
 static bool s_announced;      /* target announced once per run */
 static bool s_verified;       /* VERIFYING announced once per run */
 static uint32_t s_t0;
@@ -108,59 +121,96 @@ void lora_status_boot(void)
 
 void lora_status_begin(uint8_t retries)
 {
+	k_spinlock_key_t key = k_spin_lock(&s_lock);
+
 	s_retries = retries;
 	s_attempt = 0;
 	s_high_pct = 0;
+	s_high_bucket = 0;
 	s_announced = false;
 	s_verified = false;
 	s_name[0] = '\0';
 	s_t0 = k_uptime_get_32();
+	k_spin_unlock(&s_lock, key);
 }
 
 void lora_status_attempt(uint8_t attempt)
 {
+	k_spinlock_key_t key = k_spin_lock(&s_lock);
+
 	s_attempt = attempt;
+	k_spin_unlock(&s_lock, key);
 }
 
 void lora_status_target(const char *name)
 {
+	k_spinlock_key_t key;
 	struct evt e;
+	bool first;
 
 	if (name == NULL || name[0] == '\0') {
 		return;
 	}
+
+	key = k_spin_lock(&s_lock);
 	strncpy(s_name, name, sizeof(s_name) - 1);
 	s_name[sizeof(s_name) - 1] = '\0';
-
-	if (s_announced || !enabled(LORA_EVT_TARGET)) {
-		return;
+	first = !s_announced;
+	if (first) {
+		s_announced = true;
 	}
-	s_announced = true;
-
+	/* Filled under the lock so the queued copy cannot catch a name
+	 * half-written by a concurrent call. */
 	memset(&e, 0, sizeof(e));
 	e.kind = EVT_TARGET;
 	e.attempt = s_attempt;
 	e.retries = s_retries;
 	memcpy(e.name, s_name, sizeof(e.name));
+	k_spin_unlock(&s_lock, key);
+
+	if (!first || !enabled(LORA_EVT_TARGET)) {
+		return;
+	}
 	push(&e);
 }
 
 void lora_status_progress(uint8_t percent, uint32_t sent, uint32_t total)
 {
+	k_spinlock_key_t key;
 	struct evt e;
 	uint8_t bucket;
+	bool send;
 
-	if (!enabled(LORA_EVT_PROGRESS) || percent > 100U) {
+	if (percent > 100U) {
 		return;
+	}
+
+	key = k_spin_lock(&s_lock);
+	/* **Unconditionally, before any enabled() gate.** This is the number
+	 * the failure message reports, and it is the most useful thing in it:
+	 * "never connected" and "died at 85%" need different responses. It used
+	 * to be updated only when progress messages were switched on, so with
+	 * `lora_events=done` — the setting the config editor recommends for
+	 * bringing a new mesh up — every failure claimed 0%.
+	 *
+	 * Whole percent, not the 25/50/75 bucket, for the same reason: a
+	 * bucketed high-water can never report anything above 75. */
+	if (percent > s_high_pct) {
+		s_high_pct = percent;
 	}
 	/* 25/50/75 only. 100 is not a bucket: the done message carries it, and
 	 * announcing both would put two transmissions back to back at the one
 	 * moment the DFU is finishing its handshake. */
 	bucket = (percent / 25U) * 25U;
-	if (bucket == 0U || bucket > 75U || bucket <= s_high_pct) {
+	send = (bucket != 0U) && (bucket <= 75U) && (bucket > s_high_bucket);
+	if (send) {
+		s_high_bucket = bucket;
+	}
+	k_spin_unlock(&s_lock, key);
+
+	if (!send || !enabled(LORA_EVT_PROGRESS)) {
 		return;
 	}
-	s_high_pct = bucket;
 
 	memset(&e, 0, sizeof(e));
 	e.kind = EVT_PROGRESS;
@@ -175,26 +225,38 @@ void lora_status_progress(uint8_t percent, uint32_t sent, uint32_t total)
 
 void lora_status_state(enum dfu_status_state state)
 {
+	k_spinlock_key_t key;
 	struct evt e;
+	bool first;
 
-	if (state != DFU_STATUS_VERIFYING || s_verified || !enabled(LORA_EVT_VERIFY)) {
+	if (state != DFU_STATUS_VERIFYING) {
 		return;
 	}
-	s_verified = true;
 
+	key = k_spin_lock(&s_lock);
+	first = !s_verified;
+	s_verified = true;
 	memset(&e, 0, sizeof(e));
 	e.kind = EVT_VERIFY;
 	memcpy(e.name, s_name, sizeof(e.name));
+	k_spin_unlock(&s_lock, key);
+
+	if (!first || !enabled(LORA_EVT_VERIFY)) {
+		return;
+	}
 	push(&e);
 }
 
 void lora_status_finish(enum dfu_status_result result)
 {
+	k_spinlock_key_t key;
 	struct evt e;
 
 	if (!enabled(LORA_EVT_DONE)) {
 		return;
 	}
+
+	key = k_spin_lock(&s_lock);
 	memset(&e, 0, sizeof(e));
 	e.kind = EVT_DONE;
 	e.result = (uint8_t)result;
@@ -203,6 +265,8 @@ void lora_status_finish(enum dfu_status_result result)
 	e.retries = s_retries;
 	e.sent = k_uptime_get_32() - s_t0;
 	memcpy(e.name, s_name, sizeof(e.name));
+	k_spin_unlock(&s_lock, key);
+
 	push(&e);
 }
 
@@ -282,24 +346,51 @@ static void tx_thread(void *a, void *b, void *c)
 	last_tx = 0;
 
 	while (true) {
-		const struct app_config *cfg;
+		/* Everything this iteration needs, copied out of the live
+		 * config in one go and never re-read. app_config_load() wipes
+		 * s_current to defaults before re-parsing it, and the DFU
+		 * runner calls it before every attempt — so a field read after
+		 * the sleep below can come back as a default (path_hash 0 ->
+		 * the encode is refused; tx_power 0 -> the message goes out at
+		 * 0 dBm). */
+		struct lora_tx_params tx;
+		char sender[APP_CONFIG_SENDER_MAX];
+		char want_channel[APP_CONFIG_CHANNEL_MAX];
+		uint32_t epoch, min_gap;
+		uint8_t path_hash;
 		uint32_t now, gap;
 		int len;
 
 		k_msgq_get(&s_q, &e, K_FOREVER);
-		cfg = app_config_current();
+		{
+			const struct app_config *cfg = app_config_current();
+
+			tx.freq_hz = cfg->lora_freq_hz;
+			tx.bw_khz = cfg->lora_bw_khz;
+			tx.sf = cfg->lora_sf;
+			tx.cr = cfg->lora_cr;
+			tx.tx_power = cfg->lora_tx_power;
+			path_hash = cfg->lora_path_hash;
+			epoch = cfg->lora_epoch;
+			min_gap = cfg->lora_min_gap_ms;
+			strncpy(sender, cfg->lora_sender, sizeof(sender) - 1);
+			sender[sizeof(sender) - 1] = '\0';
+			strncpy(want_channel, cfg->lora_channel,
+				sizeof(want_channel) - 1);
+			want_channel[sizeof(want_channel) - 1] = '\0';
+		}
 
 		/* Derive the channel key lazily, and again whenever the name
 		 * changes: config.txt is re-read before every attempt, so the
 		 * channel can move mid-run. sha256 is cheap but not free, and
 		 * this is the only thread that needs it. */
-		if (!have_key || strcmp(channel, cfg->lora_channel) != 0) {
-			if (meshcore_channel_key_from_name(cfg->lora_channel, key) != 0) {
+		if (!have_key || strcmp(channel, want_channel) != 0) {
+			if (meshcore_channel_key_from_name(want_channel, key) != 0) {
 				LOG_ERR("lora_channel=\"%s\" is not a usable channel name",
-					cfg->lora_channel);
+					want_channel);
 				continue;
 			}
-			strncpy(channel, cfg->lora_channel, sizeof(channel) - 1);
+			strncpy(channel, want_channel, sizeof(channel) - 1);
 			have_key = true;
 			LOG_INF("channel %s, hash %02x", channel, meshcore_channel_hash(key));
 		}
@@ -309,8 +400,8 @@ static void tx_thread(void *a, void *b, void *c)
 		 * drops what is genuinely stale. */
 		now = k_uptime_get_32();
 		gap = now - last_tx;
-		if (last_tx != 0U && gap < cfg->lora_min_gap_ms) {
-			k_msleep(cfg->lora_min_gap_ms - gap);
+		if (last_tx != 0U && gap < min_gap) {
+			k_msleep(min_gap - gap);
 		}
 
 		format(&e, text, sizeof(text));
@@ -322,16 +413,16 @@ static void tx_thread(void *a, void *b, void *c)
 		 * is unknown. lora_epoch, when set, makes it a real time as
 		 * well; unset, uptime alone still keeps every packet distinct.
 		 */
-		len = meshcore_grp_txt_encode(key, cfg->lora_epoch + (k_uptime_get_32() / 1000U),
-					      cfg->lora_sender, text, cfg->lora_path_hash,
-					      frame, sizeof(frame));
+		len = meshcore_grp_txt_encode(key, epoch + (k_uptime_get_32() / 1000U),
+					      sender, text, path_hash, frame,
+					      sizeof(frame));
 		if (len < 0) {
 			LOG_ERR("encode: %d", len);
 			continue;
 		}
 
 		LOG_INF("tx %d B: %s", len, text);
-		if (lora_tx_send(frame, (size_t)len) == 0) {
+		if (lora_tx_send(&tx, frame, (size_t)len) == 0) {
 			last_tx = k_uptime_get_32();
 		}
 	}

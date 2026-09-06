@@ -97,6 +97,7 @@ int meshcore_grp_txt_encode(const uint8_t key[MESHCORE_KEY_LEN], uint32_t timest
 	uint8_t mac[32];
 	size_t sender_len, text_len, text_room, plain_len, padded_len;
 	uint8_t *ct;
+	uint8_t chash;
 	int err;
 
 	if (key == NULL || sender == NULL || text == NULL || out == NULL) {
@@ -151,12 +152,27 @@ int meshcore_grp_txt_encode(const uint8_t key[MESHCORE_KEY_LEN], uint32_t timest
 		return -ENOMEM;
 	}
 
+	/* Checked, unlike every other caller of this helper: it reports a crypto
+	 * failure as the byte 0x00, which is a perfectly plausible channel hash.
+	 * Unchecked, a transient PSA error would yield a positive return length
+	 * and a well-formed frame addressed to a channel nobody is on — sent,
+	 * and discarded by every node, with nothing logged. */
+	{
+		uint8_t digest[32];
+
+		err = mc_sha256(key, MESHCORE_KEY_LEN, digest);
+		if (err != 0) {
+			return err;
+		}
+		chash = digest[0];
+	}
+
 	out[0] = (uint8_t)((PH_TYPE_GRP_TXT << PH_TYPE_SHIFT) | PH_ROUTE_FLOOD);
 	/* path_len: hash size in the top two bits, hop count in the low six.
 	 * We originate the packet, so the count is zero and the size is our
 	 * instruction to whoever relays it (Packet.h:83). */
 	out[1] = (uint8_t)((path_hash - 1U) << 6);
-	out[2] = meshcore_channel_hash(key);
+	out[2] = chash;
 
 	ct = &out[2 + PATH_HASH_SIZE + CIPHER_MAC_SIZE];
 	err = mc_aes128_ecb_encrypt(key, plain, ct, padded_len);

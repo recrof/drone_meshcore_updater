@@ -193,6 +193,16 @@ jobs:
         # is otherwise multi-GB per run.
         run: west update --narrow -o=--depth=1
 
+      # **Load-bearing, and silent when missing.** Zephyr's LoRa backend maps
+      # only 125/250/500 kHz, so a RAK4631 image built without these patches
+      # boots, binds the radio and drops every MeshCore status message with
+      # "Unsupported bandwidth: 62" — a runtime error, so the build is green
+      # and the release looks fine. `west update` rewrites the trees these
+      # live in, which is why this runs here rather than once by hand.
+      # Idempotent; see patches/apply.sh.
+      - name: Apply out-of-tree patches
+        run: sh patches/apply.sh
+
       - name: Fetch vendor blobs
         # Only the rows that declare one. `west blobs fetch` is a large
         # download and every board here but the MG24 needs nothing, so this is

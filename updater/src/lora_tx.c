@@ -29,7 +29,6 @@
  */
 
 #include "lora_tx.h"
-#include "config.h"
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/lora.h>
@@ -88,13 +87,12 @@ static int cr_from_denom(uint8_t denom, enum lora_coding_rate *out)
 	}
 }
 
-int lora_tx_send(const uint8_t *frame, size_t len)
+int lora_tx_send(const struct lora_tx_params *p, const uint8_t *frame, size_t len)
 {
-	const struct app_config *cfg = app_config_current();
 	struct lora_modem_config mc = {0};
 	int err;
 
-	if (frame == NULL || len == 0U) {
+	if (p == NULL || frame == NULL || len == 0U) {
 		return -EINVAL;
 	}
 	err = lora_tx_init();
@@ -102,25 +100,25 @@ int lora_tx_send(const uint8_t *frame, size_t len)
 		return err;
 	}
 
-	mc.frequency = cfg->lora_freq_hz;
-	err = bw_from_khz(cfg->lora_bw_khz, &mc.bandwidth);
+	mc.frequency = p->freq_hz;
+	err = bw_from_khz(p->bw_khz, &mc.bandwidth);
 	if (err != 0) {
-		LOG_ERR("lora_bw=%u is not a bandwidth this radio has", cfg->lora_bw_khz);
+		LOG_ERR("lora_bw=%u is not a bandwidth this radio has", p->bw_khz);
 		return err;
 	}
-	if (cfg->lora_sf < 5U || cfg->lora_sf > 12U) {
-		LOG_ERR("lora_sf=%u out of range", cfg->lora_sf);
+	if (p->sf < 5U || p->sf > 12U) {
+		LOG_ERR("lora_sf=%u out of range", p->sf);
 		return -EINVAL;
 	}
-	mc.datarate = (enum lora_datarate)cfg->lora_sf;
-	err = cr_from_denom(cfg->lora_cr, &mc.coding_rate);
+	mc.datarate = (enum lora_datarate)p->sf;
+	err = cr_from_denom(p->cr, &mc.coding_rate);
 	if (err != 0) {
-		LOG_ERR("lora_cr=%u is not 5..8", cfg->lora_cr);
+		LOG_ERR("lora_cr=%u is not 5..8", p->cr);
 		return err;
 	}
 
-	mc.preamble_len = (cfg->lora_sf <= 8U) ? 32U : 16U;
-	mc.tx_power = cfg->lora_tx_power;
+	mc.preamble_len = (p->sf <= 8U) ? 32U : 16U;
+	mc.tx_power = p->tx_power;
 	mc.tx = true;
 	mc.public_network = false; /* private sync word 0x1424 — see header */
 	mc.iq_inverted = false;

@@ -227,6 +227,10 @@ export function defFor(field, board) {
   return tuningFor(board)[field.key] ?? field.def;
 }
 
+/* The LoRa bandwidths the SX1262 actually has, in kHz, mirroring
+ * bw_from_khz() in updater/src/lora_tx.c. 62 means 62.5. */
+const LORA_BANDWIDTHS = [7, 10, 15, 20, 31, 41, 62, 125, 250, 500];
+
 export const CONFIG_SCHEMA = [
   {
     section: "Target selection",
@@ -641,6 +645,13 @@ export const CONFIG_SCHEMA = [
     min: 7,
     max: 500,
     unit: "kHz",
+    /* min/max alone would accept 100, which the firmware stores and then
+     * refuses on every send — the radio has ten discrete steps, not a range,
+     * and lora_tx.c declines rather than rounding to a neighbour. Without this
+     * the only symptom is a device log line nobody is watching. */
+    check: (v) => (LORA_BANDWIDTHS.includes(Number(v))
+      ? null
+      : `not a bandwidth this radio has — one of ${LORA_BANDWIDTHS.join(", ")}`),
     desc: `62 means 62.5. Only the radio's own steps exist — 7, 10, 15, 20, 31,
            41, 62, 125, 250, 500 — and anything else is refused at send time
            rather than rounded to a neighbour.`,
