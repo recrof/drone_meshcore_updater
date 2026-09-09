@@ -11,6 +11,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/random/random.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -68,6 +69,30 @@ static bool s_announced;      /* target announced once per run */
 static bool s_verified;       /* VERIFYING announced once per run */
 static uint32_t s_t0;
 
+/*
+ * A per-boot base for message timestamps, used when no wall clock is known.
+ *
+ * **This is not cosmetic, it decides whether a message is delivered at all.**
+ * MeshCore identifies a packet by SHA-256 over its payload type and payload
+ * and nothing else (Packet.cpp, calculatePacketHash) — not the path, not the
+ * route type, not the hop count — and every node suppresses a hash it has
+ * already seen. The timestamp is the only field that varies between two
+ * otherwise identical messages, which is why MeshCore's own comment calls it
+ * "mostly an extra blob to help make packet_hash unique".
+ *
+ * With lora_epoch unset it was 0 + uptime, and the boot message is sent at an
+ * uptime of ~0.15 s, so **every boot produced a byte-identical packet**. The
+ * first one was delivered and every one after it was silently dropped as a
+ * duplicate by every node that still remembered it — including the operator's
+ * own client. It looked like a radio problem and was an identity problem.
+ *
+ * So when there is no epoch to add uptime to, add a random base instead.
+ * Timestamps then render as a meaningless date, which is honest — the device
+ * genuinely does not know the time — and every message is distinct. Set
+ * lora_epoch to get both.
+ */
+static uint32_t s_boot_base;
+
 static bool enabled(uint32_t bit)
 {
 	const struct app_config *cfg = app_config_current();
@@ -100,6 +125,9 @@ void lora_status_boot(void)
 	 * missing or unready lora0 is reported at boot — in the log a person
 	 * reads after a flight — instead of at the one moment there is
 	 * something to say. */
+	/* Once per boot, before anything can be queued. */
+	s_boot_base = sys_rand32_get();
+
 	if (lora_tx_init() != 0) {
 		return;
 	}
@@ -411,9 +439,13 @@ static void tx_thread(void *a, void *b, void *c)
 		 * (BaseChatMesh.cpp:488) and repeaters suppress duplicate
 		 * hashes, so it must vary per message even when the wall clock
 		 * is unknown. lora_epoch, when set, makes it a real time as
-		 * well; unset, uptime alone still keeps every packet distinct.
+		 * well; unset, a random per-boot base stands in for it, because
+		 * uptime alone does NOT keep every packet distinct — the boot
+		 * message always goes out at an uptime of ~0. See s_boot_base.
 		 */
-		len = meshcore_grp_txt_encode(key, epoch + (k_uptime_get_32() / 1000U),
+		len = meshcore_grp_txt_encode(key,
+					      (epoch != 0U ? epoch : s_boot_base) +
+						      (k_uptime_get_32() / 1000U),
 					      sender, text, path_hash, frame,
 					      sizeof(frame));
 		if (len < 0) {

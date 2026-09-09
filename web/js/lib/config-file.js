@@ -739,10 +739,13 @@ export const CONFIG_SCHEMA = [
     unit: "s",
     placeholder: "(unknown)",
     desc: `Unix seconds, added to uptime to timestamp each message. There is no
-           RTC on this board, so left at 0 the messages still work — the
-           timestamp's real job is keeping each packet's hash distinct so
-           repeaters do not suppress it — but clients will render them as 1970.
-           Set it to the current epoch when you edit this file.`,
+           RTC here, so without this the firmware substitutes a random value per
+           boot and messages carry a meaningless date. That randomness is
+           load-bearing, not cosmetic: MeshCore hashes a packet over its payload
+           alone and every node suppresses a hash it has already seen, so
+           byte-identical messages are delivered once and then silently dropped
+           — which is what made the boot message vanish after its first ever
+           send. Set this to the current epoch to get real times as well.`,
   },
   {
     key: "lora_min_gap_ms",
