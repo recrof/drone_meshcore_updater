@@ -57,7 +57,7 @@ const FIRMWARE_DEFAULTS = {
    * nobody asked for, and on by default it would happen on the first boot
    * after a flash, before there is any evidence the image is healthy.
    */
-  lora_channel: "#drone-updater", lora_sender: "drone-updater",
+  lora_channel: "#drone-updater", lora_region: "", lora_sender: "drone-updater",
   lora_freq: "", lora_bw: 62, lora_sf: 7, lora_cr: 5,
   lora_tx_power: 22, lora_events: "target,progress,verify,done",
   lora_hello: false, lora_epoch: 0, lora_min_gap_ms: 3000,

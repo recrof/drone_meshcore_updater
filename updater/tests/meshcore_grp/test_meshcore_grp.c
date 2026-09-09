@@ -76,7 +76,7 @@ int main(int argc, char **argv)
 		/* `make vec MSG="..."` emits any message, so a vector can be
 		 * produced for the longest line the formatter can build. */
 		len = meshcore_grp_txt_encode(key, 1757116800U, "drone-updater",
-					      (argc > 2) ? argv[2] : "found RepeaterX", 2,
+					      (argc > 2) ? argv[2] : "found RepeaterX", 2, NULL,
 					      frame, sizeof(frame));
 		if (len < 0) {
 			return 1;
@@ -102,7 +102,7 @@ int main(int argc, char **argv)
 	check("channel hash == 0x26", meshcore_channel_hash(key) == 0x26);
 
 	len = meshcore_grp_txt_encode(key, 1757116800U, "drone-updater",
-				      "found RepeaterX @ -69dBm", 2, frame, sizeof(frame));
+				      "found RepeaterX @ -69dBm", 2, NULL, frame, sizeof(frame));
 	if (len < 0) {
 		printf("FAIL encode returned %d\n", len);
 		return 1;
@@ -122,28 +122,64 @@ int main(int argc, char **argv)
 	 * by isValidPathLen(); 0 would underflow the shift. */
 	for (uint8_t sz = 1; sz <= 3; sz++) {
 		char label[64];
-		int n = meshcore_grp_txt_encode(key, 1U, "u", "x", sz, frame, sizeof(frame));
+		int n = meshcore_grp_txt_encode(key, 1U, "u", "x", sz, NULL, frame, sizeof(frame));
 
 		snprintf(label, sizeof(label), "hash width %u encodes path_len 0x%02x", sz,
 			 (sz - 1) << 6);
 		check(label, n > 0 && frame[1] == (uint8_t)((sz - 1) << 6));
 	}
 	check("hash width 4 refused (reserved)",
-	      meshcore_grp_txt_encode(key, 1U, "u", "x", 4, frame, sizeof(frame)) < 0);
+	      meshcore_grp_txt_encode(key, 1U, "u", "x", 4, NULL, frame, sizeof(frame)) < 0);
 	check("hash width 0 refused",
-	      meshcore_grp_txt_encode(key, 1U, "u", "x", 0, frame, sizeof(frame)) < 0);
+	      meshcore_grp_txt_encode(key, 1U, "u", "x", 0, NULL, frame, sizeof(frame)) < 0);
 
 	/* An over-long message must be truncated, not rejected and not
 	 * overflowed: the sender name is paid for out of the same 160 bytes. */
 	char big[512];
 	memset(big, 'x', sizeof(big) - 1);
 	big[sizeof(big) - 1] = '\0';
-	len = meshcore_grp_txt_encode(key, 1U, "drone-updater", big, 2, frame, sizeof(frame));
+	len = meshcore_grp_txt_encode(key, 1U, "drone-updater", big, 2, NULL, frame, sizeof(frame));
 	check("over-long text truncates", len > 0 && len <= MESHCORE_GRP_MAX_FRAME);
 
 	/* A caller's buffer that is too small must be refused, not written. */
-	len = meshcore_grp_txt_encode(key, 1U, "drone-updater", "hello", 2, frame, 8);
+	len = meshcore_grp_txt_encode(key, 1U, "drone-updater", "hello", 2, NULL, frame, 8);
 	check("short buffer refused", len < 0);
+
+	/* ---- region scoping ------------------------------------------------ */
+	{
+		uint8_t rkey[MESHCORE_KEY_LEN], rkey2[MESHCORE_KEY_LEN];
+		uint8_t plainf[MESHCORE_GRP_MAX_FRAME], f2[MESHCORE_GRP_MAX_FRAME];
+		int nu, ns;
+
+		check("region key derives",
+		      meshcore_region_key_from_name("YVR", rkey) == 0);
+		/* Upstream supplies the '#', so both spellings are one region. */
+		meshcore_region_key_from_name("#YVR", rkey2);
+		check("'YVR' and '#YVR' are the same region",
+		      memcmp(rkey, rkey2, MESHCORE_KEY_LEN) == 0);
+
+		nu = meshcore_grp_txt_encode(key, 1757116800U, "drone-updater",
+					     "found RepeaterX", 2, NULL, plainf, sizeof(plainf));
+		ns = meshcore_grp_txt_encode(key, 1757116800U, "drone-updater",
+					     "found RepeaterX", 2, rkey, frame, sizeof(frame));
+
+		check("scoped header is 0x14 (TRANSPORT_FLOOD)", ns > 0 && frame[0] == 0x14);
+		check("unscoped header is still 0x15 (FLOOD)", nu > 0 && plainf[0] == 0x15);
+		check("scoping costs exactly 4 bytes", ns == nu + 4);
+		check("transport code is not a reserved value",
+		      !(frame[1] == 0x00 && frame[2] == 0x00) &&
+			      !(frame[1] == 0xFF && frame[2] == 0xFF));
+		check("second transport code is 0", frame[3] == 0x00 && frame[4] == 0x00);
+		check("path_len follows the codes", frame[5] == 0x40);
+		check("payload unchanged by scoping",
+		      memcmp(&frame[6], &plainf[2], (size_t)(nu - 2)) == 0);
+
+		meshcore_region_key_from_name("YCD", rkey2);
+		meshcore_grp_txt_encode(key, 1757116800U, "drone-updater", "found RepeaterX",
+					2, rkey2, f2, sizeof(f2));
+		check("a different region yields a different code",
+		      f2[1] != frame[1] || f2[2] != frame[2]);
+	}
 
 	printf("\n%s\n", failures == 0 ? "all passed" : "FAILURES");
 	return failures == 0 ? 0 : 1;

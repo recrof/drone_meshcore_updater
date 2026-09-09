@@ -605,6 +605,25 @@ export const CONFIG_SCHEMA = [
       : "no spaces — the name is hashed exactly as typed"),
   },
   {
+    key: "lora_region",
+    label: "lora_region",
+    title: "Restrict which repeaters carry it",
+    type: "text",
+    def: "",
+    maxLength: 31,
+    placeholder: "(unscoped — every repeater rebroadcasts)",
+    desc: `MeshCore transport region, written as the app shows it — e.g. "YVR".
+           A "#" is added if you leave it off, matching the firmware, so "YVR"
+           and "#YVR" are the same region. Empty sends an ordinary flood.
+           ⚠ Only repeaters running the repeater firmware enforce this; room
+           servers compute the region and never check it, and companions in
+           repeat mode ignore regions entirely — so on a mixed mesh this
+           narrows the flood rather than gating it.`,
+    check: (v) => (v === "" || /^#?[^\s]{1,30}$/.test(v)
+      ? null
+      : "no spaces — the name is hashed exactly as typed"),
+  },
+  {
     key: "lora_sender",
     label: "lora_sender",
     title: "Name shown before the message",

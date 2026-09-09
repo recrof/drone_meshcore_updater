@@ -303,6 +303,21 @@ struct app_config {
 	 */
 	char     lora_channel[APP_CONFIG_CHANNEL_MAX];
 
+	/* Restrict which repeaters rebroadcast these messages, by MeshCore
+	 * transport region — e.g. "YVR". Written the way the MeshCore app shows
+	 * it; a '#' is supplied if absent, matching upstream, so "YVR" and
+	 * "#YVR" are the same region.
+	 *
+	 * Empty (the default) sends an ordinary flood that every repeater
+	 * carries.
+	 *
+	 * ⚠ Only `simple_repeater` enforces this. `simple_room_server` computes
+	 * the region and then never checks it, and `companion_radio` in repeat
+	 * mode has no region concept — so on a mixed mesh this narrows the
+	 * flood rather than gating it.
+	 */
+	char     lora_region[APP_CONFIG_CHANNEL_MAX];
+
 	/* The "<sender>: " prefix inside each message. Clients split on the
 	 * first ": ", so a name containing a colon loses its attribution and
 	 * the whole line renders as an unattributed message. */

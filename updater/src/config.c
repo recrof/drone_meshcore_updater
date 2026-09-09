@@ -127,6 +127,8 @@ static void apply_defaults(struct app_config *c)
 	 */
 	snprintf(c->lora_channel, sizeof(c->lora_channel), "#drone-updater");
 	snprintf(c->lora_sender, sizeof(c->lora_sender), "drone-updater");
+	/* Empty: an ordinary flood. See config.h before narrowing it. */
+	c->lora_region[0] = '\0';
 	c->lora_freq_hz    = 0U;   /* unset — see above; nothing is sent */
 	c->lora_bw_khz     = 62;   /* 62.5 kHz */
 	c->lora_sf         = 7;
@@ -195,6 +197,10 @@ static void apply_kv(struct app_config *c, const char *key, const char *val)
 	}
 	if (!strcmp(key, "lora_channel")) {
 		snprintf(c->lora_channel, sizeof(c->lora_channel), "%s", val);
+		return;
+	}
+	if (!strcmp(key, "lora_region")) {
+		snprintf(c->lora_region, sizeof(c->lora_region), "%s", val);
 		return;
 	}
 	if (!strcmp(key, "lora_sender")) {

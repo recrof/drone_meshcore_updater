@@ -362,7 +362,10 @@ static void format(const struct evt *e, char *out, size_t cap)
 static void tx_thread(void *a, void *b, void *c)
 {
 	uint8_t key[MESHCORE_KEY_LEN];
+	uint8_t rkey[MESHCORE_KEY_LEN];
 	char channel[APP_CONFIG_CHANNEL_MAX] = {0};
+	char region[APP_CONFIG_CHANNEL_MAX] = {0};
+	bool have_region = false;
 	uint8_t frame[MESHCORE_GRP_MAX_FRAME];
 	struct evt e;
 	char text[96];
@@ -384,6 +387,7 @@ static void tx_thread(void *a, void *b, void *c)
 		struct lora_tx_params tx;
 		char sender[APP_CONFIG_SENDER_MAX];
 		char want_channel[APP_CONFIG_CHANNEL_MAX];
+		char want_region[APP_CONFIG_CHANNEL_MAX];
 		uint32_t epoch, min_gap;
 		uint8_t path_hash;
 		uint32_t now, gap;
@@ -406,6 +410,8 @@ static void tx_thread(void *a, void *b, void *c)
 			strncpy(want_channel, cfg->lora_channel,
 				sizeof(want_channel) - 1);
 			want_channel[sizeof(want_channel) - 1] = '\0';
+			strncpy(want_region, cfg->lora_region, sizeof(want_region) - 1);
+			want_region[sizeof(want_region) - 1] = '\0';
 		}
 
 		/* Derive the channel key lazily, and again whenever the name
@@ -421,6 +427,24 @@ static void tx_thread(void *a, void *b, void *c)
 			strncpy(channel, want_channel, sizeof(channel) - 1);
 			have_key = true;
 			LOG_INF("channel %s, hash %02x", channel, meshcore_channel_hash(key));
+		}
+
+		/* Region key, on the same lazy re-derive discipline as the
+		 * channel. Empty means an unscoped flood. */
+		if (strcmp(region, want_region) != 0) {
+			have_region = false;
+			if (want_region[0] != '\0') {
+				if (meshcore_region_key_from_name(want_region, rkey) == 0) {
+					have_region = true;
+					LOG_INF("region %s — only repeaters holding it "
+						"will rebroadcast", want_region);
+				} else {
+					LOG_ERR("lora_region=\"%s\" unusable — sending "
+						"unscoped", want_region);
+				}
+			}
+			strncpy(region, want_region, sizeof(region) - 1);
+			region[sizeof(region) - 1] = '\0';
 		}
 
 		/* The backstop. Enforced here rather than at the hooks so that
@@ -446,7 +470,8 @@ static void tx_thread(void *a, void *b, void *c)
 		len = meshcore_grp_txt_encode(key,
 					      (epoch != 0U ? epoch : s_boot_base) +
 						      (k_uptime_get_32() / 1000U),
-					      sender, text, path_hash, frame,
+					      sender, text, path_hash,
+					      have_region ? rkey : NULL, frame,
 					      sizeof(frame));
 		if (len < 0) {
 			LOG_ERR("encode: %d", len);

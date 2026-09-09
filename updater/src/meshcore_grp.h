@@ -19,7 +19,12 @@
  * ---- The frame ---------------------------------------------------------
  *
  *   off  size  field
- *    0     1   header = (PAYLOAD_TYPE_GRP_TXT << 2) | ROUTE_TYPE_FLOOD = 0x15
+ *    0     1   header = (PAYLOAD_TYPE_GRP_TXT << 2) | route
+ *                          ROUTE_TYPE_FLOOD (0x01) unscoped -> 0x15, or
+ *                          ROUTE_TYPE_TRANSPORT_FLOOD (0x00) scoped -> 0x14,
+ *                          which inserts the four bytes below.
+ *  [1     4   transport codes, scoped only: two LE uint16. Repeaters match
+ *                          code 0; code 1 is written and never read.]
  *    1     1   path_len                bits 7-6 = hash size - 1, bits 5-0 = hop
  *                                       count. Ours starts with no hops; the
  *                                       size is the SENDER's choice and every
@@ -64,7 +69,8 @@ extern "C" {
 /* Longest frame this can emit: 2 header bytes + 1 channel hash + 2 MAC +
  * ciphertext over a 165-byte plaintext rounded up to 176. Comfortably inside
  * MeshCore's MAX_PACKET_PAYLOAD (184) and a LoRa MAX_TRANS_UNIT (255). */
-#define MESHCORE_GRP_MAX_FRAME 181
+/* Four more than unscoped, for the transport codes. */
+#define MESHCORE_GRP_MAX_FRAME 185
 
 /* Path hash width, in bytes, that repeaters will use when relaying our packet.
  *
@@ -111,6 +117,14 @@ int meshcore_channel_key_from_name(const char *name,
 uint8_t meshcore_channel_hash(const uint8_t key[MESHCORE_KEY_LEN]);
 
 /*
+ * Derive a transport (region) key: sha256(name)[0:16], with a '#' supplied if
+ * the name lacks one — MeshCore's RegionMap::getTransportKeysFor() prepends it
+ * to a bare region name before hashing, so "YVR" and "#YVR" are the same
+ * region and this matches either spelling.
+ */
+int meshcore_region_key_from_name(const char *name, uint8_t key[MESHCORE_KEY_LEN]);
+
+/*
  * Encode one GRP_TXT frame into `out`.
  *
  * `timestamp`  seconds; MeshCore calls this "mostly an extra blob to help make
@@ -121,13 +135,21 @@ uint8_t meshcore_channel_hash(const uint8_t key[MESHCORE_KEY_LEN]);
  * `sender`     the name shown before the colon.
  * `text`       the message. Truncated, with `sender`, at MESHCORE_MAX_TEXT_LEN.
  * `path_hash`  1..3, the hash width relays should append. See above.
+ * `region_key` NULL for an ordinary flood. Otherwise a 16-byte region key: the
+ *              frame becomes a TRANSPORT_FLOOD carrying a transport code, and a
+ *              repeater forwards it only if it holds that region.
+ *
+ *              ⚠ Enforced by `simple_repeater` only. `simple_room_server`
+ *              computes the region and never checks it; `companion_radio` in
+ *              repeat mode has no region concept at all. On a mixed mesh this
+ *              narrows the flood, it does not gate it.
  *
  * Returns the frame length in bytes, or -EINVAL / -ENOMEM / -EIO.
  */
 int meshcore_grp_txt_encode(const uint8_t key[MESHCORE_KEY_LEN],
 			    uint32_t timestamp, const char *sender,
-			    const char *text, uint8_t path_hash, uint8_t *out,
-			    size_t out_cap);
+			    const char *text, uint8_t path_hash,
+			    const uint8_t *region_key, uint8_t *out, size_t out_cap);
 
 #ifdef __cplusplus
 }
