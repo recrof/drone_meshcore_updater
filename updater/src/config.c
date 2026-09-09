@@ -14,6 +14,7 @@
 
 #include "config.h"
 #include "dfu_tuning.h"
+#include "lora_status.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -107,6 +108,49 @@ static void apply_defaults(struct app_config *c)
 	/* 0 keeps the measured-good pacing. 6 overlaps packets with the erase
 	 * and should recover the throughput that pkt_gap_ms=4 costs. */
 	c->erase_inflight = 0;
+
+	/* ---- LoRa status messages ---------------------------------------
+	 *
+	 * ⚠ lora_freq has NO default, and that is the safety interlock: with
+	 * it unset nothing is transmitted, on any frequency, in any region.
+	 * A shipped carrier frequency would be the wrong one — and in most of
+	 * the world an unlicensed one — for anybody outside the 915 band, and
+	 * a firmware default is not the place to make that choice on an
+	 * operator's behalf. They set it in config.txt, with no rebuild.
+	 *
+	 * The modem settings below DO have defaults. They are not regulated
+	 * in the way the carrier is, they describe MeshCore's common case,
+	 * and none of them can transmit anything on their own. They are there
+	 * to be checked against the mesh, not trusted: a plausible-but-wrong
+	 * one transmits perfectly and is heard by nobody, which is the worst
+	 * of the available failures.
+	 */
+	snprintf(c->lora_channel, sizeof(c->lora_channel), "#drone-updater");
+	snprintf(c->lora_sender, sizeof(c->lora_sender), "drone-updater");
+	/* Empty: an ordinary flood. See config.h before narrowing it. */
+	c->lora_region[0] = '\0';
+	c->lora_freq_hz    = 0U;   /* unset — see above; nothing is sent */
+	c->lora_bw_khz     = 62;   /* 62.5 kHz */
+	c->lora_sf         = 7;
+	c->lora_cr         = 5;    /* 4/5 */
+	c->lora_tx_power   = 22;
+	c->lora_events     = LORA_EVT_ALL;
+	/* Three seconds. One message is ~255 ms of air time at these settings,
+	 * so this holds the updater well under 10% of the channel even in the
+	 * worst burst it can produce. */
+	c->lora_min_gap_ms = 3000;
+	/* 2, not MeshCore's default of 1 — see config.h. Costs one byte per
+	 * hop and makes the relay path attributable. */
+	c->lora_path_hash  = 2;
+	/* No wall clock until something sets one. See config.h. */
+	c->lora_epoch      = 0;
+	/* **Off.** It is the same message either way — the bench bring-up test
+	 * and the in-flight "I booted" signal — but transmitting is the one
+	 * thing this firmware does that is not asked for by anybody, and it
+	 * would happen on the first boot after a flash, before there is any
+	 * evidence the image is healthy. Turn it on from the config editor
+	 * once the device is up and talking. */
+	c->lora_hello      = false;
 }
 
 /* ---- small string helpers --------------------------------------------- */
@@ -149,6 +193,125 @@ static void apply_kv(struct app_config *c, const char *key, const char *val)
 		 * "123456" would offer the peer a PIN nobody chose. Truncating
 		 * *here* would hide that from it. */
 		snprintf(c->ble_pin, sizeof(c->ble_pin), "%s", val);
+		return;
+	}
+	if (!strcmp(key, "lora_channel")) {
+		snprintf(c->lora_channel, sizeof(c->lora_channel), "%s", val);
+		return;
+	}
+	if (!strcmp(key, "lora_region")) {
+		snprintf(c->lora_region, sizeof(c->lora_region), "%s", val);
+		return;
+	}
+	if (!strcmp(key, "lora_sender")) {
+		/* Clients split the message on the first ": ", so a colon here
+		 * silently costs every message its attribution. Refused rather
+		 * than sanitised: the operator picked a name, and quietly
+		 * sending a different one is worse than keeping the old. */
+		if (strchr(val, ':') != NULL) {
+			LOG_WRN("config.txt: lora_sender may not contain ':' — "
+				"ignoring \"%s\"", val);
+			return;
+		}
+		snprintf(c->lora_sender, sizeof(c->lora_sender), "%s", val);
+		return;
+	}
+	if (!strcmp(key, "lora_freq")) {
+		/* MHz with up to six decimals — 910.425 — parsed with integer
+		 * arithmetic into Hz.
+		 *
+		 * Not atoi: it stops at the '.', which would put the radio
+		 * 425 kHz off frequency and produce a device that transmits
+		 * perfectly and is heard by nobody. Not strtod either: a float
+		 * parser drags soft-float into a build that otherwise has none,
+		 * and this would be the only caller. Six digits is 1 Hz of
+		 * resolution at MHz scale, which is finer than the crystal.
+		 */
+		const char *q = val;
+		uint32_t whole = 0, frac = 0;
+		int digits = 0;
+		bool ok = isdigit((unsigned char)*q) != 0;
+
+		while (isdigit((unsigned char)*q)) {
+			whole = whole * 10U + (uint32_t)(*q++ - '0');
+			if (whole > 1000U) { ok = false; break; }
+		}
+		if (ok && *q == '.') {
+			q++;
+			while (isdigit((unsigned char)*q)) {
+				/* Anything below 1 Hz is dropped rather than
+				 * rounded; it cannot be tuned to anyway. */
+				if (digits < 6) {
+					frac = frac * 10U + (uint32_t)(*q - '0');
+					digits++;
+				}
+				q++;
+			}
+		}
+		while (digits < 6) { frac *= 10U; digits++; }
+
+		if (ok && *q == '\0' && whole >= 100U && whole <= 1000U) {
+			c->lora_freq_hz = whole * 1000000U + frac;
+		} else {
+			LOG_WRN("config.txt: lora_freq=\"%s\" is not MHz in 100..1000", val);
+		}
+		return;
+	}
+	if (!strcmp(key, "lora_events")) {
+		/* Comma-separated names. An empty value is meaningful — it
+		 * turns every event off while leaving the channel configured —
+		 * so it must not fall through to "unset means all". */
+		static const struct {
+			const char *name;
+			uint8_t bit;
+		} names[] = {
+			{"target", LORA_EVT_TARGET},
+			{"progress", LORA_EVT_PROGRESS},
+			{"verify", LORA_EVT_VERIFY},
+			{"done", LORA_EVT_DONE},
+		};
+		uint8_t bits = 0;
+		const char *p = val;
+
+		/* Exact tokens, not substrings.
+		 *
+		 * This was strstr() over the whole value, which is wrong in
+		 * both directions: `no-progress` *enabled* progress, and any
+		 * unrecognised value — a typo like `don`, or a reasonable
+		 * guess like `all` — matched nothing and silently produced 0,
+		 * which is indistinguishable from the documented "empty means
+		 * none". The operator gets total radio silence with nothing in
+		 * the log to explain it, on a device whose whole purpose is to
+		 * talk.
+		 */
+		while (*p != '\0') {
+			const char *end;
+			size_t len;
+			bool known = false;
+
+			while (*p == ' ' || *p == '\t' || *p == ',') p++;
+			if (*p == '\0') break;
+			end = p;
+			while (*end != '\0' && *end != ',') end++;
+			len = (size_t)(end - p);
+			while (len > 0 && (p[len - 1] == ' ' || p[len - 1] == '\t')) len--;
+
+			for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
+				if (len == strlen(names[i].name) &&
+				    strncmp(p, names[i].name, len) == 0) {
+					bits |= names[i].bit;
+					known = true;
+					break;
+				}
+			}
+			if (!known && len > 0) {
+				LOG_WRN("config.txt: lora_events has no event "
+					"called \"%.*s\" — expected target, "
+					"progress, verify or done", (int)len, p);
+			}
+			p = end;
+		}
+		c->lora_events = bits;
 		return;
 	}
 	int n = atoi(val);
@@ -217,6 +380,27 @@ static void apply_kv(struct app_config *c, const char *key, const char *val)
 		if (n >= 0 && n <= 1000) c->pkt_gap_ms = (uint16_t)n;
 	} else if (!strcmp(key, "erase_pause_ms")) {
 		if (n >= 0 && n <= 1000) c->erase_pause_ms = (uint16_t)n;
+	} else if (!strcmp(key, "lora_bw")) {
+		/* Validated against the driver's enum in lora_tx.c, which is
+		 * the only place that knows which of them the radio has. */
+		if (n > 0 && n <= 500) c->lora_bw_khz = (uint16_t)n;
+	} else if (!strcmp(key, "lora_sf")) {
+		if (n >= 5 && n <= 12) c->lora_sf = (uint8_t)n;
+	} else if (!strcmp(key, "lora_cr")) {
+		if (n >= 5 && n <= 8) c->lora_cr = (uint8_t)n;
+	} else if (!strcmp(key, "lora_tx_power")) {
+		/* +22 is the SX1262's ceiling; the driver clips above it. */
+		if (n >= -9 && n <= 22) c->lora_tx_power = (int8_t)n;
+	} else if (!strcmp(key, "lora_path_hash")) {
+		if (n >= 1 && n <= 3) c->lora_path_hash = (uint8_t)n;
+	} else if (!strcmp(key, "lora_min_gap_ms")) {
+		if (n >= 0 && n <= 60000) c->lora_min_gap_ms = (uint16_t)n;
+	} else if (!strcmp(key, "lora_hello")) {
+		c->lora_hello = parse_bool(val);
+	} else if (!strcmp(key, "lora_epoch")) {
+		/* Unix seconds. Wider than atoi's int on a 32-bit target only
+		 * after 2038; strtoul keeps it honest until then. */
+		c->lora_epoch = (uint32_t)strtoul(val, NULL, 10);
 	} else if (!strcmp(key, "erase_inflight")) {
 		if (n >= 0 && n <= 8) c->erase_inflight = (uint8_t)n;
 	} else {

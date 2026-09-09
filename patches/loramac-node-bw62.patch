@@ -1,0 +1,14 @@
+--- a/modules/lib/loramac-node/src/radio/sx126x/radio.c
++++ b/modules/lib/loramac-node/src/radio/sx126x/radio.c
+@@ -421,7 +421,10 @@
+     { 500000, 0x00 }, // Invalid Bandwidth
+ };
+ 
+-const RadioLoRaBandwidths_t Bandwidths[] = { LORA_BW_125, LORA_BW_250, LORA_BW_500 };
++/* Index 3 appended for MeshCore, which runs 62.5 kHz. The SX1262 supports it
++ * (LORA_BW_062, sx126x.h:370); only this LoRaWAN-shaped index table was
++ * missing it. Appended, not reordered, so indices 0-2 keep their meaning. */
++const RadioLoRaBandwidths_t Bandwidths[] = { LORA_BW_125, LORA_BW_250, LORA_BW_500, LORA_BW_062 };
+ 
+ uint8_t MaxPayloadLength = 0xFF;
+ 

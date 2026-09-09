@@ -227,6 +227,28 @@ export function defFor(field, board) {
   return tuningFor(board)[field.key] ?? field.def;
 }
 
+/* The LoRa bandwidths the SX1262 actually has, mirroring bw_from_khz() in
+ * updater/src/lora_tx.c.
+ *
+ * `value` is Zephyr's enum identifier (BW_62_KHZ === 62) and is what goes in
+ * config.txt; `label` is the bandwidth the radio actually uses. They differ for
+ * six of the ten, because Zephyr rounds the name to a whole number — 62 is
+ * really 62.5, 41 is 41.67, 7 is 7.81 — and showing the identifier as though it
+ * were the frequency misreports the radio to anyone comparing it against a
+ * MeshCore client, which prints the true value. */
+const LORA_BANDWIDTHS = [
+  { value: 7, label: "7.81 kHz" },
+  { value: 10, label: "10.42 kHz" },
+  { value: 15, label: "15.63 kHz" },
+  { value: 20, label: "20.83 kHz" },
+  { value: 31, label: "31.25 kHz" },
+  { value: 41, label: "41.67 kHz" },
+  { value: 62, label: "62.5 kHz" },
+  { value: 125, label: "125 kHz" },
+  { value: 250, label: "250 kHz" },
+  { value: 500, label: "500 kHz" },
+];
+
 export const CONFIG_SCHEMA = [
   {
     section: "Target selection",
@@ -573,6 +595,209 @@ export const CONFIG_SCHEMA = [
            seconds — so the default is short. A genuinely wedged target only
            unsticks when its own watchdog fires, 60-120 s on stock Adafruit
            bootloaders, so raise this if failures repeat immediately.`,
+  },
+
+  /* ---- MeshCore status messages over LoRa (RAK4631 only) --------------
+   *
+   * Every key here is inert on a board with no radio: CONFIG_LORA is off,
+   * APP_LORA_STATUS is unselectable, and config.c still parses them, so a
+   * config.txt is portable between boards. They are shown regardless for
+   * the same reason ext_antenna is — a per-board form would need the
+   * firmware to describe itself, and the descriptions say where they apply.
+   */
+  {
+    section: "MeshCore status (RAK4631)",
+    key: "lora_channel",
+    label: "lora_channel",
+    title: "Channel to announce on",
+    type: "text",
+    def: "#drone-updater",
+    maxLength: 31,
+    placeholder: "(off)",
+    desc: `Hashtag channel for progress messages. The key is derived from the
+           name — sha256(name) — so this is the whole setup and there is no
+           secret to distribute. Empty switches the radio off entirely. Add the
+           same name in your MeshCore client to hear them.`,
+    check: (v) => (v === "" || /^#?[^\s]{1,30}$/.test(v)
+      ? null
+      : "no spaces — the name is hashed exactly as typed"),
+  },
+  {
+    key: "lora_region",
+    label: "lora_region",
+    title: "Restrict which repeaters carry it",
+    type: "text",
+    def: "",
+    maxLength: 31,
+    placeholder: "(unscoped — every repeater rebroadcasts)",
+    desc: `MeshCore transport region, written as the app shows it — e.g. "YVR".
+           A "#" is added if you leave it off, matching the firmware, so "YVR"
+           and "#YVR" are the same region. Empty sends an ordinary flood.
+           ⚠ Only repeaters running the repeater firmware enforce this; room
+           servers compute the region and never check it, and companions in
+           repeat mode ignore regions entirely — so on a mixed mesh this
+           narrows the flood rather than gating it.`,
+    check: (v) => (v === "" || /^#?[^\s]{1,30}$/.test(v)
+      ? null
+      : "no spaces — the name is hashed exactly as typed"),
+  },
+  {
+    key: "lora_sender",
+    label: "lora_sender",
+    title: "Name shown before the message",
+    type: "text",
+    def: "drone-updater",
+    maxLength: 23,
+    desc: `Rendered as "name: message". Clients split on the first ": ", so a
+           colon here costs every message its attribution — the firmware
+           refuses one rather than sending a name nobody chose.`,
+    check: (v) => (v.includes(":") ? "may not contain \":\"" : null),
+  },
+  {
+    key: "lora_freq",
+    label: "lora_freq",
+    title: "Frequency",
+    type: "text",
+    def: "",
+    unit: "MHz",
+    placeholder: "(unset — nothing is transmitted)",
+    desc: `⚠ Required before anything is sent. There is no default on purpose:
+           the right carrier depends on your region and your mesh, and an unset
+           one keeps the radio silent rather than guessing. Must match the mesh
+           exactly — decimals matter, 910.425 and 910 are different networks,
+           and the wrong one transmits perfectly and is heard by nobody.`,
+    check: (v) => {
+      if (v === "") return null;      /* unset is valid, and is the default */
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 100 && n <= 1000
+        ? null : "MHz, between 100 and 1000";
+    },
+  },
+  {
+    key: "lora_bw",
+    label: "lora_bw",
+    title: "Bandwidth",
+    /* A select, not a number box: the radio has ten discrete steps rather than
+     * a range, and lora_tx.c refuses anything else instead of rounding to a
+     * neighbour. A free number field accepted 100, wrote it, and then failed
+     * on every send with only a device-log line to say why. The dropdown also
+     * lets the label show the true bandwidth while the stored value stays
+     * Zephyr's rounded enum identifier. */
+    type: "select",
+    def: 62,
+    options: LORA_BANDWIDTHS,
+    check: (v) => (LORA_BANDWIDTHS.some(b => b.value === Number(v))
+      ? null
+      : `not a bandwidth this radio has — one of ${
+          LORA_BANDWIDTHS.map(b => b.label).join(", ")}`),
+    desc: `Must match the mesh. Stored as Zephyr's enum identifier, which is the
+           bandwidth rounded to a whole number — config.txt will read
+           lora_bw=62 for 62.5 kHz — so the list shows what the radio actually
+           uses. Anything not on it is refused at send time rather than rounded
+           to a neighbour.`,
+  },
+  {
+    key: "lora_sf",
+    label: "lora_sf",
+    title: "Spreading factor",
+    type: "int",
+    def: 7,
+    min: 5,
+    max: 12,
+    desc: `Match the mesh. Higher reaches further and costs air time: one
+           message is ~255 ms at SF7/62.5 kHz and roughly doubles per step.`,
+  },
+  {
+    key: "lora_cr",
+    label: "lora_cr",
+    title: "Coding rate",
+    type: "int",
+    def: 5,
+    min: 5,
+    max: 8,
+    desc: `The denominator of MeshCore's 4/N. 5 means 4/5.`,
+  },
+  {
+    key: "lora_tx_power",
+    label: "lora_tx_power",
+    title: "LoRa TX power",
+    type: "int",
+    def: 22,
+    min: -9,
+    max: 22,
+    unit: "dBm",
+    desc: `The SX1262's ceiling is +22. Unrelated to ble_tx_power — different
+           radio, different band.`,
+  },
+  {
+    key: "lora_events",
+    label: "lora_events",
+    title: "What to announce",
+    type: "text",
+    def: "target,progress,verify,done",
+    desc: `Comma-separated: target, progress, verify, done. Empty announces
+           nothing while leaving the channel configured. Start with "done"
+           alone when bringing a new mesh up — progress messages transmit in
+           the middle of a DFU stream, which is the one moment worth being
+           careful about.`,
+  },
+  {
+    key: "lora_hello",
+    label: "lora_hello",
+    title: "Announce at boot",
+    type: "bool",
+    def: false,
+    desc: `Sends "online" once at power-on. On the bench it proves the channel,
+           the key and the modem with no target involved; in flight it is the
+           only positive signal that the updater booted and reached the mesh.`,
+  },
+  {
+    key: "lora_path_hash",
+    label: "lora_path_hash",
+    title: "Path hash width",
+    type: "int",
+    def: 2,
+    min: 1,
+    max: 3,
+    unit: "B",
+    desc: `How many bytes of its own hash each repeater appends when it relays
+           one of these messages. Travels inside the packet, so it needs no
+           agreement with the mesh — it is the same thing MeshCore nodes call
+           hash_mode, where mode N means N+1 bytes. 1 is MeshCore's default and
+           is enough to route, but collides often enough that you cannot always
+           tell which repeater relayed; 2 buys that for one byte per hop. 4 is
+           reserved by the protocol.`,
+  },
+  {
+    key: "lora_epoch",
+    label: "lora_epoch",
+    title: "Clock at boot",
+    type: "int",
+    def: 0,
+    min: 0,
+    max: 4294967295,
+    unit: "s",
+    placeholder: "(unknown)",
+    desc: `Unix seconds, added to uptime to timestamp each message. There is no
+           RTC here, so without this the firmware substitutes a random value per
+           boot and messages carry a meaningless date. That randomness is
+           load-bearing, not cosmetic: MeshCore hashes a packet over its payload
+           alone and every node suppresses a hash it has already seen, so
+           byte-identical messages are delivered once and then silently dropped
+           — which is what made the boot message vanish after its first ever
+           send. Set this to the current epoch to get real times as well.`,
+  },
+  {
+    key: "lora_min_gap_ms",
+    label: "lora_min_gap_ms",
+    title: "Minimum gap between messages",
+    type: "int",
+    def: 3000,
+    min: 0,
+    max: 60000,
+    unit: "ms",
+    desc: `Backstop under the per-event rules, so no combination of retries and
+           progress edges can monopolise a shared channel.`,
   },
 ];
 

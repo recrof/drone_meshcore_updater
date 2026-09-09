@@ -1,0 +1,13 @@
+--- a/zephyr/drivers/lora/loramac-node/sx12xx_common.c
++++ b/zephyr/drivers/lora/loramac-node/sx12xx_common.c
+@@ -215,6 +215,10 @@
+ 	case BW_500_KHZ:
+ 		*bw_idx = 2;
+ 		break;
++	case BW_62_KHZ:
++		/* Appended to loramac-node's Bandwidths[] table; see radio.c. */
++		*bw_idx = 3;
++		break;
+ 	default:
+ 		return -EINVAL;
+ 	}

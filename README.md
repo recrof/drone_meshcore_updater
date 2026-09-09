@@ -3,8 +3,9 @@
 Carry a firmware update to a device you cannot reach.
 
 A standalone updater that runs on a **Seeed XIAO** (nRF54LM20A, nRF52840,
-ESP32-S3, ESP32-C5 or MG24), holds a library of firmware bundles, and flashes them into *other*
-devices over the air. It exists for MeshCore repeaters on rooftops, masts and hilltops —
+ESP32-S3, ESP32-C5 or MG24) or a **RAK4631** with a RAK15001 flash module,
+holds a library of firmware bundles, and flashes them into *other* devices over
+the air. It exists for MeshCore repeaters on rooftops, masts and hilltops —
 put it on a drone or in a pocket, get within radio range, and update.
 
 Today it speaks Nordic Legacy DFU over Bluetooth, which covers nRF52 targets.
@@ -161,6 +162,12 @@ drone_meshcore_updater/                        ← git repo root == west workspa
       fsx_mgmt.c                          # custom SMP group 64 (ls/mkdir/rm/mv/statvfs/dfu)
       fsx_stream.c                        # fast-upload GATT service
       upload_hook.c                       # SMP fs_mgmt access-hook (auto-arm now a no-op)
+      lora_status.{c,h}                   # RAK4631: dfu_status -> MeshCore channel
+      lora_tx.{c,h}                       #   the sx1262, as one blocking send
+      meshcore_grp.{c,h}                  #   GRP_TXT encoder, no Zephyr headers
+      meshcore_crypto{.h,_psa.c}          #   sha256 / hmac / aes-ecb, shimmed
+    tests/meshcore_grp/                   # host test for the encoder (make)
+  patches/                                # out-of-tree LoRa fixes + apply.sh
       dfu_client.h                        # enum dfu_result — the C boundary the runner uses
       app.h                               # shared types/protos
 
@@ -341,6 +348,140 @@ Sysbuild builds two images and nests them per domain, so there is no single
 Releases publish `merged.hex` and `dfu_application.zip`. `zephyr.hex` is
 deliberately *not* published: it is the one people would flash first and then
 file a bug about.
+
+## MeshCore status over LoRa (RAK4631)
+
+The RAK4631 is the one board here with a LoRa radio, so it can say what it is
+doing on the mesh it is updating. A DFU narrates itself:
+
+```
+drone-updater: found T114_OTA
+drone-updater: T114_DFU 25% 95K/382K        50%     75%
+drone-updater: T114_DFU verifying
+drone-updater: T114_DFU DONE in 42s
+```
+
+and a failure carries the reason and how far it got, which is the thing worth
+knowing when the target is on a hilltop:
+
+```
+drone-updater: T114_DFU FAILED link dropped at 83% (try 4/6)
+```
+
+Transmit only. This is not a mesh node — there is no receive path, no routing
+table and no acknowledgement.
+
+### ⚠ Silent until you set a frequency
+
+**`lora_freq` ships unset, and nothing is transmitted without it** — on any
+frequency, in any region. The right carrier depends on a band plan and a mesh
+that the firmware cannot know, so it does not guess; `lora_tx_send()` refuses
+frequency 0, and an unconfigured board says so once in its log at boot.
+
+Set it before you fly, in `config.txt` or from the web client's Config
+dialog — no rebuild:
+
+```
+lora_freq=910.425
+```
+
+The modem settings *do* have defaults (62.5 kHz, SF7, 4/5, +22 dBm, channel
+`#drone-updater`), because they describe MeshCore's common case and none of
+them transmits anything on its own. Check them against your mesh rather than
+trusting them: a plausible-but-wrong one transmits perfectly and is heard by
+nobody, which is the worst of the available failures.
+
+To leave the radio, its driver and the crypto out of the image altogether:
+
+```sh
+./build.sh rak4631 -- -DCONFIG_APP_LORA_STATUS=n
+```
+
+### How it hangs together
+
+`dfu_status.c` was already the place every interesting event passes through, so
+this is a second subscriber beside the GATT one: `dfu_runner.c` and
+`dfu_client.cpp` are untouched. The hooks only edge-detect and queue, because
+`lora_send()` blocks for the whole air time — about 255 ms at SF7/62.5 kHz — and
+a dedicated low-priority thread does the encoding and the radio.
+
+`meshcore_grp.c` builds the packet from scratch: MeshCore is Arduino/RadioLib
+and cannot be linked into a Zephyr application. It carries no Zephyr headers, so
+`updater/tests/meshcore_grp/` compiles that same file on the host against
+OpenSSL and checks its output against an independent decoder.
+
+Nothing collides with the RAK15001: the flash is on QSPI (all P0.x), the radio
+on spi1 (all P1.x), and 900 MHz is not 2.4 GHz. On every other board
+`CONFIG_LORA` is off, `APP_LORA_STATUS` is unselectable, and the call sites
+compile away to nothing.
+
+### ⚠ Two out-of-tree patches, or nothing transmits
+
+`BW_62_KHZ` exists in Zephyr's `lora.h` enum, but the loramac-node backend maps
+only 125/250/500 kHz — its Radio API takes LoRaWAN bandwidth *indices*. The
+SX1262 supports 62.5 fine; it is simply unreachable.
+
+`patches/apply.sh` fixes that in two lines and is idempotent. **It runs from
+`build.sh` and from CI**, because the trees it patches are rewritten by
+`west update` and the symptom of their absence is a build that compiles clean,
+boots, binds the radio, and drops every message with `Unsupported bandwidth: 62`
+at run time. That reads as a radio fault and is not one.
+
+### ⚠ The timestamp is load-bearing
+
+MeshCore identifies a packet by `SHA256(payload_type || payload)` and nothing
+else — not the path, not the route type, not the hop count — and every node
+suppresses a hash it has already seen. The timestamp is the only field that
+distinguishes two otherwise identical messages, which is why MeshCore's own
+comment calls it *"mostly an extra blob to help make packet_hash unique"*.
+
+There is no RTC on this board. With `lora_epoch` unset the firmware substitutes
+a **random per-boot base**, so messages are distinct and the displayed date is
+meaningless. Set `lora_epoch` to get real times as well. A constant timestamp
+makes every boot message byte-identical, delivered once and then silently
+dropped forever — it presents as a radio problem and is an identity collision.
+
+### Config keys
+
+All of them live in `config.txt` alongside the rest, and all are exposed in the
+web client's Config dialog.
+
+| key | default | what it does |
+|---|---|---|
+| `lora_channel` | `#drone-updater` | hashtag channel; the key is `sha256(name)[0:16]`, so the name is the whole configuration. Empty switches the radio off. |
+| `lora_sender` | `drone-updater` | the `name: ` prefix. Clients split on the first `": "`, so a colon is refused. |
+| `lora_freq` | *(unset)* | **required** — MHz, decimals honoured. Nothing is sent until it is set. |
+| `lora_bw` | `62` | Zephyr's enum identifier — `62` means **62.5 kHz**. Six of the ten are rounded like this; the Config dialog shows the real value. |
+| `lora_sf` / `lora_cr` | `7` / `5` | spreading factor, and the denominator of MeshCore's 4/N |
+| `lora_tx_power` | `22` | dBm; the SX1262's ceiling |
+| `lora_path_hash` | `2` | bytes of its own hash each repeater appends. 1 routes fine but collides, so you cannot always tell *which* repeater relayed. |
+| `lora_region` | *(empty)* | restrict rebroadcast to one MeshCore transport region |
+| `lora_events` | all four | `target,progress,verify,done` — exact tokens |
+| `lora_min_gap_ms` | `3000` | hard floor between transmissions |
+| `lora_hello` | off | one `online` message at boot |
+| `lora_epoch` | `0` | Unix seconds at boot; see above |
+
+### ⚠ What region scoping can and cannot do
+
+`lora_region` sends as `ROUTE_TYPE_TRANSPORT_FLOOD` with a transport code, and a
+repeater forwards it only if it holds that region. **Only `simple_repeater`
+enforces this.** `simple_room_server` computes the region in `onRecvPacket` and
+then never reads it in `allowPacketForward`, and `companion_radio` in repeat
+mode has no region concept at all. On a mixed mesh this narrows the flood rather
+than gating it.
+
+Setting it to a region none of your repeaters hold does not narrow anything — it
+stops the messages leaving direct range. Configure the repeaters first.
+
+### Testing it
+
+```bash
+cd updater/tests/meshcore_grp && make
+```
+
+Twenty checks, no board and no cross-toolchain needed, including known answers
+taken from MeshCore's own documentation rather than from this implementation:
+`sha256("#test")[0:16] == 9cd8fcf22a47333b591d96a2b848b73f`.
 
 ## Config knobs
 

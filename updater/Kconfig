@@ -1,0 +1,61 @@
+# Application Kconfig.
+#
+# One symbol so far. It exists rather than being implied by the board having a
+# radio because "the board has a LoRa radio" and "this firmware should announce
+# itself on a mesh" are different decisions — a RAK4631 flown somewhere with
+# no MeshCore network wants the driver's flash back, and gets it: everything
+# the feature needs is selected here rather than turned on in the board's
+# .conf, so an image built with =n is the same size as one built before this
+# existed. It is on by default because the whole point of this tool is that
+# you do not need a toolchain — a feature you can only get by rebuilding is
+# one most of its users cannot get at all.
+
+config APP_LORA_STATUS
+	bool "Announce DFU progress on a MeshCore channel over LoRa"
+	# The board's devicetree, not a .conf, decides where this can be built:
+	# the RAK4631 is the only board here whose DTS enables an SX1262. Every
+	# other board leaves this invisible.
+	depends on DT_HAS_SEMTECH_SX1262_ENABLED
+	# The radio, its bus, and the MeshCore channel cipher. Selected by the
+	# feature so that they cost nothing when it is off — AES-128-ECB,
+	# SHA-256 and HMAC are already-linked algorithms (BT_SMP pulls PSA in),
+	# but each has to be asked for by name or the call fails at *run time*
+	# with PSA_ERROR_NOT_SUPPORTED, which looks like a radio fault and is
+	# not one. ECB is the one to watch: it is a foot-gun in general and some
+	# PSA configurations leave it out on purpose. MeshCore uses it, so
+	# matching it is the requirement.
+	select SPI
+	select LORA
+	select LORA_SX126X
+	select PSA_WANT_ALG_SHA_256
+	select PSA_WANT_ALG_HMAC
+	select PSA_WANT_KEY_TYPE_HMAC
+	select PSA_WANT_ALG_ECB_NO_PADDING
+	select PSA_WANT_KEY_TYPE_AES
+	default y
+	help
+	  Mirrors the dfu_status record onto a MeshCore group channel: the
+	  target found, progress at 25/50/75%, verification, and the outcome.
+	  Transmit only — there is no receive path and the device is not a
+	  mesh node.
+
+	  Only the RAK4631 has the radio. On every other board the devicetree
+	  has no SX1262, this is unselectable, and lora_status.h's empty
+	  inlines make the call sites in dfu_status.c disappear.
+
+	  **Built in, but silent until it is configured.** `lora_freq` ships
+	  unset and nothing is transmitted without it — on any frequency, in
+	  any region. The operator sets it in config.txt, from the web client
+	  and with no rebuild, for the mesh they are actually standing in; the
+	  modem defaults (62.5 kHz, SF7, 4/5, +22 dBm) describe MeshCore's
+	  common case and are there to be checked, not trusted.
+
+	  That interlock is the frequency rather than the channel because the
+	  frequency is the regulated quantity: a default carrier would be the
+	  wrong one, and in most of the world an unlicensed one, for anybody
+	  outside the 915 band.
+
+	  Set =n to leave the radio, its driver and the crypto out of the
+	  image entirely.
+
+source "Kconfig.zephyr"

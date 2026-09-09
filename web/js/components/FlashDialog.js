@@ -147,9 +147,9 @@ export default {
 
         <div class="cfg-body">
           <p class="cfg-lede">
-            Updates this XIAO's own firmware. This is not the DFU target; it is the
-            updater itself. Two routes, and exactly one is usable at a time:
-            Bluetooth needs a connection, USB needs there not to be one.
+            Updates this updater's own firmware. This is not the DFU target; it
+            is the updater itself. Two routes, and exactly one is usable at a
+            time: Bluetooth needs a connection, USB needs there not to be one.
           </p>
 
           <div class="cfg-section">Over Bluetooth</div>

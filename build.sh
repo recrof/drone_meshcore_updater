@@ -116,6 +116,21 @@ if [ ! -d ".west" ]; then
   exit 1
 fi
 
+# Out-of-tree patches, re-applied on every build.
+#
+# They live in zephyr/ and modules/, which `west update` rewrites wholesale,
+# and without them a RAK4631 build transmits nothing: Zephyr's LoRa backend
+# maps only 125/250/500 kHz, so every send fails at runtime with "Unsupported
+# bandwidth: 62" on a build that compiled clean. Checking here rather than
+# trusting anyone to remember, because the failure looks like a radio fault.
+# Idempotent and near-instant when they are already in place.
+if [ -x patches/apply.sh ]; then
+  patches/apply.sh || {
+    echo "error: out-of-tree patches could not be applied — see patches/apply.sh" >&2
+    exit 1
+  }
+fi
+
 # Espressif boards need esptool >= 5.0.2 on PATH, and will not say so clearly.
 #
 # zephyr/soc/espressif/common/CMakeLists.txt does `find_program(ESPTOOL_EXECUTABLE
