@@ -54,7 +54,7 @@
  *    5    1    retries        configured attempt budget
  *    6    1    file_len       bytes of bundle name after the target name
  *    7    1    name_len       bytes of target name that follow the header
- *    8    4    sent           bytes streamed this attempt
+ *    8    4    sent           cumulative image offset, including verified resume
  *   12    4    total          image size, 0 until known
  *   16    4    elapsed_ms     since the run began
  *   20    ..   target name, then bundle basename; neither NUL-terminated

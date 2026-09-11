@@ -1,0 +1,19 @@
+name: Secure DFU protocol tests
+on:
+  push:
+    paths: ['updater/modules/nordic-legacy-dfu/**', '.github/workflows/secure-dfu-test.yml']
+  pull_request:
+    paths: ['updater/modules/nordic-legacy-dfu/**', '.github/workflows/secure-dfu-test.yml']
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure with sanitizers
+        run: >-
+          cmake -S updater/modules/nordic-legacy-dfu/test -B build_secure_test
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+      - run: cmake --build build_secure_test
+      - run: ctest --test-dir build_secure_test --output-on-failure

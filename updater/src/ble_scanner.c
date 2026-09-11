@@ -176,11 +176,20 @@ static bool ad_data_cb(struct bt_data *data, void *user_data)
 		for (size_t off = 0; off + 16 <= data->data_len; off += 16) {
 			if (memcmp(&data->data[off], legacy_dfu_uuid.val, 16) == 0) {
 				ap->has_dfu_uuid = true;
-				return false;   /* stop parse — we have what we need */
+				return true;    /* the name may follow the service */
 			}
 		}
 		return true;
 	}
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+	case BT_DATA_UUID16_ALL:
+	case BT_DATA_UUID16_SOME:
+		for (size_t off = 0; off + 2 <= data->data_len; off += 2) {
+			if (data->data[off] == 0x59 && data->data[off + 1] == 0xFE)
+				ap->has_dfu_uuid = true;
+		}
+		return true;
+#endif
 	default:
 		return true;
 	}

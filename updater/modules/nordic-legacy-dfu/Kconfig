@@ -17,6 +17,14 @@ menuconfig NORDIC_LEGACY_DFU
 
 if NORDIC_LEGACY_DFU
 
+config NORDIC_SECURE_DFU
+	bool "Nordic Secure DFU application client"
+	help
+	  Also support FE59 Secure DFU bootloaders, with CRC-checked object
+	  resume. The target must already be in DFU mode. Application-only;
+	  Secure buttonless entry and multi-image updates are not supported.
+	  Init packets are sent unchanged, including any signatures.
+
 config NORDIC_LEGACY_DFU_MAX_PACKET_SIZE
 	int "Maximum bytes per Packet characteristic write"
 	default 20

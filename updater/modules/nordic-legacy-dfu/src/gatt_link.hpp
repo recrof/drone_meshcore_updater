@@ -53,7 +53,7 @@ public:
 	const Handles &handles() const { return h_; }
 
 	/* ---- discovery ---- */
-	int discover();
+	int discover(bool secure = false);
 
 	/* ---- setup ---- */
 	int subscribe_control_point();
@@ -144,6 +144,8 @@ private:
 	bt_conn *conn_ = nullptr;
 	volatile bool connected_ = false;
 	Handles h_{};
+	bool secure_ = false;
+	bool response_overflow_ = false;
 
 	struct k_sem op_sem_;      /* read / write-with-response / subscribe / MTU */
 	struct k_sem tx_sem_;      /* write-without-response handed to controller */

@@ -9,8 +9,12 @@ failure handling. Where the Java could not be followed literally, the
 difference is listed under [Deviations](#deviations-from-the-java) — there are
 five, and all of them are transport-level.
 
-Secure DFU and the SDK 12+ buttonless services are **not** implemented. Legacy
-buttonless (the `[0x01, 0x04]` jump on the legacy control point) **is**.
+An optional **application-only Secure DFU** client is also available with
+`CONFIG_NORDIC_SECURE_DFU=y` and `nordic_dfu/secure_dfu.hpp`. It shares the
+Stream/Observer interface and GATT plumbing, but has a separate object-protocol
+engine. See [Secure DFU support](../../../docs/secure-dfu.md).
+SDK 12+ Secure buttonless services are **not** implemented. Legacy buttonless
+(the `[0x01, 0x04]` jump on the legacy control point) **is**.
 
 ## Scope
 

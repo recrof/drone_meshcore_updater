@@ -23,7 +23,7 @@ struct ble_scanner_target {
 	bt_addr_le_t addr;                       /* peer address, ready for bt_conn_le_create */
 	int8_t       rssi;                       /* strongest RSSI seen at match time */
 	char         name[BLE_SCANNER_NAME_MAX]; /* advertised name or "" */
-	bool         dfu_uuid;                   /* the ad carried the Legacy DFU service UUID */
+	bool         dfu_uuid;                   /* Legacy DFU or enabled Secure DFU (FE59) */
 };
 
 /* Toggle per-advertisement debug logging. When on, every rejected ad

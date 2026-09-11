@@ -7,7 +7,10 @@ ESP32-S3, ESP32-C5 or MG24), holds a library of firmware bundles, and flashes th
 devices over the air. It exists for MeshCore repeaters on rooftops, masts and hilltops —
 put it on a drone or in a pocket, get within radio range, and update.
 
-Today it speaks Nordic Legacy DFU over Bluetooth, which covers nRF52 targets.
+It speaks Nordic Legacy DFU and application-only Nordic Secure DFU over
+Bluetooth. Secure targets must already be in DFU mode; compatible interrupted
+uploads resume after an offset/CRC check. See [Secure DFU support](docs/secure-dfu.md)
+for package requirements and limitations.
 Drop firmware bundles onto it once, then flash targets in the field with no
 laptop — it is a phone, or nothing at all.
 

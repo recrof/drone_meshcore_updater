@@ -18,7 +18,7 @@
 #pragma once
 
 #include <stdint.h>
-#include <zephyr/bluetooth/conn.h>
+struct bt_conn;
 
 #include "nordic_dfu/stream.hpp"
 
