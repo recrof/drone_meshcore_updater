@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "nordic_dfu/secure_dfu.hpp"
+#include "nordic_dfu/package.hpp"
 #include "secure_transfer.hpp"
 #include "gatt_link.hpp"
 #include <zephyr/logging/log.h>
@@ -59,7 +60,7 @@ Report SecureDfuClient::run(bt_conn *conn, const Firmware &firmware, const Param
 {
 	if (observer_) observer_->on_state(State::Starting);
 	Report report;
-	int rc = channel.link.attach(conn);
+	int rc = channel.link.attach(conn, params.cancelled);
 	if (rc == 0) rc = channel.link.discover(true);
 	if (rc != 0) {
 		report = transport_error(rc);
@@ -67,6 +68,8 @@ Report SecureDfuClient::run(bt_conn *conn, const Firmware &firmware, const Param
 	} else if (!channel.link.handles().control_point || !channel.link.handles().packet ||
 		   !channel.link.handles().control_point_ccc) {
 		report.result = Result::CharacteristicNotFound;
+	} else if (package_protocol(firmware) != PackageProtocol::Secure) {
+		report.result = Result::PackageMismatch;
 	} else {
 		LOG_INF("Secure DFU service found; application-only, CRC-checked resume");
 		channel.timeout = params.operation_timeout_ms ? params.operation_timeout_ms : 30000;

@@ -44,7 +44,7 @@ public:
 	GattLink() = default;
 
 	/** Bind to a connected peer and reset all session state. */
-	int attach(bt_conn *conn);
+	int attach(bt_conn *conn, bool (*cancelled)() = nullptr);
 	/** Release the peer. Does not disconnect. */
 	void detach();
 
@@ -110,13 +110,15 @@ public:
 
 	/* ---- abort ---- */
 	void abort();
-	bool aborted() const { return atomic_get(&aborted_) != 0; }
+	bool aborted() const { return atomic_get(&aborted_) != 0 || externally_cancelled(); }
 	void clear_abort() { atomic_clear(&aborted_); }
 
 	/** Last ATT error reported by a write/read/subscribe. */
 	uint8_t att_error() const { return att_err_; }
 
 private:
+	bool externally_cancelled() const { return cancelled_ && cancelled_(); }
+	bool (*cancelled_)() = nullptr;
 	int wait(struct k_sem *sem, uint32_t timeout_ms);
 	void wake_all();
 

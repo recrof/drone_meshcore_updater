@@ -89,6 +89,8 @@ enum class Result {
 	GattError,
 	/** An operation exceeded Parameters::operation_timeout_ms. */
 	Timeout,
+	/** Init packet format/type/size is unsupported or wrong for this protocol. */
+	PackageMismatch,
 };
 
 /** Progress phases. Mirrors DfuBaseService.PROGRESS_*. */
@@ -149,6 +151,9 @@ struct Firmware {
 
 /** Tunables. Defaults mirror DfuServiceInitiator. */
 struct Parameters {
+	/** Optional run-wide cancellation source. Must remain valid and latched
+	 * through connection setup, attach and protocol fallback. */
+	bool (*cancelled)() = nullptr;
 	/**
 	 * Packets sent between Packet Receipt Notifications. 0 disables PRNs.
 	 * DfuServiceInitiator.DEFAULT_PRN_VALUE is 12.

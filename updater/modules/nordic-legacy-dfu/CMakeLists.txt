@@ -6,6 +6,7 @@ if(CONFIG_NORDIC_LEGACY_DFU)
   zephyr_library_sources(
     src/legacy_dfu.cpp
     src/gatt_link.cpp
+    src/package.cpp
   )
 
   zephyr_include_directories(include)

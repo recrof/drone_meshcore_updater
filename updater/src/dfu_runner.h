@@ -12,6 +12,10 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Kick off scan → parse → dfu on `zip_path`. Returns 0 if the job was
  * queued (async), -EBUSY if another DFU is already running,
  * -EINVAL / -errno on setup failure.
@@ -45,6 +49,9 @@ int dfu_runner_start(const char *zip_path, const char *pin,
 /* True if a DFU sequence is currently active. */
 bool dfu_runner_busy(void);
 
+/* Latched for the entire run, including transport setup and retries. */
+bool dfu_runner_cancelled(void);
+
 /* Stop whatever is running and clear the status back to IDLE.
  *
  * Ends a K_FOREVER scan, aborts a transfer in progress, and cuts short a
@@ -63,3 +70,7 @@ bool dfu_runner_busy(void);
  * -EBUSY during that window; retry.
  */
 int dfu_runner_stop(void);
+
+#ifdef __cplusplus
+}
+#endif

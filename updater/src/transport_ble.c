@@ -228,55 +228,13 @@ static enum dfu_result ble_run(const struct dfu_target *t,
 }
 
 /*
- * Did the image actually take?
- *
- * ACTIVATE-and-Reset is acknowledged by the bootloader *before* it validates
- * anything, so a clean DFU_OK means "every byte arrived", not "the target is
- * running it". The bootloader checks the image's CRC on the way back up, and
- * if it fails there is no application to boot — oltaco's OTAFIX bootloader
- * re-arms BLE DFU instead, so the operator can simply try again. That is a
- * good behaviour and it makes our success report a lie: the peer is sitting in
- * DFU mode and we have gone home saying it is updated.
- *
- * ---- The tell is the DFU service, not the address ----------------------
- *
- * **This keyed on the address alone and that was wrong**, on the reasoning
- * that a Nordic bootloader advertises at MAC+1 (or at its own address when it
- * was already in DFU mode), so anything advertising *there* must be the
- * bootloader. Some targets are like that. The one that found this is not: a
- * RAK4631 running MeshCore keeps the same address in both modes —
- *
- *   pinned match: C1:DB:7B:EB:7A:0C (random) name='AdaDFU'   <- bootloader
- *   ... 494176 bytes uploaded, result=SUCCESS ...
- *   C1:DB:7B:EB:7A:0C (random) is advertising: name='' dfu_service=no
- *
- * — and that last line is the *new application*, up and running, which this
- * function called a rejection. The runner then reflashed a target that had
- * already succeeded, and again, and again: an **update loop against a device
- * that was finished the first time**.
- *
- * It is a race, which is why it did not surface sooner. The same log has an
- * earlier transfer to the same board pass verification, for no better reason
- * than that the target had not finished rebooting inside the 5 s window.
- * Whether a successful DFU got reported as success depended on how fast the
- * peer came back up.
- *
- * The discriminator is `dfu_uuid`: whether the advertisement carries the
- * Legacy DFU service. A bootloader in DFU mode advertises it — it must, or
- * find_first() could never discover one at all — and an application does not.
- * The flag was already collected, already *logged* in the failure message
- * below, and simply never consulted. An address answers "is something there",
- * which is not the question being asked.
- *
- * Two numbers, both deliberately generous, because the cost of being wrong is
- * asymmetric. A false "rejected" costs one retry against a target that is
- * already fine; a false "confirmed" is the bug this exists to catch.
- *
- *   SETTLE  the peer has to reset, check the CRC and decide. Nothing useful
- *           can be concluded before it has.
- *   WATCH   how long to look. Scanning runs at a 50% duty cycle and a
- *           bootloader in DFU mode advertises continuously, so this is many
- *           times what it takes to see one.
+ * Transfer acceptance and application boot are separate facts. A scan can
+ * report what is advertising but cannot identify the expected image/version:
+ * silence may be power loss or poor reception, a non-DFU advertisement may
+ * be an old application, and FE59 may be a buttonless application's service.
+ * Keep this short observation for diagnostics, but return BOOT_UNVERIFIED
+ * unless a future image-specific verifier obtains positive evidence. This
+ * is terminal acceptance, not a failure or permission to reflash the target.
  */
 #define VERIFY_SETTLE_MS 2000
 #define VERIFY_WATCH_MS  5000
@@ -293,35 +251,36 @@ static enum dfu_result ble_verify(const struct dfu_target *t,
 	int rc = ble_scanner_seen_at(&t->ble.addr, VERIFY_WATCH_MS, &seen);
 
 	if (rc == -ETIMEDOUT) {
-		LOG_INF("verify: %s is off the air — the new image is running",
+		LOG_WRN("verify: %s not seen; transfer accepted, application boot unverified",
 			t->name);
-		return DFU_OK;
+		return DFU_BOOT_UNVERIFIED;
 	}
 	if (rc == -ECANCELED) {
 		/* Stopped by the operator. Not evidence either way, and the
 		 * runner is about to unwind anyway. */
-		return DFU_OK;
+		return DFU_CANCELLED;
 	}
 	if (rc < 0) {
 		/* The check failed, not the update. Saying "rejected" here
 		 * would throw away a transfer that may well have worked. */
 		LOG_WRN("verify: could not scan (%d) — leaving the transfer's "
-			"own verdict alone", rc);
-		return DFU_OK;
+			"acceptance intact; application boot unverified", rc);
+		return DFU_BOOT_UNVERIFIED;
 	}
 
 	/* Something is at that address. Which something is the whole question. */
 	if (!seen.dfu_uuid) {
-		LOG_INF("verify: %s is advertising without the DFU service "
-			"(name='%s') — that is the application, so the new "
-			"image is running", t->name, seen.name);
-		return DFU_OK;
+		LOG_WRN("verify: %s advertising without DFU (name='%s'); "
+			"expected application/version not verified", t->name, seen.name);
+		return DFU_BOOT_UNVERIFIED;
 	}
 
-	LOG_ERR("verify: the DFU service is still advertised at the target's "
-		"address (name='%s') — it rejected the image, most likely on "
-		"its own CRC check, and has re-armed DFU", seen.name);
-	return DFU_TARGET_REJECTED;
+	/* FE59 may also belong to a buttonless application, and a stale or
+	 * restarted DFU advertisement cannot establish why it is present.
+	 * Never automatically reflash based on advertising alone. */
+	LOG_WRN("verify: DFU service advertised (name='%s'); application boot "
+		"unverified — inspect the target before another update", seen.name);
+	return DFU_BOOT_UNVERIFIED;
 }
 
 /* Both halves, unconditionally: a stop can land while we are scanning, while

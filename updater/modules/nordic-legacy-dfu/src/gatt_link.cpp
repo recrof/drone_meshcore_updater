@@ -90,8 +90,10 @@ void GattLink::wake_all()
 	k_sem_give(&link_sem_);
 }
 
-int GattLink::attach(bt_conn *conn)
+int GattLink::attach(bt_conn *conn, bool (*cancelled)())
 {
+	cancelled_ = cancelled;
+	if (externally_cancelled()) return -ECANCELED;
 	if (conn == nullptr) {
 		return -EINVAL;
 	}
@@ -143,7 +145,7 @@ int GattLink::attach(bt_conn *conn)
 		connected_ = (info.state == BT_CONN_STATE_CONNECTED);
 	}
 
-	return connected_ ? 0 : -ENOTCONN;
+	return aborted() ? -ECANCELED : (connected_ ? 0 : -ENOTCONN);
 }
 
 void GattLink::detach()
@@ -160,19 +162,18 @@ void GattLink::detach()
 
 int GattLink::wait(struct k_sem *sem, uint32_t timeout_ms)
 {
-	k_timeout_t timeout = (timeout_ms != 0) ? K_MSEC(timeout_ms) : K_FOREVER;
-	int rc = k_sem_take(sem, timeout);
-
-	if (aborted()) {
-		return -ECANCELED;
+	uint32_t start = k_uptime_get_32();
+	for (;;) {
+		if (aborted()) return -ECANCELED;
+		if (!connected_) return -ENOTCONN;
+		uint32_t elapsed = k_uptime_get_32() - start;
+		if (timeout_ms && elapsed >= timeout_ms) return -ETIMEDOUT;
+		uint32_t slice = timeout_ms ? MIN(100u, timeout_ms - elapsed) : 100u;
+		int rc = k_sem_take(sem, K_MSEC(slice));
+		if (aborted()) return -ECANCELED;
+		if (!connected_) return -ENOTCONN;
+		if (rc == 0) return 0;
 	}
-	if (!connected_) {
-		return -ENOTCONN;
-	}
-	if (rc != 0) {
-		return -ETIMEDOUT;
-	}
-	return 0;
 }
 
 void GattLink::abort()
@@ -190,6 +191,7 @@ void GattLink::abort()
 int GattLink::run_discovery(const bt_uuid *uuid, uint8_t type, uint16_t start, uint16_t end,
 			    bt_gatt_discover_func_t func)
 {
+	if (aborted()) return -ECANCELED;
 	memset(&disc_params_, 0, sizeof(disc_params_));
 	disc_params_.uuid = uuid;
 	disc_params_.func = func;
@@ -729,7 +731,7 @@ int GattLink::write_control_point(const void *data, uint16_t len, bool reset)
 	if (h_.control_point == 0) {
 		return -ENOENT;
 	}
-	if (aborted() && !reset) {
+	if (externally_cancelled() || (aborted() && !reset)) {
 		return -ECANCELED;
 	}
 
@@ -857,6 +859,7 @@ void GattLink::mtu_cb(bt_conn *conn, uint8_t err, bt_gatt_exchange_params *param
 
 int GattLink::exchange_mtu(uint16_t mtu)
 {
+	if (aborted()) return -ECANCELED;
 	ARG_UNUSED(mtu);
 
 	/*
@@ -904,23 +907,16 @@ int GattLink::wait_disconnected(uint32_t timeout_ms)
 		return 0;
 	}
 
-	k_timeout_t timeout = (timeout_ms != 0) ? K_MSEC(timeout_ms) : K_FOREVER;
-	uint32_t deadline = k_uptime_get_32() + timeout_ms;
+	uint32_t start = k_uptime_get_32();
 
 	while (connected_) {
 		if (aborted()) {
 			return -ECANCELED;
 		}
-		if (k_sem_take(&link_sem_, timeout) != 0) {
-			return -ETIMEDOUT;
-		}
-		if (timeout_ms != 0) {
-			int32_t remaining = static_cast<int32_t>(deadline - k_uptime_get_32());
-			if (remaining <= 0 && connected_) {
-				return -ETIMEDOUT;
-			}
-			timeout = K_MSEC(remaining > 0 ? remaining : 0);
-		}
+		uint32_t elapsed = k_uptime_get_32() - start;
+		if (timeout_ms && elapsed >= timeout_ms) return -ETIMEDOUT;
+		uint32_t slice = timeout_ms ? MIN(100u, timeout_ms - elapsed) : 100u;
+		(void)k_sem_take(&link_sem_, K_MSEC(slice));
 	}
 	return 0;
 }

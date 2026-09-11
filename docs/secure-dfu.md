@@ -14,8 +14,8 @@ remain unchanged to preserve configuration and web-client compatibility.
    A Legacy init packet is not a Secure init packet. An MCUboot/SMP ZIP used to
    update the updater itself is not a target DFU package either.
 3. Select the actual bootloader address in the scanner and flash the package.
-   Advertising service FE59 now counts as DFU for discovery and post-upload
-   verification. Existing address pinning rules are unchanged.
+   Advertising service FE59 now counts as DFU for discovery. Existing address
+   pinning rules are unchanged. Advertising is diagnostic, not proof of boot.
 4. If the link drops, retry the same package. The client selects the retained
    command/data objects and compares their reported offset and CRC32 against
    the local files before sending the remaining bytes. Progress starts at the
@@ -24,6 +24,10 @@ remain unchanged to preserve configuration and web-client compatibility.
 The new GATT path is tried first. Legacy fallback is allowed **only when FE59
 is absent**. A malformed response, wrong package, missing Secure characteristic,
 remote error or CRC mismatch must not cause Legacy commands to be sent.
+Both clients validate the init-packet format before any DFU write. A Secure
+package offered to a Legacy target is refused before Legacy START can erase
+application flash; the inverse mismatch is refused as well. Unsupported or
+ambiguous formats fail once with BAD_BUNDLE, without retries.
 
 ## Scope and safety
 
@@ -33,6 +37,16 @@ remote error or CRC mismatch must not cause Legacy commands to be sent.
   authenticates the init command and validates the image. The name “Secure
   DFU” describes Nordic's wire protocol; it does not make an unsigned target
   require signatures or imply that its BLE link is encrypted.
+- Preflight accepts classic CRC16 and Nordic hash/signed Legacy layouts, and
+  unsigned/signed Nordic Secure protobuf application commands. It validates
+  envelope structure and Secure application type/size, not cryptographic
+  authenticity or board compatibility. Init packets are limited to 512 bytes;
+  absent init packets, custom/unknown fields, duplicate singular fields and
+  unsupported layouts are refused rather than guessed to be Legacy.
+- Stop is latched by the runner until a new run starts. Connection waits,
+  GATT attachment, protocol fallback and writes consult that same flag. An
+  operation already queued to the controller may finish; Stop prevents the
+  following DFU operation and disconnects without clearing Secure resume state.
 - No reset/abort command is sent on cancellation, timeout or disconnection.
   The updater releases its link; the receiver retains whatever resumable state
   its bootloader supports. A target timeout, reboot or power loss can invalidate
@@ -51,6 +65,19 @@ remote error or CRC mismatch must not cause Legacy commands to be sent.
 - The existing transport identifier `ble-legacy-dfu` intentionally still names
   the BLE ZIP transport on the wire, even when it negotiates Secure DFU.
 
+## Transfer accepted versus boot verified
+
+A successful protocol exchange is not proof that the expected application is
+running. BLE transfers now finish with `DONE / BOOT_UNVERIFIED` (result 16),
+displayed as **Transfer accepted — boot unverified**. Neither silence, a scan
+error, an advertisement without DFU, nor FE59 alone identifies the installed
+application/version. This terminal outcome does **not** retry or reflash; the
+operator should check the target. The sender LED returns to idle rather than
+claiming verified success. There is no image-specific BLE boot verifier yet.
+
+Use the matching updated web client (offline cache v23) to see this result's
+label. The wire layout and all previous enum values are unchanged.
+
 ## Native protocol tests
 
 No Zephyr SDK, Bluetooth adapter or hardware is needed:
@@ -67,6 +94,12 @@ partial command/data objects, object boundaries, a lost Execute reply, invalid
 offsets/CRC/responses, remote errors, cancellation and unsupported image types.
 Hardware qualification is recorded separately; a model pass alone is not
 evidence of successful radio transfer.
+The same CTest command also runs package preflight tests and both Secure-enabled
+and Legacy-only integration builds of the real adapter, clients, GATT link and
+BLE verifier against deterministic OS/Bluetooth stubs. They inject Stop during
+connection, attach, discovery and fallback, check mismatches produce zero DFU
+writes, and exercise uncertain post-upload scan outcomes. These are not radio
+or Zephyr scheduler tests.
 See the [XIAO/RAK3401 qualification record](secure-dfu-qualification.md) for
 the tested setup, results and remaining coverage limits.
 

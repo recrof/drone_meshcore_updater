@@ -171,7 +171,9 @@ struct dfu_transport {
 	 *
 	 * Called after release(), so the link is down and the peer has been
 	 * left to reboot; it is free to take a few seconds. Return DFU_OK to
-	 * confirm, DFU_TARGET_REJECTED to overturn, or any other result to
+	 * confirm, DFU_BOOT_UNVERIFIED to preserve acceptance without claiming
+	 * a verified boot (terminal, no retry), DFU_TARGET_REJECTED on positive
+	 * evidence of rejection, or any other result to
 	 * report a failure of the check itself.
 	 *
 	 * NULL means the transport cannot tell, and run()'s answer stands.

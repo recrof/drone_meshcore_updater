@@ -352,7 +352,8 @@ void dfu_status_finish(enum dfu_status_result result)
 {
 	k_spinlock_key_t key = k_spin_lock(&lock);
 	snap.result = (uint8_t)result;
-	snap.state = (result == DFU_STATUS_RESULT_OK) ? DFU_STATUS_DONE
+	snap.state = (result == DFU_STATUS_RESULT_OK ||
+		      result == DFU_STATUS_RESULT_BOOT_UNVERIFIED) ? DFU_STATUS_DONE
 						      : DFU_STATUS_FAILED;
 	snap.frozen_ms = k_uptime_get_32() - snap.t0;
 	snap.running = false;
@@ -393,6 +394,8 @@ enum dfu_status_result dfu_status_from_dfu_result(int dfu_result)
 	case DFU_REMOTE_ERROR:         return DFU_STATUS_RESULT_REMOTE_ERROR;
 	case DFU_FS_ERROR:             return DFU_STATUS_RESULT_FS_ERROR;
 	case DFU_TARGET_REJECTED:      return DFU_STATUS_RESULT_TARGET_REJECTED;
+	case DFU_BAD_PACKAGE:          return DFU_STATUS_RESULT_BAD_BUNDLE;
+	case DFU_BOOT_UNVERIFIED:      return DFU_STATUS_RESULT_BOOT_UNVERIFIED;
 	/* DFU_BUTTONLESS_TRIGGERED is not terminal — the runner rescans — so
 	 * it never reaches here. Anything unexpected is a remote error rather
 	 * than a silent success. */

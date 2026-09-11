@@ -24,6 +24,8 @@
 #include <zephyr/bluetooth/hci.h>
 
 #include "nordic_dfu/legacy_dfu.hpp"
+#include "nordic_dfu/package.hpp"
+#include "dfu_runner.h"
 #if defined(CONFIG_NORDIC_SECURE_DFU)
 #include "nordic_dfu/secure_dfu.hpp"
 #endif
@@ -244,7 +246,8 @@ dfu_result to_dfu_result(const Report &r)
 	case Result::Timeout:                return DFU_TIMEOUT;
 	case Result::FileError:              return DFU_FS_ERROR;
 	case Result::InitPacketRequired:     return DFU_FS_ERROR;
-	case Result::Aborted:                return DFU_DISCONNECTED_EARLY;
+	case Result::Aborted:                return DFU_CANCELLED;
+	case Result::PackageMismatch:        return DFU_BAD_PACKAGE;
 	}
 	return DFU_REMOTE_ERROR;
 }
@@ -331,6 +334,19 @@ extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *targe
 	if (target == nullptr || bundle == nullptr || cfg == nullptr) {
 		return DFU_FS_ERROR;
 	}
+	if (dfu_runner_cancelled()) return DFU_CANCELLED;
+	// Reject unknown formats without even connecting. Each protocol also
+	// checks its own format before issuing any destructive command.
+	ZipStream preflight_image(&bundle->bin), preflight_init(&bundle->dat);
+	Firmware preflight;
+	preflight.type = bundle->type;
+	preflight.image = &preflight_image;
+	preflight.init_packet = &preflight_init;
+	PackageProtocol protocol = package_protocol(preflight);
+	if (protocol == PackageProtocol::Unknown) return DFU_BAD_PACKAGE;
+#if !defined(CONFIG_NORDIC_SECURE_DFU)
+	if (protocol == PackageProtocol::Secure) return DFU_BAD_PACKAGE;
+#endif
 
 	ensure_callbacks();
 
@@ -375,6 +391,7 @@ extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *targe
 
 	int rc = -EINVAL;
 	for (int attempt = 0; attempt < 12; attempt++) {
+		if (dfu_runner_cancelled()) return DFU_CANCELLED;
 		k_sem_reset(&s_link.sem);
 		rc = bt_conn_le_create(&target->addr, &create_param, &conn_param,
 				       &s_link.conn);
@@ -391,7 +408,15 @@ extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *targe
 		LOG_ERR("bt_conn_le_create rc=%d", rc);
 		return DFU_CONNECT_FAILED;
 	}
-	if (k_sem_take(&s_link.sem, K_SECONDS(10)) < 0 || !s_link.connected) {
+	uint32_t connect_start = k_uptime_get_32();
+	while (!dfu_runner_cancelled() && k_uptime_get_32() - connect_start < 10000) {
+		if (k_sem_take(&s_link.sem, K_MSEC(100)) == 0) break;
+	}
+	if (dfu_runner_cancelled()) {
+		disconnect_and_release();
+		return DFU_CANCELLED;
+	}
+	if (!s_link.connected) {
 		LOG_ERR("connect timed out or failed");
 		disconnect_and_release();
 		return DFU_CONNECT_FAILED;
@@ -399,6 +424,10 @@ extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *targe
 
 	/* The LL can report success then drop with 0x3E on a weak link. */
 	k_sleep(K_MSEC(300));
+	if (dfu_runner_cancelled()) {
+		disconnect_and_release();
+		return DFU_CANCELLED;
+	}
 	log_conn_params(s_link.conn, "at connect");
 	if (!s_link.connected) {
 		LOG_WRN("link dropped immediately after connect");
@@ -427,6 +456,7 @@ extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *targe
 
 	/* ---- map config -> Parameters ---- */
 	Parameters params;
+	params.cancelled = dfu_runner_cancelled;
 	params.packets_before_notification = cfg->prn;
 	/* Parameters::mtu is only "exchange or not"; the payload is capped by
 	 * CONFIG_NORDIC_LEGACY_DFU_MAX_PACKET_SIZE either way. */

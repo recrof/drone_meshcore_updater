@@ -14,6 +14,13 @@ disconnect/resume are verified on the XIAO nRF52840 → RAK3401 test setup.
   other connections, and reject overflowing Secure notification responses.
 - Document package requirements, application-only scope and the distinction
   between the Secure protocol and a target's signature-enforcement policy.
+- Reject incompatible/unknown init packets before destructive DFU commands;
+  verify Secure .dat application type and size, not just manifest labels.
+- Preserve run-wide Stop through connection setup, attach and protocol fallback.
+- Report accepted transfers as boot-unverified unless the expected application
+  is positively verified; never reflash based only on advertising or silence.
+- Add native integration tests for both protocol configurations and update the
+  status display, wire result mapping and offline web cache together.
 
 ## Verification checklist
 
@@ -27,8 +34,13 @@ disconnect/resume are verified on the XIAO nRF52840 → RAK3401 test setup.
 - [x] XIAO-to-RAK3401 full Secure BLE transfer.
 - [x] Deliberate interrupted transfer and verified-offset resume using the XIAO.
 - [x] Post-transfer target application verification and final idle state.
+- [x] Safety follow-up: four native test executables on Windows and Linux
+  (Linux ASan/UBSan), plus all 28 web test files and both Linux firmware configurations.
+- [x] Revised hardware: full transfer, Stop during CONNECTING with unchanged
+  flash, interruption and CRC-verified resume from byte 139,264; independent
+  application/bootloader readbacks and running-application checks passed.
 
-The Secure-enabled XIAO application uses 368,096 bytes of flash and 120,880
+The revised Secure-enabled XIAO application uses 369,792 bytes of flash and 120,880
 bytes of RAM with NCS 3.4.0. Firmware was built on Linux; the Windows check is
 the native protocol suite, not a Windows Zephyr build. Other sender boards
 and stock Nordic signed receivers have not been hardware-qualified here.
@@ -37,3 +49,8 @@ See the [qualification record](secure-dfu-qualification.md): the final build
 resumed at byte 135,168 (23.19%), sent only the remaining 447,660 bytes, and
 produced an exact application readback. Receiver power loss and physical
 out-of-range behavior were not tested in this qualification.
+
+The [safety follow-up record](secure-dfu-safety-tests.md) supersedes the initial
+build identity and records the additional package, cancellation and verification
+regressions. Its BLE terminal result is deliberately `BOOT_UNVERIFIED`; independent
+hardware readback/serial checks supply the positive evidence of application boot.

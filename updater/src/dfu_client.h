@@ -38,6 +38,9 @@ enum dfu_result {
 	 * mirrors the status enum it maps *to*. Only a transport's verify()
 	 * hook produces this; dfu_client_run() never returns it. */
 	DFU_TARGET_REJECTED,
+	DFU_BAD_PACKAGE,           /* unsupported init format or protocol mismatch; do not retry */
+	DFU_CANCELLED,
+	DFU_BOOT_UNVERIFIED,       /* transfer accepted; expected application not positively verified */
 };
 
 /* Connect to `target`, run one Legacy DFU session, disconnect. Blocks the

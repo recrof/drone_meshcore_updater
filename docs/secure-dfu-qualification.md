@@ -3,6 +3,9 @@
 Date: 2026-09-11. Upstream base: `4789fbf55517ec69b928a40efce3334ef70d6b1e`.
 Branch: `feature/secure-dfu`. PR has not been submitted.
 
+The initial qualification below predates the PR safety follow-up. Current
+follow-up verification is recorded in [secure-dfu-safety-tests.md](secure-dfu-safety-tests.md).
+
 ## Build and host checks
 
 - NCS 3.4.0 on Linux: Secure-enabled XIAO firmware builds; application flash

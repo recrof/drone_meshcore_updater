@@ -57,6 +57,7 @@ export const RESULT = {
   TARGET_REJECTED: 13,
   AUTH_REQUIRED: 14,
   AUTH_FAILED: 15,
+  BOOT_UNVERIFIED: 16,
 };
 
 /* Present tense, and phrased as what the device is doing rather than as the
@@ -88,9 +89,9 @@ export const RESULT_LABEL = {
   [RESULT.NO_TARGET]: "no matching device was found — check ble_name and min_rssi",
   [RESULT.SCAN_ERROR]: "the scanner could not start",
   [RESULT.BAD_BUNDLE]: "the bundle could not be read, or ble_firmware_mapping " +
-    "matched nothing",
+    "matched nothing, or the init packet is unsupported/incompatible with the target's DFU protocol",
   [RESULT.CONNECT_FAILED]: "could not connect to the target",
-  [RESULT.SERVICE_MISSING]: "the target does not expose Nordic Legacy DFU",
+  [RESULT.SERVICE_MISSING]: "the target does not expose the required Nordic DFU service",
   [RESULT.CHAR_MISSING]: "the target's DFU service is missing a characteristic",
   [RESULT.DISCONNECTED]: "the link dropped mid-transfer",
   [RESULT.TIMEOUT]: "the target stopped responding",
@@ -107,6 +108,8 @@ export const RESULT_LABEL = {
     "offered — set ble_pin under Config…, or flash it from the scanner and " +
     "type the PIN when asked",
   [RESULT.AUTH_FAILED]: "the target rejected the PIN",
+  [RESULT.BOOT_UNVERIFIED]: "the transfer was accepted, but the expected application " +
+    "and version have not been verified — check the target; no automatic retry",
 };
 
 /* Results the operator can answer by supplying a PIN. Named rather than
@@ -166,7 +169,8 @@ export function parseDfuStatus(bytes) {
   return {
     version,
     state,
-    stateLabel: STATE_LABEL[state] ?? `state ${state}`,
+    stateLabel: state === STATE.DONE && result === RESULT.BOOT_UNVERIFIED
+      ? "Transfer accepted — boot unverified" : STATE_LABEL[state] ?? `state ${state}`,
     percent: bytes[2],
     result,
     resultLabel: RESULT_LABEL[result] ?? `result ${result}`,
@@ -180,6 +184,7 @@ export function parseDfuStatus(bytes) {
     active: isActive(state),
     terminal: isTerminal(state),
     ok: state === STATE.DONE,
+    bootUnverified: state === STATE.DONE && result === RESULT.BOOT_UNVERIFIED,
   };
 }
 
@@ -204,5 +209,6 @@ export function idleStatus() {
     active: false,
     terminal: false,
     ok: false,
+    bootUnverified: false,
   };
 }

@@ -61,20 +61,26 @@ const verifyCode = codeOf(verify);
 t("verify branches on dfu_uuid rather than only printing it",
   /if\s*\(!seen\.dfu_uuid\)/.test(verifyCode), verifyCode.slice(0, 200));
 
-/* An advertiser with no DFU service is the application, so the image took. */
-t("...and no DFU service means the new image is running",
-  /if\s*\(!seen\.dfu_uuid\)\s*\{[\s\S]{0,400}?return DFU_OK;/.test(verifyCode));
+/* Neither an address nor service UUID identifies the expected image. */
+t("no DFU service does not prove the expected application booted",
+  /if\s*\(!seen\.dfu_uuid\)\s*\{[\s\S]{0,400}?return DFU_BOOT_UNVERIFIED;/.test(verifyCode));
 
-/* And only a DFU service still on the air is a rejection. */
-t("only a still-advertised DFU service counts as a rejection",
-  /return DFU_TARGET_REJECTED;/.test(verifyCode) &&
-  verifyCode.indexOf("DFU_TARGET_REJECTED") > verifyCode.indexOf("seen.dfu_uuid"));
+/* FE59 is also used by buttonless applications. A scan is diagnostic,
+ * not positive evidence of image rejection or authorization to reflash. */
+t("advertising alone cannot declare acceptance or rejection",
+  !/return DFU_(OK|TARGET_REJECTED);/.test(verifyCode));
 
-/* Being unseen entirely is still success — the peer rebooted into something
- * that is not advertising yet. That path predates this fix and must survive
- * it, since it is the one that used to make the race look fine. */
-t("an address that goes quiet is still a success",
-  /rc == -ETIMEDOUT[\s\S]{0,300}?return DFU_OK;/.test(verifyCode));
+t("an address that goes quiet leaves boot unverified",
+  /rc == -ETIMEDOUT[\s\S]{0,300}?return DFU_BOOT_UNVERIFIED;/.test(verifyCode));
+
+const runner = codeOf(read("updater/src/dfu_runner.c"));
+const accepted = runner.split("case DFU_BOOT_UNVERIFIED:")[1]?.split("case ")[0] ?? "";
+t("unverified acceptance is terminal, not an automatic retry",
+  /dfu_status_finish\(DFU_STATUS_RESULT_BOOT_UNVERIFIED\)/.test(accepted) &&
+  /goto done;/.test(accepted) && !/attempt\+\+|goto fail/.test(accepted));
+const badPackage = runner.split("case DFU_BAD_PACKAGE:")[1]?.split("case ")[0] ?? "";
+t("a protocol mismatch fails once without retrying",
+  /DFU_STATUS_RESULT_BAD_BUNDLE/.test(badPackage) && /goto fail;/.test(badPackage) && !/attempt\+\+/.test(badPackage));
 
 /* --- 2. the host's subscription list is not ours to zero ----------------- */
 

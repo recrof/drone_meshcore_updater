@@ -126,10 +126,12 @@ static bool             s_busy;
 static atomic_t         s_cancel = ATOMIC_INIT(0);
 static K_SEM_DEFINE(s_wake, 0, 1);
 
-static bool cancelled(void)
+bool dfu_runner_cancelled(void)
 {
 	return atomic_get(&s_cancel) != 0;
 }
+
+static bool cancelled(void) { return dfu_runner_cancelled(); }
 
 /* Sleep unless a stop arrives first. Returns true if it was cut short, which
  * every caller treats as "leave now". */
@@ -536,7 +538,7 @@ static void run_thread(void *a, void *b, void *c)
 		 */
 		int auth = ble_pairing_verdict();
 
-		if (r != DFU_OK && auth != DFU_STATUS_RESULT_NONE) {
+		if (r != DFU_OK && r != DFU_BOOT_UNVERIFIED && auth != DFU_STATUS_RESULT_NONE) {
 			LOG_ERR("DFU runner: %s",
 				auth == DFU_STATUS_RESULT_AUTH_REQUIRED
 					? "the target wants a PIN and none was offered"
@@ -546,6 +548,17 @@ static void run_thread(void *a, void *b, void *c)
 		}
 
 		switch (r) {
+		case DFU_BOOT_UNVERIFIED:
+			LOG_WRN("DFU runner: transfer accepted; application boot unverified (not retrying)");
+			led_set_state(LED_STATE_IDLE);
+			dfu_status_finish(DFU_STATUS_RESULT_BOOT_UNVERIFIED);
+			goto done;
+		case DFU_BAD_PACKAGE:
+			LOG_ERR("DFU runner: unsupported package or DFU protocol mismatch (not retrying)");
+			status_result = DFU_STATUS_RESULT_BAD_BUNDLE;
+			goto fail;
+		case DFU_CANCELLED:
+			goto stopped;
 		case DFU_OK:
 			LOG_INF("DFU runner: SUCCESS");
 			led_set_state(LED_STATE_DONE_OK);
@@ -674,7 +687,6 @@ int dfu_runner_stop(void)
 {
 	k_mutex_lock(&s_lock, K_FOREVER);
 	bool busy = s_busy;
-	k_mutex_unlock(&s_lock);
 
 	if (!busy) {
 		/* Idle, but DONE/FAILED are sticky, so there is still something
@@ -683,6 +695,7 @@ int dfu_runner_stop(void)
 		 * disabled — pressing it always leaves the same clean state. */
 		dfu_status_reset();
 		LOG_INF("DFU runner: stop requested while idle — status cleared");
+		k_mutex_unlock(&s_lock);
 		return -EALREADY;
 	}
 
@@ -700,6 +713,9 @@ int dfu_runner_stop(void)
 			tps[i]->abort();
 		}
 	}
+	/* Serialize cancellation + wakeups with start/finish. Otherwise an old
+	 * Stop could reach a new run after the previous run released s_busy. */
+	k_mutex_unlock(&s_lock);
 	return 0;
 }
 

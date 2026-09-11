@@ -11,6 +11,7 @@
  */
 
 #include "nordic_dfu/legacy_dfu.hpp"
+#include "nordic_dfu/package.hpp"
 #include "gatt_link.hpp"
 
 #include <string.h>
@@ -387,7 +388,7 @@ Failure Session::open(bt_conn *conn, PeerMode *mode)
 {
 	*mode = PeerMode::Unsupported;
 
-	int rc = link_.attach(conn);
+	int rc = link_.attach(conn, params_.cancelled);
 	if (rc != 0) {
 		return map_gatt(rc);
 	}
@@ -1049,6 +1050,14 @@ Report Session::terminate(const Failure &failure)
 Report Session::run(bt_conn *conn)
 {
 	Report report;
+	/* START can erase a single-bank target before it validates the init
+	 * packet. Reject incompatible/unknown packages before any target I/O,
+	 * including buttonless entry and failure-path RESET. */
+	if (package_protocol(fw_) != PackageProtocol::Legacy) {
+		report.result = Result::PackageMismatch;
+		if (observer_) observer_->on_finished(report);
+		return report;
+	}
 	PeerMode mode = PeerMode::Unsupported;
 
 	set_state(State::Starting);
@@ -1200,6 +1209,8 @@ const char *result_str(Result result)
 		return "GATT ERROR";
 	case Result::Timeout:
 		return "TIMEOUT";
+	case Result::PackageMismatch:
+		return "PACKAGE_MISMATCH";
 	}
 	return "UNKNOWN";
 }
