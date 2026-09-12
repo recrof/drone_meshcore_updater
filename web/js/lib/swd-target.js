@@ -214,7 +214,8 @@ export class SwdTarget {
     } catch (e) {
       throw new DapError(
         `${e.message}. The debug port works but the system bus does not answer — ` +
-        `Secure access (CSW.HNONSEC) or device protection is the usual cause.`);
+        `Secure access (CSW.HNONSEC) or device protection is the usual cause.` +
+        (this.constructor.BUS_FAULT_HINT ? ` ${this.constructor.BUS_FAULT_HINT}` : ""));
     }
     if (sp === 0xffffffff && pc === 0xffffffff) {
       this.log(`${this.constructor.MEMORY} reads as erased — the part is blank`, "warn");

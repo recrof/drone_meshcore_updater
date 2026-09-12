@@ -36,6 +36,7 @@
 #include "dfu_transport.h"
 #include "md5.h"
 #include "dfu_status.h"
+#include "pin_addr.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -108,10 +109,40 @@ struct wifi_state {
 	struct k_sem assoc;
 	struct k_sem got_ip;
 	struct k_sem scan_done;
-	bool  ap_seen;      /* OTA_SSID was in the last scan's results */
+	bool  ap_seen;      /* the AP we are looking for was in the last scan */
 	bool  connected;
 	volatile bool abort;
 	int   sock;
+
+	/*
+	 * A pinned target: one access point the operator picked out of the
+	 * scanner, addressed by BSSID.
+	 *
+	 * The BSSID is the whole of what arrives, because it is the whole of
+	 * what the survey row carries as its id — the same string, unchanged,
+	 * that survey.c rendered. Everything else needed to join is read back
+	 * out of a live scan rather than carried in the pin: the SSID (a
+	 * connect request will not go without one) and the channel (which
+	 * turns a full sweep into a single-channel probe).
+	 *
+	 * Reading them from the scan rather than trusting the client is not
+	 * fussiness. The client's copy is as old as its last poll, an AP can
+	 * change channel between polls, and a stale channel is a join that
+	 * quietly never completes.
+	 */
+	bool          pinned;
+	unsigned char want_bssid[6];
+	char          seen_ssid[33];   /* WIFI_SSID_MAX_LEN + 1 */
+	uint8_t       seen_ssid_len;
+	uint8_t       seen_channel;
+	bool          seen_secure;
+
+	/* Something called itself MeshCore-OTA and was encrypted, so it is not
+	 * one (elegantota.h). Latched and reported once rather than per sweep:
+	 * the alternative to saying it is waiting silently forever, which is the
+	 * failure this whole scan step exists to avoid. */
+	bool          impostor_seen;
+	bool          impostor_logged;
 };
 
 static struct wifi_state s;
@@ -142,8 +173,45 @@ static void wifi_evt(struct net_mgmt_event_callback *cb, uint64_t event,
 	case NET_EVENT_WIFI_SCAN_RESULT: {
 		const struct wifi_scan_result *r =
 			(const struct wifi_scan_result *)cb->info;
+
+		/* Two different questions, and only one is asked per run.
+		 *
+		 * Unpinned: "is any MeshCore-OTA on the air?" — the SSID is the
+		 * only identity there is, because every repeater raises the
+		 * same one.
+		 *
+		 * Pinned: "is *that* access point on the air?" — the BSSID is
+		 * the identity, and the SSID becomes something to read off
+		 * rather than something to match. That is what lets the
+		 * scanner's Flash button mean one specific repeater when two
+		 * are in OTA mode at once, which is the case the button exists
+		 * for and the case the SSID cannot express.
+		 */
+		if (s.pinned) {
+			if (memcmp(r->mac, s.want_bssid, sizeof(s.want_bssid))) {
+				break;
+			}
+			size_t n = MIN((size_t)r->ssid_length,
+				       sizeof(s.seen_ssid) - 1);
+			memcpy(s.seen_ssid, r->ssid, n);
+			s.seen_ssid[n] = '\0';
+			s.seen_ssid_len = (uint8_t)n;
+			s.seen_channel = r->channel;
+			s.seen_secure = (r->security != WIFI_SECURITY_TYPE_NONE);
+			s.ap_seen = true;
+			break;
+		}
 		if (r->ssid_length == sizeof(OTA_SSID) - 1 &&
 		    !memcmp(r->ssid, OTA_SSID, sizeof(OTA_SSID) - 1)) {
+			/* The name is not sufficient. MeshCore's AP is open by
+			 * construction, so an encrypted one wearing the name is
+			 * somebody else's network — and associating with it can
+			 * only fail, once per cycle, forever, with a message
+			 * about association rather than about the impostor. */
+			if (r->security != WIFI_SECURITY_TYPE_NONE) {
+				s.impostor_seen = true;
+				break;
+			}
 			s.ap_seen = true;
 		}
 		break;
@@ -166,11 +234,17 @@ static void ipv4_evt(struct net_mgmt_event_callback *cb, uint64_t event,
 }
 
 /*
- * Is `MeshCore-OTA` on the air right now?
+ * Is the access point we want on the air right now?
+ *
+ * Which one that is depends on the run: `MeshCore-OTA` by name for an ordinary
+ * search, or one specific BSSID for a target pinned from the scanner. Either
+ * way survey_evt() above answers it and sets `ap_seen`.
  *
  * Returns 1 if it was seen, 0 if the scan completed without it, or a negative
  * errno if scanning is not usable — in which case the caller falls back to
  * trying to associate blind, which is what this code did exclusively before.
+ * **A pinned run has no such fallback**: the SSID and channel it needs are
+ * read out of the scan results, so there is nothing to associate blind with.
  *
  * The reason this step exists: `net_mgmt(NET_REQUEST_WIFI_CONNECT)` against an
  * SSID that is not there produces *no event at all* on this driver. It does
@@ -268,6 +342,24 @@ static int associate(uint32_t timeout_ms)
 		.mfp = WIFI_MFP_OPTIONAL,
 	};
 
+	/* A pinned run joins one BSSID, on the channel the scan just saw it on.
+	 *
+	 * The SSID still has to be filled in — the driver copies it
+	 * unconditionally and hostap needs it — but it is now the *scan's*
+	 * SSID, not the constant. That is what makes a pinned flash work
+	 * against a repeater whose AP is not called MeshCore-OTA: the operator
+	 * pointed at a row, and the row is the authority on what it is called.
+	 *
+	 * The driver only honours `bssid` when it is not all zeroes
+	 * (esp_wifi_drv.c checks exactly that), which is also the reason an
+	 * unpinned run can leave the field alone. */
+	if (s.pinned) {
+		memcpy(p.bssid, s.want_bssid, sizeof(p.bssid));
+		p.ssid = (const uint8_t *)s.seen_ssid;
+		p.ssid_length = s.seen_ssid_len;
+		p.channel = s.seen_channel ? s.seen_channel : WIFI_CHANNEL_ANY;
+	}
+
 	k_sem_reset(&s.assoc);
 	k_sem_reset(&s.got_ip);
 	s.connected = false;
@@ -296,7 +388,7 @@ static int associate(uint32_t timeout_ms)
 		return -ETIMEDOUT;
 	}
 	if (s.abort) return -ECANCELED;
-	LOG_INF("associated with %s", OTA_SSID);
+	LOG_INF("associated with %s", (const char *)p.ssid);
 	apply_tx_power();
 	return 0;
 }
@@ -665,21 +757,39 @@ static int wifi_find(struct dfu_target *out, const struct app_config *cfg,
 {
 	ARG_UNUSED(cfg);
 
-	/* No pinning here yet. The field is deliberately transport-opaque so
-	 * this could one day take an IP or a hostname, but today the only
-	 * thing that produces a pin is the BLE scanner, and a MAC address
-	 * means nothing to an HTTP endpoint. Refusing is what turns "flash
-	 * this .bin at that Bluetooth device" into an error the operator can
-	 * read, instead of a scan that silently ignores their choice and
-	 * flashes whatever ElegantOTA peer answered first. */
-	if (pin != NULL && pin[0] != '\0') {
-		LOG_ERR("wifi-elegantota cannot target a pinned address ('%s')", pin);
-		return -EINVAL;
-	}
-
 	memset(out, 0, sizeof(*out));
 	out->tp = &dfu_transport_wifi_elegantota;
 	s.abort = false;
+
+	/*
+	 * A pin here is one access point's BSSID, exactly as survey.c rendered
+	 * it into the scanner row the operator clicked. It is parsed rather
+	 * than pattern-matched, in pin_addr.c, so a Bluetooth row's id — which
+	 * carries a trailing "(random)" — is refused instead of being read as
+	 * a plausible BSSID and hunted for until the window expires.
+	 *
+	 * Refusing is the whole value: "flash this .bin at that Bluetooth
+	 * device" becomes an error the operator can read, rather than a search
+	 * that silently ignores their choice and joins whichever ElegantOTA
+	 * peer answered first.
+	 */
+	s.pinned = false;
+	s.impostor_seen = false;
+	s.impostor_logged = false;
+	s.seen_ssid[0] = '\0';
+	s.seen_ssid_len = 0;
+	s.seen_channel = 0;
+	s.seen_secure = false;
+
+	if (pin != NULL && pin[0] != '\0') {
+		if (pin_addr_bssid(pin, s.want_bssid) < 0) {
+			LOG_ERR("'%s' is not a WiFi BSSID — an access point is "
+				"named by six hex octets and nothing else", pin);
+			return -EINVAL;
+		}
+		s.pinned = true;
+		LOG_INF("pinned to BSSID %s", pin);
+	}
 
 	/*
 	 * `timeout_ms == 0` is the runner's word for "keep looking until you
@@ -718,6 +828,18 @@ static int wifi_find(struct dfu_target *out, const struct app_config *cfg,
 			const int seen = scan_for_ap();
 			if (seen == -ECANCELED) return -ECANCELED;
 			if (seen < 0) {
+				/* A pinned run cannot fall back. Its SSID and
+				 * channel come out of the scan results, so with
+				 * no scan there is nothing to join — and joining
+				 * MeshCore-OTA anyway would flash whichever
+				 * repeater answered, which is precisely the
+				 * choice the operator overruled. */
+				if (s.pinned) {
+					LOG_ERR("scan unusable (%d) and a specific "
+						"access point was asked for — there "
+						"is no way to reach it blind", seen);
+					return seen;
+				}
 				LOG_WRN("scan unusable (%d) — associating blind from here on",
 					seen);
 				can_scan = false;
@@ -725,10 +847,45 @@ static int wifi_find(struct dfu_target *out, const struct app_config *cfg,
 				/* The expected state while waiting for an
 				 * operator to send `start ota`. Not logged per
 				 * cycle: at a few seconds each that is a wall
-				 * of text in the file log for "nothing yet". */
+				 * of text in the file log for "nothing yet".
+				 *
+				 * One thing is worth breaking that for, once:
+				 * an encrypted network wearing the name. That
+				 * is indistinguishable from "not on the air
+				 * yet" from outside, and it is the one case
+				 * where waiting will never end. */
+				if (s.impostor_seen && !s.impostor_logged) {
+					s.impostor_logged = true;
+					LOG_WRN("a network called %s is on the air "
+						"but is encrypted — MeshCore's OTA "
+						"access point is always open, so "
+						"that is somebody else's network "
+						"and is being ignored", OTA_SSID);
+				}
 				spent += SCAN_TIMEOUT_MS;
 				if (!forever && spent >= timeout_ms) return -ETIMEDOUT;
 				continue;
+			} else if (s.pinned) {
+				/* An encrypted AP is a dead end and the scan is
+				 * where that becomes knowable: this updater has
+				 * no PSK to offer and MeshCore's OTA AP is open.
+				 * Saying so beats an association that fails
+				 * without ever explaining why. */
+				if (s.seen_secure) {
+					LOG_ERR("%s is encrypted, so it is not a "
+						"MeshCore OTA access point — that one "
+						"is open by construction and there is "
+						"no passphrase to offer this one",
+						s.seen_ssid);
+					return -EPERM;
+				}
+				if (s.seen_ssid_len == 0) {
+					LOG_ERR("that access point advertises no SSID "
+						"— there is nothing to associate with");
+					return -EINVAL;
+				}
+				LOG_INF("%s (ch %u) is on the air — joining",
+					s.seen_ssid, s.seen_channel);
 			} else {
 				LOG_INF("%s is on the air — joining", OTA_SSID);
 			}

@@ -40,9 +40,13 @@ import { TAR_WRAP } from "./cmsis-dap.js";
 export const EXPECTED_DPIDR = 0x6ba02477;
 
 /* CTRL-AP — Nordic's proprietary AP for unlocking a protected part. */
-const CTRL_AP = 2;
-const CTRL_AP_IDR_EXPECTED = 0x32880000;
+export const CTRL_AP = 2;
+export const CTRL_AP_IDR_EXPECTED = 0x32880000;
 const CTRL_AP_RESET = 0x000, CTRL_AP_ERASEALL = 0x004, CTRL_AP_ERASEALLSTATUS = 0x008;
+/* APPROTECT.STATUS. Bit 0 is DBGEN: 1 = invasive debug enabled, 0 = the
+ * system bus is closed to the AHB-AP. The same register the board's
+ * openocd.cfg reads in _nrf_check_ap_lock (`apreg 2 0xc`, locked when < 1). */
+export const CTRL_AP_APPROTECT_STATUS = 0x00c;
 
 /* RRAM controller. */
 const RRAMC_CONFIG = 0x5004e500;
@@ -59,6 +63,61 @@ export class Nrf54lFlasher extends SwdTarget {
   static SECURE_ONLY = true;
   static VECTORS = 0;
   static ERASED_HINT = "reads as erased, which is the RRAM write-buffer bug (Trap 1)";
+  /* Appended to checkSystemBus()'s failure. On this part a refused system
+   * bus is APPROTECT far more often than anything else — see isProtected(). */
+  static BUS_FAULT_HINT =
+    "On the nRF54L this is what APPROTECT looks like: the debug port resets " +
+    "closed and only the running firmware opens it, so a board that has never " +
+    "run firmware built to do that (a fresh one, say) faults on its first " +
+    "memory access. Mass erase & unlock is the way in.";
+
+  /* --- protection ------------------------------------------------------- */
+
+  /*
+   * On this part a locked debug port does not look the way it does on an
+   * nRF52. There, APPROTECT takes the AHB-AP off the bus and its IDR reads
+   * 0, which is what the base class tests. Here the AHB-AP stays present —
+   * IDR valid, CSW writable, DHCSR readable — and every transfer on the
+   * *system* bus is refused: `FAULT on read AP DRW ... STICKYERR ... while
+   * reading 0x00000000`, on the very first word of the vector table, with
+   * CTRL/STAT showing the debug domain fully powered. That was reported as
+   * an HNONSEC problem, which it resembles and is not.
+   *
+   * The distinction matters because this state is *ordinary* on a fresh
+   * board. TAMPC's DBGEN signal resets to "debug disabled"
+   * (TAMPC_PROTECT_DOMAIN_DBGEN_CTRL_ResetValue = 0x10 in the MDK) and it is
+   * the running firmware's SystemInit that opens it — Zephyr's
+   * NRF_APPROTECT_DISABLE default, unconditionally, on every boot. A part
+   * whose firmware never does (factory firmware, an image built with
+   * APPROTECT locked, or nothing to run at all) presents like this, and the
+   * way in is the same as for a deliberately locked part: CTRL-AP ERASEALL.
+   * So the question is put to the CTRL-AP, which is what OpenOCD's
+   * examine-fail handler does too.
+   */
+  async isProtected() {
+    if (await super.isProtected()) return true;
+    let status;
+    try {
+      await this.selectAp(CTRL_AP, 0x0f);
+      const idr = await this.readApSettled(AP.IDR);
+      if (idr !== CTRL_AP_IDR_EXPECTED) {
+        this.log(`CTRL-AP IDR = 0x${hex(idr)} (expected 0x${hex(CTRL_AP_IDR_EXPECTED)}) — ` +
+                 `cannot read APPROTECT status`, "warn");
+        return false;
+      }
+      await this.selectAp(CTRL_AP, 0);
+      status = await this.readApSettled(CTRL_AP_APPROTECT_STATUS);
+    } catch (e) {
+      this.log(`CTRL-AP APPROTECT status unreadable: ${e.message}`, "warn");
+      return false;
+    } finally {
+      await this.selectAp(0, 0);
+    }
+    const open = (status & 1) !== 0;
+    this.log(`CTRL-AP APPROTECT.STATUS = 0x${hex(status)} — debug ${open ? "open" : "CLOSED"}`,
+             open ? "" : "warn");
+    return !open;
+  }
 
   /* --- RRAM ------------------------------------------------------------- */
 
@@ -102,8 +161,10 @@ export class Nrf54lFlasher extends SwdTarget {
    * with APPROTECT engaged, and it destroys everything in RRAM.
    */
   async massErase() {
+    /* Collected through RDBUFF like every other AP read here, rather than
+     * trusting the probe to append it — see setupMemAp(). */
     await this.selectAp(CTRL_AP, 0x0f);
-    const idr = await this.dap.readAp(AP.IDR);
+    const idr = await this.readApSettled(AP.IDR);
     if (idr !== CTRL_AP_IDR_EXPECTED) {
       throw new DapError(`CTRL-AP not found (IDR = 0x${hex(idr)}, expected 0x${hex(CTRL_AP_IDR_EXPECTED)})`);
     }
@@ -113,7 +174,7 @@ export class Nrf54lFlasher extends SwdTarget {
 
     /* 1 = READYTORESET, 2 = BUSY, 3 = ERROR. */
     for (let i = 0; ; i++) {
-      const status = await this.dap.readAp(CTRL_AP_ERASEALLSTATUS);
+      const status = await this.readApSettled(CTRL_AP_ERASEALLSTATUS);
       if (status === 1) break;
       if (status === 3) throw new DapError("mass erase reported ERROR");
       if (i > 300) throw new DapError("mass erase timed out");

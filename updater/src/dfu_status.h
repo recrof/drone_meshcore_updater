@@ -154,6 +154,33 @@ enum dfu_status_result {
 	 */
 	DFU_STATUS_RESULT_AUTH_REQUIRED      = 14,
 	DFU_STATUS_RESULT_AUTH_FAILED        = 15,
+
+	/* The operator named a target this transport cannot reach: a pin that is
+	 * not an address of the right kind, or an access point that is encrypted
+	 * and so cannot be joined without a password this project has nowhere to
+	 * put.
+	 *
+	 * Separate from _SCAN_ERROR because they call for opposite next steps.
+	 * A scan error is the *radio* failing and is worth retrying; this is a
+	 * choice that cannot work however many times it is made, and reporting
+	 * it as "the scanner could not start" is Trap 10's mistake again —
+	 * a message about the radio for a mistake about a string.
+	 *
+	 * Not retried, for the same reason _AUTH_* are not.
+	 */
+	DFU_STATUS_RESULT_UNREACHABLE_TARGET = 16,
+
+	/* An auto-flash delivered a SoftDevice or bootloader package — which
+	 * erases the target's application on a single-bank bootloader — and
+	 * then found no rule in ble_firmware_mapping naming an *application*
+	 * for the target's DFU-mode name (or found the bootloader again). The
+	 * bootloader went in; the target has nothing to boot. Reported as a
+	 * failure, not a success, because the run's purpose was to leave a
+	 * working repeater and it did not.
+	 *
+	 * Not retried: the mapping is the same on every attempt.
+	 */
+	DFU_STATUS_RESULT_NO_APP_RULE        = 17,
 };
 
 /* Start a new run: clears the snapshot, starts the elapsed clock, and enters

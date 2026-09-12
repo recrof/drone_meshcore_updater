@@ -28,6 +28,7 @@ const {
   inspectFirmware, crc32, crc16, walkZip, parseLegacyInitPacket,
   readEspHeader, readAppDesc, transportsFromMask, isFirmwareName,
   KIND, TRANSPORT, TRANSPORT_BIT, ESP_APP_DESC_MAGIC, ESP_APP_DESC_OFFSET,
+  NORDIC_SECTIONS,
 } = await import("../js/lib/firmware-image.js");
 
 let bad = 0;
@@ -94,6 +95,65 @@ function nordicPackage(over = {}) {
   t("...and the init packet is confirmed against the image", has(rep, "dat-bin-match"));
   t("...reporting the image size", rep.details.imageBytes === 512, String(rep.details.imageBytes));
   t("...and the device type it names", rep.details.deviceType === 0x0052);
+}
+
+/* --- the section is found by name, not by position -----------------------
+ *
+ * nrfutil writes the manifest with sort_keys=True and a scalar `dfu_version`
+ * beside the section. "application" sorts ahead of it; "softdevice_bootloader"
+ * does not. So a bootloader package (the OTAFIX ones, which are how a repeater
+ * is upgraded to a bootloader this updater can re-arm) is exactly the shape
+ * that taking the first key got wrong — refused as having no bin_file. */
+{
+  const z = nordicPackage({
+    manifest: JSON.stringify({ manifest: {
+      dfu_version: 0.5,
+      softdevice_bootloader: {
+        bin_file: "app.bin", bl_size: 39000, dat_file: "app.dat",
+        init_packet_data: { device_type: 82 }, sd_size: 152728,
+      },
+    } }),
+  });
+  const rep = inspectFirmware(z, { name: "xiao_nrf52840_ble_bootloader-0.9.2-OTAFIX2.2.zip" });
+  t("a softdevice_bootloader package with dfu_version ahead of it is accepted", rep.ok, codes(rep));
+  t("...and the section is named", rep.details.section === "softdevice_bootloader", String(rep.details.section));
+  t("...with its init packet checked against the image", has(rep, "dat-bin-match"));
+}
+{
+  const z = nordicPackage({
+    manifest: JSON.stringify({ manifest: { dfu_version: 0.5, application: { bin_file: "app.bin", dat_file: "app.dat" } } }),
+  });
+  const rep = inspectFirmware(z, { name: "x.zip" });
+  t("an application package with dfu_version is still accepted", rep.ok, codes(rep));
+}
+{
+  const z = nordicPackage({
+    manifest: JSON.stringify({ manifest: {
+      softdevice_bootloader_application: { bin_file: "app.bin", dat_file: "app.dat", sd_size: 1, bl_size: 1 },
+    } }),
+  });
+  const rep = inspectFirmware(z, { name: "x.zip" });
+  t("the three-in-one package is refused, as the firmware refuses it", has(rep, "section-unsupported"), codes(rep));
+  t("...and is not flashable", !rep.ok);
+}
+{
+  const z = nordicPackage({ manifest: JSON.stringify({ manifest: { dfu_version: 0.5 } }) });
+  const rep = inspectFirmware(z, { name: "x.zip" });
+  t("a manifest with no section at all says so", has(rep, "manifest-no-section"), codes(rep));
+}
+{
+  /* The client's table is a copy of detect_section()'s in firmware_zip.c,
+   * including the order: the longest names first, so the combined package is
+   * seen as itself and not as one of its parts. */
+  const c = join(ROOT, "updater", "src", "firmware_zip.c");
+  if (existsSync(c)) {
+    const src = readFileSync(c, "utf8");
+    const body = src.slice(src.indexOf("static uint8_t detect_section"));
+    const table = body.slice(body.indexOf("sections[] = {"), body.indexOf("};"));
+    const fw = [...table.matchAll(/\{\s*"([a-z_]+)"/g)].map(m => m[1]);
+    t("NORDIC_SECTIONS matches detect_section()'s table in firmware_zip.c, in order",
+      JSON.stringify(fw) === JSON.stringify(NORDIC_SECTIONS), `${fw} vs ${NORDIC_SECTIONS}`);
+  }
 }
 
 /* --- integrity ----------------------------------------------------------- */

@@ -35,11 +35,11 @@
  * that three times — but a *failing* model is a bug found for free.
  */
 import { Chunk } from "../js/lib/intel-hex.js";
-import { Nrf54lFlasher } from "../js/lib/nrf54l-flash.js";
+import { Nrf54lFlasher, CTRL_AP, CTRL_AP_IDR_EXPECTED, CTRL_AP_APPROTECT_STATUS } from "../js/lib/nrf54l-flash.js";
 import { Efr32Flasher, FLASH_BASE, PAGE_SIZE, LOADER } from "../js/lib/efr32-flash.js";
 import { PROBE_TARGETS } from "../js/lib/probe-targets.js";
 import {
-  DP, AP, APnDP, RnW, CSW_VALUE, CSW_ADDRINC_SINGLE, TAR_WRAP,
+  DP, AP, APnDP, RnW, CSW_VALUE, CSW_ADDRINC_SINGLE, TAR_WRAP, DapError,
 } from "../js/lib/cmsis-dap.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync, mkdtempSync, existsSync } from "node:fs";
@@ -71,6 +71,17 @@ class FakeDap {
     this.tar = 0;
     this.rdbuff = 0;          // AP reads are posted; this holds the result
     this.blockLimit = 64;     // words per DAP_TransferBlock, as a real probe has
+    this.apsel = 0;           // DP.SELECT's APSEL, so the CTRL-AP is addressable
+    /* The nRF54L's shape of protection: the AHB-AP stays on the bus with a
+     * valid IDR and a writable CSW, and every system-bus transfer faults.
+     * CTRL-AP APPROTECT.STATUS bit 0 says which. Open by default. */
+    this.approtectStatus = 1;
+    this.eraseAllStatus = 0;
+  }
+  get locked() { return (this.approtectStatus & 1) === 0; }
+  fault(where) {
+    throw new DapError(`target fault — FAULT on ${where} (after 1 transfer). ` +
+                       `CTRL/STAT=0xf0000020 — STICKYERR`);
   }
   async setClock() {}
   async connectSwd() {}
@@ -87,12 +98,31 @@ class FakeDap {
     if (reg === DP.RDBUFF) return this.rdbuff;
     return 0;
   }
-  async writeDp() {}
+  async writeDp(reg, value) {
+    if (reg === DP.SELECT) this.apsel = (value >>> 24) & 0xff;
+  }
+
+  /* CTRL-AP (AP #2), enough of it for isProtected() and massErase(). */
+  readCtrlAp(reg) {
+    if (reg === AP.IDR) return CTRL_AP_IDR_EXPECTED;
+    if (reg === CTRL_AP_APPROTECT_STATUS) return this.approtectStatus;
+    if (reg === 0x008) return this.eraseAllStatus;
+    return 0;
+  }
+  writeCtrlAp(reg, value) {
+    if (reg === 0x004 && value === 1) {       // ERASEALL: wipes, and unlocks
+      this.bus.mem?.fill(0xff);
+      this.approtectStatus = 1;
+      this.eraseAllStatus = 1;                // READYTORESET
+    }
+  }
 
   async readAp(reg) {
+    if (this.apsel === CTRL_AP) { this.rdbuff = this.readCtrlAp(reg); return 0; }
     if (reg === AP.CSW) { this.rdbuff = this.csw; return 0; }
     if (reg === AP.IDR) { this.rdbuff = 0x24770011; return 0; }
     if (reg === AP.DRW) {
+      if (this.locked) this.fault("read AP DRW");
       this.rdbuff = this.bus.read(this.tar);
       if (this.csw & CSW_ADDRINC_SINGLE) this.tar = (this.tar + 4) >>> 0;
       return 0;
@@ -100,9 +130,11 @@ class FakeDap {
     return 0;
   }
   async writeAp(reg, value) {
+    if (this.apsel === CTRL_AP) { this.writeCtrlAp(reg, value); return; }
     if (reg === AP.CSW) { this.csw = value >>> 0; return; }
     if (reg === AP.TAR) { this.tar = value >>> 0; return; }
     if (reg === AP.DRW) {
+      if (this.locked) this.fault("write AP DRW");
       this.bus.write(this.tar, value >>> 0);
       if (this.csw & CSW_ADDRINC_SINGLE) this.tar = (this.tar + 4) >>> 0;
       return;
@@ -121,6 +153,7 @@ class FakeDap {
     this.tar = base | (((this.tar + 4) & (TAR_WRAP - 1)) >>> 0);
   }
   async transferBlock(request, words) {
+    if (this.locked) this.fault(request & RnW ? "read AP DRW" : "write AP DRW");
     if (request & RnW) {
       const out = new Uint32Array(words);
       for (let i = 0; i < words; i++) { out[i] = this.bus.read(this.tar); this.bump(); }
@@ -528,6 +561,41 @@ const sameAs = (mem, offset, want) => {
   /* Only the nRF54L has an unlock path; the UI asks the class, not a list. */
   t("only the part with a CTRL-AP offers an unlock", Nrf54lFlasher.CAN_UNLOCK === true);
   t("...and the EFR32 does not pretend to", Efr32Flasher.CAN_UNLOCK === false);
+}
+
+/* ================= nRF54L APPROTECT ================= *
+ *
+ * A fresh XIAO nRF54LM20A: DPIDR fine, AHB-AP IDR valid, CSW takes the Secure
+ * setting, and the first read of the vector table faults with STICKYERR. The
+ * base class's protection test (IDR == 0) is the nRF52's shape and never
+ * fires here, so the UI showed a bus error blaming HNONSEC and never offered
+ * the one thing that helps. */
+{
+  const bus = new RramBus();
+  const dap = new FakeDap(bus);
+  const f = new Nrf54lFlasher(dap, () => {});
+  await f.attach();
+  t("nRF54L: an open part is not reported protected", !(await f.isProtected()));
+  t("...and the AHB-AP is selected again afterwards", dap.apsel === 0);
+
+  dap.approtectStatus = 0;
+  t("nRF54L: a part whose AHB-AP answers but whose bus is closed IS reported protected",
+    await f.isProtected());
+  t("...the base class's IDR test alone would have missed it",
+    !(await Object.getPrototypeOf(Nrf54lFlasher.prototype).isProtected.call(f)));
+  await f.setupMemAp();
+  let msg = "";
+  try { await f.checkSystemBus(); } catch (e) { msg = e.message; }
+  t("nRF54L: the bus check on a closed part still fails", /STICKYERR/.test(msg), msg);
+  t("...and names APPROTECT, not only HNONSEC", /APPROTECT/.test(msg) && /Mass erase/.test(msg), msg);
+
+  await f.massErase();
+  await f.attach();
+  t("nRF54L: mass erase opens it", !(await f.isProtected()));
+  await f.setupMemAp();
+  let ok = true;
+  try { await f.checkSystemBus(); } catch { ok = false; }
+  t("...and the bus answers afterwards", ok);
 }
 
 console.log(bad ? `\n${bad} FAILURES` : "\nall SWD flash tests passed");

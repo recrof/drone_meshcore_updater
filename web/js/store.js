@@ -934,10 +934,17 @@ export function activateEntry(fullpath, isDir) {
 export async function flashToTarget(fullpath, addr, label) {
   const name = fullpath.split("/").pop();
   const who = label || addr;
-  if (!confirm(`Flash "${name}" to ${who}?\n\n` +
-               `The updater will look for this exact device — the name filter ` +
-               `and minimum-signal setting do not apply — connect, and start ` +
-               `the Legacy DFU sequence.\n\n` +
+  /* What the device is about to do, said in the words of the radio it will
+   * use. Derived from the file rather than passed in by the caller: the
+   * extension is what decides the transport on the device too
+   * (`mapping_kind_mask()`), so asking the file keeps one rule in one place. */
+  const how = transportForName(name) === TRANSPORT.WIFI
+    ? `The updater will join that access point by its BSSID — the \`wifi_ota\` ` +
+      `setting does not apply — and POST the image to its ElegantOTA endpoint.`
+    : `The updater will look for this exact device — the name filter and ` +
+      `minimum-signal setting do not apply — connect, and start the Legacy ` +
+      `DFU sequence.`;
+  if (!confirm(`Flash "${name}" to ${who}?\n\n${how}\n\n` +
                `Progress appears here as it happens; the device log has the detail.`)) {
     return false;
   }

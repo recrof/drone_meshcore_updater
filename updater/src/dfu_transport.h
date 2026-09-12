@@ -174,9 +174,17 @@ struct dfu_transport {
 	 * confirm, DFU_TARGET_REJECTED to overturn, or any other result to
 	 * report a failure of the check itself.
 	 *
+	 * `payload` is what run() was given, because what "running it" looks
+	 * like depends on what it was: a SoftDevice or bootloader package
+	 * leaves a Nordic peer with *no application*, so the peer coming back
+	 * in DFU mode is the intended outcome there and a rejection anywhere
+	 * else. The archive may already be closed; only the descriptive fields
+	 * (kind, type, sizes) are safe to read.
+	 *
 	 * NULL means the transport cannot tell, and run()'s answer stands.
 	 */
 	enum dfu_result (*verify)(const struct dfu_target *t,
+				  const struct dfu_payload *payload,
 				  const struct app_config *cfg);
 
 	/* Tear down whatever find() and run() left open. Always called, on

@@ -165,5 +165,69 @@ t("...and nothing else declares one that could shadow it",
 t("the header says a GattLink may not live on a stack",
   /may not live on a stack/i.test(gattHpp));
 
+/* --- 4. a bootloader update ends in DFU mode, and that is the plan --------
+ *
+ * A single-bank bootloader receives a SoftDevice or bootloader package into
+ * the application's own region, so the target comes back with no application
+ * and — OTAFIX 2.1+ — in OTA DFU mode: the DFU service advertised at its
+ * address, which check 1 above correctly calls a rejection for an application
+ * image. Applied to a bootloader package it reflashed the bootloader for as
+ * many retries as were configured. verify() has to know what was sent. */
+const transportH = read("updater/src/dfu_transport.h");
+const runner     = read("updater/src/dfu_runner.c");
+const verifySig = /verify\)\(const struct dfu_target \*t,\s*const struct dfu_payload \*payload,\s*const struct app_config \*cfg\)/;
+t("verify() is declared with the payload it is judging",
+  verifySig.test(codeOf(transportH)));
+t("...and defined that way",
+  /ble_verify\(const struct dfu_target \*t,\s*const struct dfu_payload \*payload,\s*const struct app_config \*cfg\)/.test(verifyCode));
+t("...and the runner passes it",
+  /verify\(&target, &payload, cfg\)/.test(codeOf(runner)));
+
+/* The branch sits before the scan, and before anything can say REJECTED. */
+const typeBranch = verifyCode.search(/payload->zip\.type & \(FW_TYPE_SOFTDEVICE \| FW_TYPE_BOOTLOADER\)/);
+t("verify branches on a SoftDevice/bootloader package before scanning",
+  typeBranch >= 0 && typeBranch < verifyCode.indexOf("ble_scanner_seen_at"),
+  String(typeBranch));
+t("...ahead of the only rejection verdict",
+  typeBranch >= 0 && typeBranch < verifyCode.indexOf("DFU_TARGET_REJECTED"));
+
+/* And the path it takes cannot overturn the run, whatever the air says: the
+ * peer's CRC verdict came back in the VALIDATE response, and a new bootloader
+ * in DFU mode looks exactly like an old one that refused. */
+const noApp = codeOf(transport.slice(
+  transport.indexOf("static enum dfu_result verify_no_app_expected"),
+  transport.indexOf("static enum dfu_result ble_verify")));
+t("the no-application path exists", noApp.length > 0);
+t("...still looks, so the operator learns what state the target is in",
+  /ble_scanner_seen_at/.test(noApp));
+t("...and never returns a rejection",
+  !/DFU_TARGET_REJECTED/.test(noApp) && /return DFU_OK;/.test(noApp));
+
+/* --- 5. and in auto mode the run does not stop at the bootloader ----------
+ *
+ * A run that ends SUCCESS after a bootloader package has left the target
+ * with nothing to boot. auto_flash exists for a target nobody can reach, so
+ * the run pins the address it just used, waits for the new bootloader, and
+ * sends the application the mapping names for its DFU-mode name — refusing
+ * a second bootloader, which would be the loop this whole change is about. */
+const runnerCode = codeOf(runner);
+const okCase = runnerCode.slice(runnerCode.indexOf("case DFU_OK:"), runnerCode.indexOf("case DFU_BUTTONLESS_TRIGGERED:"));
+t("DFU_OK on a SoftDevice/bootloader package in auto mode continues the run",
+  /auto_mode && !chained_from_bl[\s\S]{0,200}?FW_TYPE_SOFTDEVICE \| FW_TYPE_BOOTLOADER[\s\S]{0,900}?continue;/.test(okCase),
+  okCase.slice(0, 300));
+t("...pinned to the address the package was delivered to",
+  /bt_addr_le_to_str\(&target\.ble\.addr/.test(okCase) && /chained_from_bl \? chain_pin : s_pin/.test(runnerCode));
+t("...without consuming a retry",
+  !/attempt\+\+/.test(okCase));
+t("...and closing the bundle so the mapping is resolved again",
+  /firmware_zip_close\(\);\s*bundle_open = false;/.test(okCase));
+t("a second bootloader on the chained pass is refused, not sent",
+  /chained_from_bl && payload\.kind == DFU_PAYLOAD_ZIP[\s\S]{0,120}?FW_TYPE_SOFTDEVICE \| FW_TYPE_BOOTLOADER[\s\S]{0,900}?DFU_STATUS_RESULT_NO_APP_RULE;\s*goto fail;/.test(runnerCode));
+t("a mapping with no rule for the DFU-mode name reports NO_APP_RULE, not BAD_BUNDLE",
+  /rc < 0 && chained_from_bl[\s\S]{0,700}?DFU_STATUS_RESULT_NO_APP_RULE/.test(runnerCode));
+t("the result is on the wire for the client",
+  /NO_APP_RULE:\s*17/.test(read("web/js/lib/dfu-status.js")) &&
+  /DFU_STATUS_RESULT_NO_APP_RULE\s*=\s*17/.test(read("updater/src/dfu_status.h")));
+
 console.log(bad === 0 ? "\nall ok" : `\n${bad} failure(s)`);
 process.exit(bad === 0 ? 0 : 1);

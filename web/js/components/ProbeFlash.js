@@ -166,7 +166,20 @@ export default {
           }
           const csw = await f.setupMemAp();
           log(`MEM-AP ready, CSW=0x${hex8(csw)} (secure access)`);
-          await f.checkSystemBus();
+          try {
+            await f.checkSystemBus();
+          } catch (e) {
+            /* The status register said open and the bus still refused, or
+             * the register could not be read at all. Ask once more before
+             * giving up: a part that reports itself protected here gets
+             * the unlock offered rather than an error about the bus. */
+            if (f.constructor.CAN_UNLOCK && await f.isProtected()) {
+              protectedPart.value = true;
+              log("system bus refused and APPROTECT reports closed — mass erase is required before flashing", "warn");
+              return;
+            }
+            throw e;
+          }
           log("debug port up, system bus reachable", "ok");
         });
       } catch { /* reported */ }

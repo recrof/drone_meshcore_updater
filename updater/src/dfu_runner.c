@@ -233,6 +233,8 @@ static int find_target(struct dfu_target *out, const struct app_config *cfg,
 	size_t count;
 	const struct dfu_transport *const *all = dfu_transport_list(&count);
 
+	const bool pinned = (pin != NULL && pin[0] != '\0');
+
 	const struct dfu_transport *usable[8];
 	size_t n = 0;
 	for (size_t i = 0; i < count && n < ARRAY_SIZE(usable); i++) {
@@ -245,7 +247,23 @@ static int find_target(struct dfu_target *out, const struct app_config *cfg,
 		 * reason to spend a scan slice associating with a WiFi AP —
 		 * the file already answered the question. */
 		if (!(kind_mask & KIND_BIT(all[i]->payload_kind))) continue;
-		if (all[i]->available == NULL || all[i]->available(cfg)) {
+		/* A pinned target skips `available()`, for the same reason it
+		 * skips `ble_name` and `min_rssi`: those are all preferences
+		 * about *automatic* selection, and the operator has just
+		 * overruled selection by pointing at one peer.
+		 *
+		 * Concretely it is `wifi_ota` this reaches. That key exists to
+		 * keep an unattended search from spending seconds on an
+		 * association attempt every cycle — a cost a deliberate pick
+		 * does not have. Left in, pressing Flash on an access point
+		 * with `wifi_ota=0` failed as "nothing can be reached", which
+		 * names neither the key nor the choice.
+		 *
+		 * Nothing is bypassed about whether the hardware exists: a
+		 * board with no WiFi does not compile the transport in at all,
+		 * so it is not in this list to be reconsidered, and one whose
+		 * radio is missing fails in find() with its own errno. */
+		if (pinned || all[i]->available == NULL || all[i]->available(cfg)) {
 			usable[n++] = all[i];
 		}
 	}
@@ -257,7 +275,7 @@ static int find_target(struct dfu_target *out, const struct app_config *cfg,
 	/* A pinned target names one peer, so alternating transports to look
 	 * for it makes no sense: the pin either belongs to one of them or to
 	 * none. Slicing the window would only delay the -EINVAL. */
-	if (pin != NULL && pin[0] != '\0' && n > 1) {
+	if (pinned && n > 1) {
 		LOG_INF("pinned target — %zu transports offered, trying %s only",
 			n, usable[0]->name);
 		n = 1;
@@ -375,6 +393,32 @@ static void run_thread(void *a, void *b, void *c)
 	const bool auto_mode  = (s_path[0] == '\0');
 	bool       bundle_open = false;
 
+	/*
+	 * ---- A bootloader package is half an update ----------------------
+	 *
+	 * A single-bank Nordic bootloader receives every image into the
+	 * application's own region, so a SoftDevice or bootloader package
+	 * erases the application on its way in. The transfer then reports
+	 * SUCCESS — truthfully; verify() knows this shape and does not
+	 * overturn it — and an unattended run would go home leaving a
+	 * repeater on a mast with a bootloader, no application, and nobody
+	 * to send one. That is the outcome auto_flash exists to prevent.
+	 *
+	 * So in auto mode the run does not end there. The new bootloader
+	 * boots, finds no application and enters DFU mode at the address
+	 * the package was just delivered to (OTAFIX's dfu_transport_ble.c:
+	 * with no peer data it advertises at FICR+1, and no application
+	 * means no peer data), so the next pass pins that address, waits
+	 * for it to come back, resolves the mapping against its DFU-mode
+	 * name and sends the application that rule names. What it refuses
+	 * is a second bootloader — a mapping whose rule for the DFU-mode
+	 * name is the bootloader again would otherwise be a loop, one
+	 * erase per retry.
+	 */
+	bool chained_from_bl = false;          /* this pass is the follow-up */
+	char chain_pin[DFU_PIN_MAX + 1] = "";  /* where the target was left */
+	char chain_bl[DFU_PATH_MAX + 1] = "";  /* what was delivered there */
+
 	if (auto_mode) {
 		if (!cfg->ble_firmware_mapping[0]) {
 			LOG_ERR("auto-flash requested but ble_firmware_mapping "
@@ -434,13 +478,25 @@ static void run_thread(void *a, void *b, void *c)
 			LOG_DBG("scanning for %s targets only",
 				kinds == KIND_BIT(DFU_PAYLOAD_ZIP) ? "packaged" : "raw-image");
 		}
-		rc = find_target(&target, cfg, kinds, s_pin);
+		rc = find_target(&target, cfg, kinds,
+				 chained_from_bl ? chain_pin : s_pin);
 		if (rc == -ECANCELED || cancelled()) {
 			goto stopped;
 		}
 		if (rc == -ETIMEDOUT) {
 			LOG_ERR("scan timed out (no target)");
 			status_result = DFU_STATUS_RESULT_NO_TARGET;
+			goto fail;
+		}
+		/* A target that cannot be reached is not a radio fault, and saying
+		 * so matters most on the one path where the operator did something
+		 * deliberate: -EINVAL is a pin the transport could not parse (a
+		 * Bluetooth row picked on the WiFi tab, say) and -EPERM is an
+		 * access point this updater has no password for. Both are settled;
+		 * retrying asks the same question again. */
+		if (rc == -EINVAL || rc == -EPERM) {
+			LOG_ERR("cannot reach that target (rc=%d)", rc);
+			status_result = DFU_STATUS_RESULT_UNREACHABLE_TARGET;
 			goto fail;
 		}
 		if (rc < 0) {
@@ -464,6 +520,18 @@ static void run_thread(void *a, void *b, void *c)
 						  DFU_BUNDLE_DIR,
 						  picked, sizeof(picked),
 						  err, sizeof(err));
+			if (rc < 0 && chained_from_bl) {
+				LOG_ERR("auto-flash: %s was delivered and the "
+					"target is back in DFU mode as '%s' with "
+					"no application — and the mapping names "
+					"nothing for that name (%s). It has a "
+					"bootloader and nothing to boot; add a "
+					"rule mapping '%s' to an application "
+					"package and run again.",
+					chain_bl, target.name, err, target.name);
+				status_result = DFU_STATUS_RESULT_NO_APP_RULE;
+				goto fail;
+			}
 			if (rc < 0) {
 				LOG_ERR("auto-flash: %s (rc=%d)", err, rc);
 				status_result = DFU_STATUS_RESULT_BAD_BUNDLE;
@@ -478,6 +546,23 @@ static void run_thread(void *a, void *b, void *c)
 			}
 			dfu_status_bundle(picked);
 			bundle_open = true;
+
+			if (chained_from_bl && payload.kind == DFU_PAYLOAD_ZIP &&
+			    (payload.zip.type & (FW_TYPE_SOFTDEVICE | FW_TYPE_BOOTLOADER))) {
+				LOG_ERR("auto-flash: %s was delivered and the "
+					"target is back in DFU mode as '%s' with "
+					"no application — but the mapping's rule "
+					"for that name is %s, another %s package. "
+					"Sending it would erase nothing and fix "
+					"nothing, forever. Add a rule mapping "
+					"'%s' to an application package.",
+					chain_bl, target.name, picked,
+					(payload.zip.type & FW_TYPE_SOFTDEVICE) ?
+						"SoftDevice/bootloader" : "bootloader",
+					target.name);
+				status_result = DFU_STATUS_RESULT_NO_APP_RULE;
+				goto fail;
+			}
 		}
 
 		/* The file and the transport have to agree about shape. A
@@ -515,7 +600,7 @@ static void run_thread(void *a, void *b, void *c)
 		 */
 		if (r == DFU_OK && target.tp->verify != NULL) {
 			dfu_status_set_state(DFU_STATUS_VERIFYING);
-			r = target.tp->verify(&target, cfg);
+			r = target.tp->verify(&target, &payload, cfg);
 			if (cancelled()) {
 				goto stopped;
 			}
@@ -547,6 +632,27 @@ static void run_thread(void *a, void *b, void *c)
 
 		switch (r) {
 		case DFU_OK:
+			if (auto_mode && !chained_from_bl &&
+			    payload.kind == DFU_PAYLOAD_ZIP &&
+			    (payload.zip.type & (FW_TYPE_SOFTDEVICE | FW_TYPE_BOOTLOADER))) {
+				char addr[BT_ADDR_LE_STR_LEN];
+
+				bt_addr_le_to_str(&target.ble.addr, addr, sizeof(addr));
+				snprintf(chain_pin, sizeof(chain_pin), "%s", addr);
+				snprintf(chain_bl, sizeof(chain_bl), "%s", path_held);
+				firmware_zip_close();
+				bundle_open = false;
+				chained_from_bl = true;
+
+				LOG_INF("DFU runner: %s delivered — the target's "
+					"application went with it, so this is "
+					"half an update. Waiting for the new "
+					"bootloader at %s to send the application "
+					"the mapping names for it",
+					chain_bl, chain_pin);
+				dfu_status_set_state(DFU_STATUS_SCANNING);
+				continue;    /* doesn't consume a retry */
+			}
 			LOG_INF("DFU runner: SUCCESS");
 			led_set_state(LED_STATE_DONE_OK);
 			dfu_status_finish(DFU_STATUS_RESULT_OK);

@@ -75,6 +75,17 @@ export function crc16(bytes) {
   return crc & 0xffff;
 }
 
+/** Firmware sections a legacy nrfutil manifest may carry, in the order the
+ * firmware's detect_section() tries them — longest names first, so the
+ * combined package is seen as itself rather than as one of its parts. */
+export const NORDIC_SECTIONS = [
+  "softdevice_bootloader_application",
+  "softdevice_bootloader",
+  "application",
+  "bootloader",
+  "softdevice",
+];
+
 /* ---- transports, and which board has which ----------------------------- */
 
 export const TRANSPORT = {
@@ -353,9 +364,35 @@ function inspectZip(bytes, r) {
     return { kind: KIND.UNKNOWN, details: {} };
   }
 
+  /* The firmware section is found by *name*, never by position. nrfutil
+   * writes the manifest with sort_keys=True and puts a scalar `dfu_version`
+   * beside the section, so for a bootloader package the first key is
+   * "dfu_version": 0.5 — an application package only ever worked because
+   * "application" sorts ahead of it. Same table, same order, as
+   * detect_section() in updater/src/firmware_zip.c. */
   const sections = Object.keys(doc.manifest);
-  const section = doc.manifest[sections[0]] ?? {};
-  const details = { sections, binFile: section.bin_file, datFile: section.dat_file };
+  const sectionName = NORDIC_SECTIONS.find(
+    n => doc.manifest[n] && typeof doc.manifest[n] === "object");
+  if (!sectionName) {
+    r.add("error", "manifest-no-section",
+      `manifest.json has no firmware section — expected one of ` +
+      `${NORDIC_SECTIONS.join(", ")}; it has: ${sections.join(", ") || "nothing"}.`);
+    return { kind: KIND.NORDIC_ZIP, details: { sections } };
+  }
+  const section = doc.manifest[sectionName];
+  const details = {
+    sections, section: sectionName, binFile: section.bin_file, datFile: section.dat_file,
+  };
+
+  /* The firmware refuses this one up front (-ENOTSUP): the target takes the
+   * SoftDevice+Bootloader, reboots, and only then accepts the application,
+   * which is two DFU sessions and the client runs one. */
+  if (sectionName === "softdevice_bootloader_application") {
+    r.add("error", "section-unsupported",
+      `this package updates SoftDevice, bootloader and application in one ` +
+      `go, which needs two DFU sessions; the updater runs one. Split it ` +
+      `into a softdevice_bootloader package and an application package.`);
+  }
 
   for (const [key, file] of [["bin_file", section.bin_file], ["dat_file", section.dat_file]]) {
     if (!file) {

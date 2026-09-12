@@ -51,3 +51,49 @@ int pin_addr_split(const char *pin, char *mac, size_t mac_sz,
 	type[tlen] = '\0';
 	return 0;
 }
+
+static int hex_nib(char c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+int pin_addr_bssid(const char *pin, unsigned char out[6])
+{
+	if (pin == NULL || out == NULL) {
+		return -22;
+	}
+
+	while (*pin == ' ') {
+		pin++;
+	}
+
+	/* Walk the six pairs rather than checking a length and then parsing.
+	 * A length check alone accepts "AA:BB:CC:DD:EE:FG" and every other
+	 * 17-character string with the right shape and the wrong contents. */
+	for (int i = 0; i < 6; i++) {
+		const int hi = hex_nib(pin[0]);
+		const int lo = (hi < 0) ? -1 : hex_nib(pin[1]);
+		if (lo < 0) {
+			return -22;
+		}
+		out[i] = (unsigned char)((hi << 4) | lo);
+		pin += 2;
+		if (i < 5) {
+			if (*pin != ':') {
+				return -22;
+			}
+			pin++;
+		}
+	}
+
+	/* Nothing but spaces may follow. A trailing "(random)" means this is a
+	 * Bluetooth row's id — see pin_addr.h for why that is refused rather
+	 * than tolerated. */
+	while (*pin == ' ') {
+		pin++;
+	}
+	return (*pin == '\0') ? 0 : -22;
+}

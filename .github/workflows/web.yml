@@ -42,12 +42,40 @@ permissions:
   pages: write
   id-token: write
 
+# **Only a run that can deploy may hold the `pages` group.**
+#
+# This was a flat `group: pages`, which meant a test-only run — a push to
+# main, a PR, a manual dispatch — sat in the same slot as a real deploy and
+# `cancel-in-progress` killed it. That is not hypothetical: the v2.3 deploy
+# (run 33644728309, fired by the successful firmware build) was cancelled 44 s
+# in by a manual dispatch started to work around the *other* bug below, and
+# the run list shows the same pattern under every earlier release — a
+# `push` run cancelled seconds before a `workflow_dispatch` that replaced it.
+#
+# Real deploys still share one group, because two concurrent Pages
+# deployments cannot both win. Everything else is keyed on its own event
+# *and* ref, so it cancels only its own predecessor — the event matters
+# because a `workflow_run` that skips (the cancelled-build case above) is
+# still a run on `main`, and keying on the ref alone would have it cancel an
+# in-flight push-to-main test run on its way past.
 concurrency:
-  group: pages
+  group: ${{ ((github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') || github.event_name == 'workflow_dispatch') && 'pages' || format('web-{0}-{1}', github.event_name, github.ref) }}
   cancel-in-progress: true
 
 jobs:
   test:
+    # `workflow_run` cannot be filtered by conclusion in `on:`, so this
+    # workflow is started by a firmware build that **failed or was
+    # cancelled** just as readily as by one that succeeded. Without this
+    # guard the run then executed the whole test suite, skipped every deploy
+    # step on the conclusion check twenty steps later, and finished **green** —
+    # a successful-looking Web client run that published nothing. Run
+    # 33644006724 is one: fired by the cancelled half of the duplicate v2.3
+    # build, tests passed in 42 s, deploy skipped, no deployment.
+    #
+    # Skipping the job instead makes the run report as skipped, which is what
+    # actually happened, and stops it consuming a concurrency slot.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       # workflow_run and workflow_dispatch both give a branch ref, so plain
@@ -72,6 +100,13 @@ jobs:
 
       - name: PWA manifest / precache tests
         run: node web/test/pwa.test.mjs
+
+      # These two workflows, held to the conditions that fail silently. A
+      # Web client run fired by a cancelled firmware build used to test,
+      # skip the deploy and finish green — there is no failing step for a
+      # human to notice, so only an assertion about the conditions can see it.
+      - name: Workflow condition tests
+        run: node web/test/workflows.test.mjs
 
       # The half of the USB flasher that can be tested without a probe. The
       # rest (CMSIS-DAP, SWD, RRAM) needs hardware.

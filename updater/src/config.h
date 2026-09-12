@@ -228,7 +228,13 @@ struct app_config {
 	 * updater can turn it off and get the BLE-only cadence back.
 	 *
 	 * Ignored on hardware with no WiFi radio, where the transport's own
-	 * available() returns false regardless — which is every nRF board. */
+	 * available() returns false regardless — which is every nRF board.
+	 *
+	 * **It governs the automatic search only.** A run pinned to one access
+	 * point from the scanner skips available() entirely, because the cost
+	 * this key exists to avoid — an association attempt on every cycle —
+	 * is a cost of searching, and that run is not searching. Same reasoning
+	 * as `ble_name` and `min_rssi` not applying to a pinned peer. */
 	bool     wifi_ota;
 
 	/* Idle gap inserted between consecutive firmware packets, in

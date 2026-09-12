@@ -496,9 +496,39 @@ t("TRIGGER_DFU accepts an optional addr", /"addr"/.test(fsxC));
 t("the contract documents it", /addr:tstr\?/.test(fsxH));
 t("a pinned run bypasses the name and signal filters",
   /pinned/i.test(scanH) && /min_rssi/.test(scanH));
-/* An access point is not a DFU target: this updater reaches an ElegantOTA
- * peer by joining its AP, so there is no "flash that BSSID" to offer. */
-t("only the Bluetooth tab offers a flash button", /v-if="isBle"[\s\S]{0,200}Flash/.test(dialog));
+/* Both tabs offer it now. What must not come back is the `v-if="isBle"` that
+ * used to hide the button on the WiFi tab — an absent control reads as one
+ * that was never meant to exist, which is exactly how the WiFi transport
+ * shipped with no way to start it. */
+t("the flash button is not hidden on the WiFi tab",
+  !/v-if="isBle"[\s\S]{0,200}Flash/.test(dialog));
+t("it is disabled with a reason instead",
+  /:disabled="!!flashBlocked\(r\)"/.test(dialog) &&
+  /:title="flashBlocked\(r\)"/.test(dialog));
+
+/* The three things that can block it, each named in the tooltip rather than
+ * left to be inferred from a grey button. */
+for (const [what, re] of [
+  ["a run already in progress", /dfuActive\.value\) return "/],
+  ["a transport the device does not have", /tabSupported\.value\)/],
+  ["an encrypted network", /row\.secure\)/],
+]) {
+  t(`flashBlocked explains ${what}`, re.test(dialog));
+}
+
+/* The file list follows the tab, because the payload shapes are not
+ * interchangeable: Legacy DFU takes a packaged .zip, ElegantOTA a bare .bin,
+ * and the device refuses the other one before the first byte. Offering a .zip
+ * next to an access point would move a refusal past the point of commitment. */
+t("candidates are filtered by the visible tab's transport",
+  /transportForName\(e\.name\) === tabTransport\.value/.test(dialog));
+t("and the tab's transport is BLE or WiFi, not a constant",
+  /isBle\.value \? TRANSPORT\.BLE : TRANSPORT\.WIFI/.test(dialog));
+
+/* The BSSID has to be on screen for the button beside it to mean anything:
+ * two repeaters in OTA mode raise the same SSID, so the rows are otherwise
+ * the same string twice. */
+t("the WiFi tab shows the BSSID", /isBle \? "Address" : "BSSID"/.test(dialog));
 
 /* --- the pinned address actually round-trips ---------------------------
  *
@@ -592,6 +622,118 @@ t("only the Bluetooth tab offers a flash button", /v-if="isBle"[\s\S]{0,200}Flas
       /pin_addr_split\(pin[\s\S]{0,200}bt_addr_le_from_str\(mac,\s*type/.test(tb));
     t("and never passes the raw pin to the parser",
       !/bt_addr_le_from_str\(\s*pin\b/.test(tb));
+
+    /* ---- and the same round trip for a pinned access point --------------
+     *
+     * Trap 10's shape exactly: survey.c renders a BSSID, the client hands the
+     * string straight back, and the WiFi transport has to turn it into the six
+     * octets `wifi_connect_req_params.bssid` wants. The renderer's format
+     * string is read out of survey.c rather than assumed, so a change to
+     * either side fails here instead of at range.
+     */
+    const surveyC = read("updater/src/survey.c");
+    t("survey.c renders a BSSID as six uppercase hex octets",
+      /"%02X:%02X:%02X:%02X:%02X:%02X"/.test(surveyC));
+
+    const BSSID = "AA:BB:CC:DD:EE:FF";
+    const b = run([
+      `B ${BSSID}`,
+      `B ${BSSID.toLowerCase()}`,      /* case must not matter */
+      `B   ${BSSID}  `,                /* the renderer never pads, but trim */
+      "B ",                            /* empty */
+      "B AA:BB:CC:DD:EE",              /* five octets */
+      "B AA:BB:CC:DD:EE:FG",           /* not hex — a length check misses this */
+      "B AA-BB-CC-DD-EE-FF",           /* the other conventional separator */
+      `B ${BSSID} (random)`,           /* a BLE row's id, on the WiFi tab */
+      `B E9:52:9F:23:87:4A (public)`,
+    ]);
+    t("a rendered BSSID round-trips", b[0] === BSSID, b[0]);
+    t("lower case parses to the same octets", b[1] === BSSID, b[1]);
+    t("surrounding spaces are tolerated", b[2] === BSSID, b[2]);
+    t("an empty BSSID is refused", b[3] === "ERR", b[3]);
+    t("a short BSSID is refused", b[4] === "ERR", b[4]);
+    t("a non-hex octet is refused", b[5] === "ERR", b[5]);
+    t("a dash-separated MAC is refused", b[6] === "ERR", b[6]);
+    /* The one that matters: a Bluetooth id carries a trailing address type,
+     * and taking it for a BSSID would send the WiFi driver hunting for an
+     * access point that cannot exist — failing seconds later as "no such
+     * network", which blames the radio for a picked-the-wrong-tab mistake. */
+    t("a Bluetooth id is refused, not truncated to its address",
+      b[7] === "ERR" && b[8] === "ERR", `${b[7]} ${b[8]}`);
+
+    /* And the transport must actually use it. A `memcmp` against a string, or
+     * a length check followed by its own hex loop, would pass every assertion
+     * above while being a second parser nothing tests. */
+    const tw = read("updater/src/transport_wifi_elegantota.c");
+    t("the WiFi transport parses the pin with pin_addr_bssid",
+      /pin_addr_bssid\(pin,\s*s\.want_bssid\)/.test(tw));
+    t("and refuses one it cannot parse rather than searching anyway",
+      /pin_addr_bssid\([\s\S]{0,300}return -EINVAL;/.test(tw));
+    /* The BSSID has to reach the connect request, or the pin is decoration:
+     * the driver only honours the field when it is not all zeroes, so a parse
+     * that goes nowhere joins whichever MeshCore-OTA answered first — the
+     * exact choice the operator overruled, and invisible from the outside. */
+    t("the parsed BSSID reaches the connect request",
+      /memcpy\(p\.bssid,\s*s\.want_bssid/.test(tw));
+    /* And a pinned run must not fall back to a blind association, for the
+     * same reason. */
+    t("a pinned run has no blind fallback",
+      /if \(s\.pinned\) \{[\s\S]{0,300}return seen;/.test(tw));
+
+    /* An unreachable target is not a scan error. Both are a negative errno
+     * out of find(), and lumping them together reports "the scanner could not
+     * start" for a row picked on the wrong tab — a message about the radio for
+     * a mistake about a string, which is Trap 10 in a new place. */
+    const runner = read("updater/src/dfu_runner.c");
+    t("the runner separates an unreachable target from a scan error",
+      /rc == -EINVAL \|\| rc == -EPERM[\s\S]{0,300}DFU_STATUS_RESULT_UNREACHABLE_TARGET/
+        .test(runner));
+    /* Straight to fail, like the auth results: every retry asks the same
+     * question of the same peer and gets the same answer. */
+    t("and does not retry it",
+      /DFU_STATUS_RESULT_UNREACHABLE_TARGET;\s*\n\s*goto fail;/.test(runner));
+
+    /* ---- the network is always open, and must stay assumed so ----------
+     *
+     * MeshCore raises its OTA access point with `WiFi.softAP(ssid, NULL)` and
+     * offers no way to secure it (elegantota.h). So an encrypted network is
+     * not a repeater in OTA mode that we cannot join — it is not one at all,
+     * and a WPA passphrase is the wrong fix for every symptom it produces.
+     *
+     * These assert that nothing has quietly started to believe otherwise.
+     * They are cheap and they guard a change that would look like a feature
+     * on the way in: a `wifi_psk` config key, threaded through to `psk`,
+     * arriving with nothing failing.
+     */
+    t("the connect request asks for an open network",
+      /\.security = WIFI_SECURITY_TYPE_NONE,/.test(tw));
+    t("and no other security type is ever selected",
+      !/WIFI_SECURITY_TYPE_(?!NONE)/.test(tw));
+    t("no pre-shared key is ever supplied",
+      !/\bpsk\b/.test(tw) && !/sae_password/.test(tw));
+    /* Both halves of "encrypted is not a target": refused when pinned, and
+     * ignored rather than repeatedly joined when searching. */
+    t("a pinned encrypted network is refused",
+      /s\.seen_secure\)[\s\S]{0,400}return -EPERM;/.test(tw));
+    t("an encrypted impostor is not taken for the OTA access point",
+      /r->security != WIFI_SECURITY_TYPE_NONE\) \{\s*\n\s*s\.impostor_seen = true;/
+        .test(tw));
+    /* ...and said once, because silence here is indistinguishable from "the
+     * operator has not sent `start ota` yet" and never ends. */
+    t("and it is reported rather than waited out in silence",
+      /impostor_seen && !s\.impostor_logged/.test(tw));
+
+    /* The invariant is stated where someone would go to add a passphrase. */
+    const ota = read("updater/src/elegantota.h");
+    t("elegantota.h says why there is no passphrase",
+      /always open/i.test(ota) && /softAP/.test(ota));
+
+    /* A pinned run overrules `available()` the same way it overrules
+     * `ble_name` and `min_rssi` — otherwise pressing Flash on an access point
+     * with `wifi_ota=0` fails as "nothing can be reached", naming neither the
+     * key nor the choice. */
+    t("a pinned run bypasses the transport's availability preference",
+      /if \(pinned \|\| all\[i\]->available == NULL/.test(runner));
   }
 }
 
@@ -642,6 +784,7 @@ async function renderWith(over) {
     isBle: true, hasWifi: true, scanKind: SURVEY_KIND.BLE,
     candidates: [{ name: "fw.zip", full: "/lfs1/fw.zip", size: 100, info: null }],
     rows: [],
+    flashBlocked: () => "", tabSupported: true,
   };
   const app = Vue.createApp({ ...Comp, setup: () => ({ ...base, ...over }) });
   let err = null;
@@ -694,27 +837,66 @@ const bleRows = [
 }
 
 {
-  /* The WiFi tab: different columns, and no flash button anywhere. */
+  /* The WiFi tab: an open access point, flashable. */
   const wifiRows = [{
     id: "AA:BB:CC:DD:EE:FF", name: "MeshCore-OTA", label: "MeshCore-OTA",
-    rssi: -61, best: -58, n: 4, ch: 6, fl: 6, dfu: false, secure: true,
+    rssi: -61, best: -58, n: 4, ch: 6, fl: 4, dfu: false, secure: false,
     match: true, interesting: true,
     band: "excellent", bandLabel: "Excellent", bandIcon: "signal_cellular_alt",
   }];
   const { html, warnings, err } = await renderWith({
     rows: wifiRows, isBle: false, scanKind: SURVEY_KIND.WIFI,
+    candidates: [{ name: "fw.bin", full: "/lfs1/fw.bin", size: 100, info: null }],
   });
   t("the WiFi tab compiles and mounts", !err, err?.message ?? "");
   t("no Vue warnings on the WiFi tab", warnings.length === 0, warnings[0] ?? "");
   t("the SSID is shown", html.includes("MeshCore-OTA"));
-  t("the channel is shown instead of an address", html.includes("ch 6"));
-  t("no BSSID column on the WiFi tab", !html.includes("AA:BB:CC:DD:EE:FF"));
-  t("an access point offers no flash button", !html.includes("Flash"));
+  t("the channel is still shown", html.includes("ch 6"));
+  /* Two repeaters in OTA mode raise the same SSID, so without this the rows
+   * are the same string twice and the button beside them cannot be aimed. */
+  t("the BSSID is shown on the WiFi tab", html.includes("AA:BB:CC:DD:EE:FF"));
+  t("an access point offers a flash button", html.includes("Flash"));
   t("on the WiFi tab it is the WiFi icon that animates",
     /icon-cycle[^"]*cycle-3[^"]*playing/.test(html) &&
     !/icon-cycle[^"]*cycle-2[^"]*playing/.test(html), "");
   t("the WiFi filter names the ElegantOTA network",
     html.includes("MeshCore-OTA"));
+}
+
+{
+  /* An encrypted network. The button stays — an absent one is
+   * indistinguishable from one that was never meant to exist — and carries
+   * the reason, because there is no password field anywhere in this project
+   * and MeshCore's OTA access point is open. */
+  const secureRow = [{
+    id: "11:22:33:44:55:66", name: "HomeWiFi", label: "HomeWiFi",
+    rssi: -55, best: -55, n: 2, ch: 11, fl: 2, dfu: false, secure: true,
+    match: false, interesting: false,
+    band: "excellent", bandLabel: "Excellent", bandIcon: "signal_cellular_alt",
+  }];
+  const { html, err } = await renderWith({
+    rows: secureRow, isBle: false, scanKind: SURVEY_KIND.WIFI,
+    flashBlocked: (r) => (r.secure ? "This network is encrypted." : ""),
+  });
+  t("an encrypted network still gets a button", !err && html.includes("Flash"));
+  /* Matched on the opening tag alone: the glyph inside is an inline <svg>
+   * whose path data is hundreds of characters, so any span reaching from
+   * "<button" to the word "Flash" is measuring the icon, not the markup. */
+  t("but it is disabled",
+    /<button[^>]*\sdisabled[^>]*title="This network is encrypted\."/.test(html));
+  t("and says why", html.includes("This network is encrypted."));
+}
+
+{
+  /* The picker's empty state names the extension that tab actually wants.
+   * Telling someone on the WiFi tab to "upload a .zip first" sends them to
+   * fetch a file the device would refuse. */
+  const { html } = await renderWith({
+    rows: [], isBle: false, scanKind: SURVEY_KIND.WIFI, candidates: [],
+    picking: "x",
+  });
+  t("the WiFi picker asks for a .bin",
+    !html.includes("Upload a .zip first"), "");
 }
 
 {

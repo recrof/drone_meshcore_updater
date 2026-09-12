@@ -4,9 +4,10 @@ import {
   scanKind, scanKinds, setScanKind, scanAuto, setScanAuto, refreshScan,
   scanRefreshing,
   entries, path, fileInfo, inspectFile, flashToTarget, dfuActive,
+  deviceTransports,
 } from "../store.js";
 import { rssiBand, RSSI_BANDS, SURVEY_KIND, SURVEY_FLAG } from "../lib/smp-client.js";
-import { transportForName, TRANSPORT } from "../lib/firmware-image.js";
+import { transportForName, transportsFromMask, TRANSPORT } from "../lib/firmware-image.js";
 import { fmtSize, joinPath } from "../lib/format.js";
 import { onEscape } from "../lib/dialog.js";
 import Icon from "./Icon.js";
@@ -58,12 +59,26 @@ import IconCycle from "./IconCycle.js";
  * convenience bolted on: the reason to be looking at this screen is usually
  * that automatic selection picked the wrong device or none, and the useful
  * next step is to point at the right one. Flashing from here bypasses
- * `ble_name` and `min_rssi` on the device, which is the whole point — the
- * operator has overruled both by choosing.
+ * `ble_name` and `min_rssi` on the device — and `wifi_ota` — which is the
+ * whole point: the operator has overruled selection by choosing.
  *
- * Only the Bluetooth tab offers it. A WiFi row is an access point, and this
- * updater reaches an ElegantOTA peer by joining its AP and posting to a fixed
- * endpoint — there is no "flash that BSSID" to offer.
+ * **Both tabs offer it, and the file list is what differs.** A row's id is
+ * what identifies the peer either way: a Bluetooth address, or an access
+ * point's BSSID. The BSSID is the identity the SSID cannot be, because every
+ * MeshCore repeater in OTA mode raises the same `MeshCore-OTA` — so with two
+ * of them on the air the unpinned transport joins whichever answered first,
+ * and pinning is the only way to say which one is meant.
+ *
+ * This file used to say there was no "flash that BSSID" to offer, which was
+ * true of the transport as written and not of the protocol: Zephyr's connect
+ * request takes a BSSID, and the driver honours it.
+ *
+ * Which files are offered follows the tab, because a transport's payload is
+ * not a preference: Legacy DFU takes a packaged .zip and ElegantOTA takes a
+ * bare .bin, and the firmware refuses the other one up front rather than
+ * discovering it mid-transfer. So the Bluetooth tab lists .zip and the WiFi
+ * tab lists .bin — the same extension rule as `mapping_kind_mask()` on the
+ * device.
  */
 export default {
   name: "ScannerDialog",
@@ -144,19 +159,58 @@ export default {
 
     const hidden = computed(() => scanEntries.value.length - rows.value.length);
 
-    /* Files this device holds that could go out over Bluetooth.
+    /* The transport the visible tab flashes through. One fact, used three
+     * ways: which files to offer, whether the device can send them at all,
+     * and what the confirm dialog should say. */
+    const tabTransport = computed(() =>
+      isBle.value ? TRANSPORT.BLE : TRANSPORT.WIFI);
+
+    /* Whether the *device* can drive that transport, asked of it at connect
+     * rather than inferred from the board — the same fsxCaps answer the file
+     * listing uses. transportsFromMask(null) is [BLE], so firmware too old to
+     * answer still offers Bluetooth and declines WiFi. */
+    const tabSupported = computed(() =>
+      (deviceTransports.value ?? transportsFromMask(null)).includes(tabTransport.value));
+
+    /* Files this device holds that could go out over the visible tab's radio.
      *
      * Named from the extension, the same rule `mapping_kind_mask()` uses in
-     * the firmware. A .bin is excluded because it is a WiFi payload and a MAC
-     * address cannot mean anything to an HTTP endpoint — the device would
-     * refuse it, and offering it here would only move the refusal later. */
+     * the firmware: a .zip is a packaged Legacy DFU update and a .bin is a
+     * bare ElegantOTA image. Offering the other one would only move a refusal
+     * the device already makes to a point after the operator has committed. */
     const candidates = computed(() =>
       entries.value
-        .filter((e) => e.type !== 1 && transportForName(e.name) === TRANSPORT.BLE)
+        .filter((e) => e.type !== 1 && transportForName(e.name) === tabTransport.value)
         .map((e) => {
           const full = joinPath(path.value, e.name);
           return { name: e.name, full, size: e.size, info: fileInfo[full] ?? null };
         }));
+
+    /* Why a row's Flash button is greyed out, for its tooltip — empty when it
+     * is not. **A disabled control with a reason, never an absent one**: a
+     * missing button is indistinguishable from a button that was never meant
+     * to exist, which is exactly how the WiFi transport shipped with no way
+     * to start it from the file listing.
+     *
+     * Encryption is the WiFi-only case, and it is not "we lack the password"
+     * — it is "that is not the thing you are looking for". MeshCore raises
+     * its OTA access point with `WiFi.softAP(ssid, NULL)` and offers no way
+     * to secure it, so an encrypted network is not a repeater in OTA mode
+     * whatever it calls itself. See updater/src/elegantota.h. */
+    const flashBlocked = (row) => {
+      if (dfuActive.value) return "A firmware update is already running.";
+      if (!tabSupported.value) {
+        return isBle.value
+          ? "This updater does not report the Bluetooth DFU transport."
+          : "This updater has no WiFi transport, so it cannot reach an " +
+            "access point.";
+      }
+      if (!isBle.value && row.secure) {
+        return "This network is encrypted, so it is not a MeshCore OTA " +
+               "access point — that one is always open.";
+      }
+      return "";
+    };
 
     function togglePick(id) {
       picking.value = picking.value === id ? "" : id;
@@ -178,7 +232,7 @@ export default {
       picking, togglePick, candidates, pick, targetsOnly, fmtSize,
       RSSI_BANDS, dfuActive, isBle, hasWifi, scanKind, setScanKind,
       SURVEY_KIND, scanAuto, setScanAuto, refreshScan, scanRefreshing,
-      bleTargetsOnly, wifiTargetsOnly,
+      bleTargetsOnly, wifiTargetsOnly, flashBlocked, tabSupported,
     };
   },
   template: /* html */ `
@@ -257,7 +311,7 @@ export default {
               <tr>
                 <th>{{ isBle ? "Device" : "Network" }}</th>
                 <th>Signal</th>
-                <th>{{ isBle ? "Address" : "Channel" }}</th>
+                <th>{{ isBle ? "Address" : "BSSID" }}</th>
                 <th></th>
               </tr>
             </thead>
@@ -294,15 +348,28 @@ export default {
                       <span class="scan-dbm">{{ r.rssi }}</span>
                     </span>
                   </td>
+                  <!-- The WiFi tab shows the BSSID and not only the
+                       channel, because with two repeaters in OTA mode the
+                       SSID is the same string twice and the BSSID is the only
+                       thing that tells the rows apart — which is precisely
+                       what the Flash button beside it now sends. The channel
+                       stays as the smaller diagnostic it always was. -->
                   <td class="scan-id">
-                    <code v-if="isBle">{{ r.id }}</code>
-                    <span v-else>ch {{ r.ch }}</span>
+                    <code>{{ r.id }}</code>
+                    <span v-if="!isBle" class="muted">ch {{ r.ch }}</span>
                   </td>
                   <td class="actions">
                     <!-- The glyph belongs to the Flash state only. Carrying
                          it into Cancel would label the way out with the icon
                          for the thing being backed out of. -->
-                    <button v-if="isBle" class="small" :disabled="dfuActive"
+                    <!-- Offered on both tabs. The row's id is the peer either
+                         way — a Bluetooth address, or an access point's
+                         BSSID, which is the only thing that tells two
+                         MeshCore-OTA repeaters apart. Disabled with a reason
+                         rather than hidden when it cannot work. -->
+                    <button class="small"
+                            :disabled="!!flashBlocked(r)"
+                            :title="flashBlocked(r)"
                             @click="togglePick(r.id)">
                       <Icon v-if="picking !== r.id" name="bolt_boost" :size="16"/>
                       {{ picking === r.id ? "Cancel" : "Flash…" }}
@@ -312,7 +379,9 @@ export default {
                 <tr v-if="picking === r.id" class="scan-pick-row">
                   <td colspan="4">
                     <p class="muted" v-if="!candidates.length">
-                      No Bluetooth-flashable files on the device. Upload a .zip first.
+                      {{ isBle
+                         ? "No Bluetooth-flashable files on the device. Upload a .zip first."
+                         : "No WiFi-flashable files on the device. Upload a .bin first." }}
                     </p>
                     <button v-for="c in candidates" :key="c.full"
                             class="scan-file" @click="pick(r, c)"

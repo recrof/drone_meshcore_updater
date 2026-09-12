@@ -57,6 +57,8 @@ export const RESULT = {
   TARGET_REJECTED: 13,
   AUTH_REQUIRED: 14,
   AUTH_FAILED: 15,
+  UNREACHABLE_TARGET: 16,
+  NO_APP_RULE: 17,
 };
 
 /* Present tense, and phrased as what the device is doing rather than as the
@@ -107,6 +109,20 @@ export const RESULT_LABEL = {
     "offered — set ble_pin under Config…, or flash it from the scanner and " +
     "type the PIN when asked",
   [RESULT.AUTH_FAILED]: "the target rejected the PIN",
+  /* Distinct from SCAN_ERROR on purpose: the radio worked, the choice did
+   * not. Naming it as a radio failure is Trap 10's mistake — a message about
+   * the hardware for a mistake about which row was picked. */
+  [RESULT.UNREACHABLE_TARGET]: "that target cannot be reached this way — a " +
+    "Bluetooth device cannot be flashed with a .bin over WiFi, and an " +
+    "encrypted network is not a MeshCore OTA access point, which is always " +
+    "open",
+  /* A failure although the bootloader package went in, because the run's
+   * job was a working repeater and the target now has nothing to boot. */
+  [RESULT.NO_APP_RULE]: "the bootloader package was delivered, which erased " +
+    "the target's application — and ble_firmware_mapping has no rule sending " +
+    "an application to the target's DFU-mode name (or sends the bootloader " +
+    "again). The target is in DFU mode with nothing to boot: add a rule for " +
+    "that name and run again",
 };
 
 /* Results the operator can answer by supplying a PIN. Named rather than

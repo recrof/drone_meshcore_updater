@@ -387,11 +387,12 @@ export const CONFIG_SCHEMA = [
     desc: `MeshCore's ESP32 repeaters have no Bluetooth DFU — they raise a WiFi AP
            and take an HTTP upload. This allows that route as well. Rarely matters:
            the transport is picked from the file (.zip Bluetooth, .bin WiFi), so
-           this only decides what stays ambiguous. No effect without a WiFi
-           radio.`,
+           this only decides what stays ambiguous. It governs automatic searching
+           only — flashing an access point you picked in the scanner ignores it.
+           No effect without a WiFi radio.`,
     note: (v) => (v
       ? "only consulted when the updater cannot tell which transport a run needs"
-      : "Bluetooth only, whatever the hardware can do"),
+      : "automatic runs stay on Bluetooth; the scanner can still flash an AP"),
   },
   {
     key: "pkt_gap_ms",
@@ -742,6 +743,35 @@ export function advisories(values, board = null) {
                `.bin, so the updater cannot tell which transport they need ` +
                `and has to try both. Ending the pattern in an extension lets ` +
                `it skip the one that cannot apply.`);
+    }
+
+    /* A bootloader package is half an update. A single-bank Nordic
+     * bootloader receives every image into the application's own region, so
+     * a softdevice_bootloader package erases the application on the way in
+     * and the target comes back in DFU mode with nothing to boot. The runner
+     * then pins that target and resolves the mapping again against its
+     * DFU-mode name — which is a *different* name (OTAFIX advertises a
+     * board-specific `*_DFU`) — to send the application. Whether a rule for
+     * that name exists is decided here, by the operator, and only the file
+     * name can hint that a rule is a bootloader at all: the client never
+     * opens the files a glob will match. */
+    const { rules } = parseMapping(values.ble_firmware_mapping);
+    const bl = rules.filter(r => /bootloader|sd_bl|softdevice/i.test(r.file));
+    if (bl.length) {
+      const dfuRule = rules.some(r => /dfu/i.test(r.name) &&
+                                      !/bootloader|sd_bl|softdevice/i.test(r.file));
+      out.push(`ble_firmware_mapping rule${bl.length > 1 ? "s" : ""} ` +
+               `${bl.map(r => `"${r.name}:${r.file}"`).join(", ")} look${bl.length > 1 ? "" : "s"} ` +
+               `like a bootloader package. Flashing one erases the target's ` +
+               `application, so after it lands auto-flash waits for the target ` +
+               `to come back in DFU mode and looks up its DFU-mode name (a ` +
+               `*_DFU name, not the application's) for an application to send.` +
+               (dfuRule
+                 ? ``
+                 : ` No rule here matches a *DFU* name with an application ` +
+                   `package, so that second step will fail and the target will ` +
+                   `be left with a bootloader and nothing to boot. Add one, ` +
+                   `e.g. "XIAO_DFU:meshcore*.zip".`));
     }
   }
 

@@ -11,3 +11,20 @@
  */
 
 #define OTA_SSID "MeshCore-OTA"
+
+/*
+ * **The access point is always open, and this is not a limitation of ours.**
+ *
+ * MeshCore raises it with `WiFi.softAP("MeshCore-OTA", NULL)` — a NULL
+ * password, which is Arduino's open-network form. There is no setting on the
+ * repeater to change it, so an encrypted network is not a MeshCore OTA access
+ * point that we happen to be unable to join: it is not one at all, whatever it
+ * calls itself.
+ *
+ * That is why nothing in this project has anywhere to put a WPA passphrase,
+ * and why adding one would be the wrong fix for "it will not join that
+ * network". `wifi_connect_req_params.security` is therefore
+ * `WIFI_SECURITY_TYPE_NONE` on every path and `psk` / `sae_password` are never
+ * populated — asserted by scanner.test.mjs, so a passphrase cannot be wired in
+ * quietly on the way to solving something else.
+ */

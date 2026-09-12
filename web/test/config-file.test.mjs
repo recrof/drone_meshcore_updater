@@ -233,6 +233,32 @@ for (const [k, v] of Object.entries(FIRMWARE_DEFAULTS)) {
       .some(s => /18\.0 ms floor/.test(s)));
 }
 
+/* --- a bootloader rule is half an update, and the advisory says so --------
+ *
+ * The client cannot open the files a glob matches, so the file name is the
+ * only hint. The point of the advisory is the *second* rule: after a
+ * bootloader package lands, the runner looks the target up again by its
+ * DFU-mode name, and a mapping with no application rule for such a name
+ * leaves a repeater with nothing to boot. */
+{
+  const NRF = "xiao_nrf54lm20a/nrf54lm20a/cpuapp";
+  const withBl = (m) => advisories({ ...defaults(NRF), ble_firmware_mapping: m }, NRF);
+  const only = withBl("OTA:*bootloader*.zip");
+  t("a rule naming a bootloader package is flagged",
+    only.some(s => /bootloader package/.test(s)), only.join(" | "));
+  t("...and with no DFU-name application rule it says the target will have nothing to boot",
+    only.some(s => /nothing to boot/.test(s)));
+  const paired = withBl("OTA:*bootloader*.zip|XIAO_DFU:meshcore*.zip");
+  t("...while a DFU-name rule with an application package satisfies it",
+    paired.some(s => /bootloader package/.test(s)) && !paired.some(s => /nothing to boot/.test(s)),
+    paired.join(" | "));
+  const wrongPair = withBl("OTA:*bootloader*.zip|XIAO_DFU:*bootloader*.zip");
+  t("...but a DFU-name rule that is the bootloader again does not",
+    wrongPair.some(s => /nothing to boot/.test(s)));
+  t("an application-only mapping raises nothing about bootloaders",
+    !withBl("OTA:meshcore*.zip").some(s => /bootloader/.test(s)));
+}
+
 /* --- the seeded starter file must agree with apply_defaults() -------------
  *
  * updater/src/storage.c writes a config.txt on a fresh filesystem, so it is a

@@ -20,6 +20,7 @@
 #include <stdio.h>
 
 #include "dfu_transport.h"
+#include "firmware_zip.h"
 #include "pin_addr.h"
 #include <zephyr/sys/__assert.h>
 
@@ -281,12 +282,76 @@ static enum dfu_result ble_run(const struct dfu_target *t,
 #define VERIFY_SETTLE_MS 2000
 #define VERIFY_WATCH_MS  5000
 
+/*
+ * ---- A bootloader update ends in DFU mode, and that is not a rejection --
+ *
+ * A single-bank Nordic bootloader receives every image into bank 0 — the
+ * application's own region — so a SoftDevice or bootloader package erases
+ * the application on its way in. After Activate the old bootloader hands the
+ * new one to the MBR, the MBR copies it into place, and the *new* bootloader
+ * boots, finds no valid application, and (OTAFIX 2.1 and later) enters OTA
+ * DFU mode: the DFU service advertised at the target's address, which is
+ * precisely the picture the check below reads as "rejected, re-armed". It
+ * then reflashed the bootloader, and reflashed it, for as long as retries
+ * lasted — against a target that had done exactly what was asked.
+ *
+ * The peer's own CRC verdict was already delivered before the reset:
+ * dfu_image_validate() runs dfu_init_postvalidate() over the received image
+ * and the VALIDATE response carries the result, so run()'s DFU_OK already
+ * means the bytes matched the init packet. Nothing on the air afterwards can
+ * tell a new bootloader in DFU mode from an old one, short of connecting and
+ * reading the Device Information Service's Firmware Revision string (which
+ * the OTAFIX build fills with `git describe` + the SoftDevice name and
+ * version, and which also sits verbatim in the bootloader's own .bin) — a
+ * connection, a GATT read and every lifetime trap that comes with them, for
+ * a distinction the transfer has already made. So for these packages the
+ * scan is run for the *operator's* benefit — it says what state the target
+ * was left in and what has to happen next — and never overturns the run.
+ */
+static enum dfu_result verify_no_app_expected(const struct dfu_target *t,
+					      uint8_t type)
+{
+	struct ble_scanner_target seen;
+	const char *what = (type & FW_TYPE_SOFTDEVICE) && (type & FW_TYPE_BOOTLOADER)
+		? "SoftDevice+bootloader"
+		: (type & FW_TYPE_SOFTDEVICE) ? "SoftDevice" : "bootloader";
+
+	LOG_INF("verify: a %s package erases the target's application on "
+		"the way in, so it is expected to come back in DFU mode — "
+		"not checking for a rejection; flash an application next", what);
+
+	k_sleep(K_MSEC(VERIFY_SETTLE_MS));
+	int rc = ble_scanner_seen_at(&t->ble.addr, VERIFY_WATCH_MS, &seen);
+	if (rc == 0 && seen.dfu_uuid) {
+		LOG_INF("verify: %s is in DFU mode (name='%s') with no "
+			"application, as expected after a %s update",
+			t->name, seen.name, what);
+	} else if (rc == 0) {
+		LOG_WRN("verify: %s is advertising *without* the DFU service "
+			"(name='%s') after a %s update — an application is "
+			"still running, which a single-bank bootloader cannot "
+			"leave behind: check that the package took",
+			t->name, seen.name, what);
+	} else if (rc == -ETIMEDOUT) {
+		LOG_INF("verify: %s is not advertising yet after a %s update; "
+			"a bootloader with no application enters DFU mode on "
+			"its own, so look for it there", t->name, what);
+	}
+	return DFU_OK;
+}
+
 static enum dfu_result ble_verify(const struct dfu_target *t,
+				  const struct dfu_payload *payload,
 				  const struct app_config *cfg)
 {
 	struct ble_scanner_target seen;
 
 	ARG_UNUSED(cfg);
+
+	__ASSERT(payload->kind == DFU_PAYLOAD_ZIP, "BLE verify on a raw payload");
+	if (payload->zip.type & (FW_TYPE_SOFTDEVICE | FW_TYPE_BOOTLOADER)) {
+		return verify_no_app_expected(t, payload->zip.type);
+	}
 
 	k_sleep(K_MSEC(VERIFY_SETTLE_MS));
 

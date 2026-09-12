@@ -40,6 +40,23 @@
  * advertises with. Guessing is only reached when a client sends something this
  * firmware did not render, and a wrong guess fails as "target not found"
  * rather than as anything dangerous.
+ *
+ * ---- And the same job for a WiFi BSSID ----------------------------------
+ *
+ * A pinned WiFi row is an access point, and survey.c renders its BSSID with
+ * plain "%02X:%02X:..." — no type, because a BSSID has none. Zephyr's
+ * `wifi_connect_req_params.bssid` is six raw octets, so something has to turn
+ * one into the other, and that something belongs here for exactly the reason
+ * the splitter above does: it is the one place a client's string meets a
+ * Zephyr API, it is where Trap 10 happened, and a host test can compile this
+ * file and round-trip every form the renderer emits.
+ *
+ * pin_addr_bssid() is deliberately *stricter* than pin_addr_split(). A pin
+ * carrying a trailing address type — "E9:52:9F:23:87:4A (random)" — is a
+ * **Bluetooth** row's id, and accepting it would send the WiFi driver hunting
+ * for an access point whose BSSID happens to equal a BLE device's address.
+ * That fails as "no such network" several seconds later, blaming the radio for
+ * a picked-the-wrong-tab mistake. Refusing it up front says what happened.
  */
 
 #include <stddef.h>
@@ -48,3 +65,9 @@
  * `mac` needs 18 bytes; `type` needs 16. */
 int pin_addr_split(const char *pin, char *mac, size_t mac_sz,
 		   char *type, size_t type_sz);
+
+/* Parse exactly "AA:BB:CC:DD:EE:FF" (either case) into six octets. Surrounding
+ * spaces are trimmed; anything else after the address is a refusal, including
+ * the "(random)" a Bluetooth id carries. 0 on success, -22 (-EINVAL)
+ * otherwise. */
+int pin_addr_bssid(const char *pin, unsigned char out[6]);
