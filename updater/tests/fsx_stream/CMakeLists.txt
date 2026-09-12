@@ -1,0 +1,17 @@
+cmake_minimum_required(VERSION 3.16)
+project(fsx_stream_test LANGUAGES C)
+enable_testing()
+add_executable(fsx_stream_test fsx_stream_test.c)
+target_include_directories(fsx_stream_test PRIVATE stubs ../../src)
+target_compile_features(fsx_stream_test PRIVATE c_std_11)
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(fsx_stream_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+elseif(MSVC)
+  target_compile_options(fsx_stream_test PRIVATE /W4 /UNDEBUG)
+endif()
+foreach(case complete empty truncated short_write write_error close_error oversize
+    foreign_finish foreign_abort foreign_data owner_abort disconnect stale_data
+    bounds invalid_frame)
+  add_test(NAME upload_${case} COMMAND fsx_stream_test ${case})
+  set_tests_properties(upload_${case} PROPERTIES TIMEOUT 5)
+endforeach()

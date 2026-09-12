@@ -115,6 +115,12 @@ struct wifi_state {
 };
 
 static struct wifi_state s;
+/* Only set while a blocking transport call is in progress. */
+static bool (*s_cancelled)(void);
+static bool wifi_cancelled(void)
+{
+	return s.abort || (s_cancelled && s_cancelled());
+}
 
 /* ---- association -------------------------------------------------------- */
 
@@ -199,7 +205,7 @@ static int scan_for_ap(void)
 		LOG_WRN("scan did not report done within %d ms", SCAN_TIMEOUT_MS);
 		return -ETIMEDOUT;
 	}
-	if (s.abort) return -ECANCELED;
+	if (wifi_cancelled()) return -ECANCELED;
 	return s.ap_seen ? 1 : 0;
 }
 
@@ -285,7 +291,7 @@ static int associate(uint32_t timeout_ms)
 		return -ETIMEDOUT;
 	}
 
-	if (s.abort) return -ECANCELED;
+	if (wifi_cancelled()) return -ECANCELED;
 	if (!s.connected) return -ECONNREFUSED;
 
 	/* The AP runs a DHCP server; wait for a lease rather than assuming an
@@ -295,7 +301,7 @@ static int associate(uint32_t timeout_ms)
 		LOG_WRN("associated but no DHCP lease");
 		return -ETIMEDOUT;
 	}
-	if (s.abort) return -ECANCELED;
+	if (wifi_cancelled()) return -ECANCELED;
 	LOG_INF("associated with %s", OTA_SSID);
 	apply_tx_power();
 	return 0;
@@ -304,7 +310,8 @@ static int associate(uint32_t timeout_ms)
 static void disassociate(void)
 {
 	struct net_if *iface = net_if_get_first_wifi();
-	if (iface && s.connected) {
+	/* A failed association can still be pending in the driver. */
+	if (iface) {
 		(void)net_mgmt(NET_REQUEST_WIFI_DISCONNECT, iface, NULL, 0);
 	}
 	s.connected = false;
@@ -388,7 +395,7 @@ static int send_all(int fd, const void *data, size_t len)
 	int64_t last_progress = k_uptime_get();
 
 	while (off < len) {
-		if (s.abort) return -ECANCELED;
+		if (wifi_cancelled()) return -ECANCELED;
 
 		const int ready = sock_wait(fd, ZSOCK_POLLOUT, SOCK_SLICE_MS);
 		if (ready < 0) return ready;
@@ -563,7 +570,7 @@ static int post_firmware(const struct dfu_payload *pl, const char *md5_hex,
 	dfu_status_set_state(DFU_STATUS_UPLOADING);
 
 	while (sent < pl->size) {
-		if (s.abort) { rc = -ECANCELED; goto out; }
+		if (wifi_cancelled()) { rc = -ECANCELED; goto out; }
 
 		int n = fs_read(&f, buf, sizeof(buf));
 		if (n < 0) { rc = n; goto out; }
@@ -613,7 +620,7 @@ static int post_firmware(const struct dfu_payload *pl, const char *md5_hex,
 	int got = -1;
 
 	while (k_uptime_get() < deadline) {
-		if (s.abort) { rc = -ECANCELED; goto out; }
+		if (wifi_cancelled()) { rc = -ECANCELED; goto out; }
 
 		const int ready = sock_wait(fd, ZSOCK_POLLIN, SOCK_SLICE_MS);
 		if (ready < 0) { got = ready; break; }
@@ -660,7 +667,7 @@ static bool wifi_available(const struct app_config *cfg)
 	return net_if_get_first_wifi() != NULL;
 }
 
-static int wifi_find(struct dfu_target *out, const struct app_config *cfg,
+static int wifi_find_impl(struct dfu_target *out, const struct app_config *cfg,
 		     uint32_t timeout_ms, const char *pin)
 {
 	ARG_UNUSED(cfg);
@@ -702,7 +709,7 @@ static int wifi_find(struct dfu_target *out, const struct app_config *cfg,
 	bool can_scan = true;
 
 	for (;;) {
-		if (s.abort) return -ECANCELED;
+		if (wifi_cancelled()) return -ECANCELED;
 
 		uint32_t attempt = ASSOC_ATTEMPT_MS;
 		if (!forever) {
@@ -736,7 +743,7 @@ static int wifi_find(struct dfu_target *out, const struct app_config *cfg,
 
 		rc = associate(attempt);
 		if (rc == 0) break;
-		if (s.abort) return -ECANCELED;
+		if (wifi_cancelled()) return -ECANCELED;
 		if (rc != -ETIMEDOUT && rc != -ECONNREFUSED) return rc;
 
 		/* Leave no half-open association behind: the driver refuses a
@@ -756,7 +763,20 @@ static int wifi_find(struct dfu_target *out, const struct app_config *cfg,
 	return 0;
 }
 
-static enum dfu_result wifi_run(const struct dfu_target *t,
+static int wifi_find(struct dfu_target *out, const struct app_config *cfg,
+	uint32_t timeout_ms, const char *pin, bool (*cancelled)(void))
+{
+	s_cancelled = cancelled;
+	int rc = wifi_find_impl(out, cfg, timeout_ms, pin);
+	if (wifi_cancelled()) rc = -ECANCELED;
+	/* Failed acquisitions own their cleanup; the runner only releases
+	 * successful finds, including cancellation immediately after a find. */
+	if (rc < 0) disassociate();
+	s_cancelled = NULL;
+	return rc;
+}
+
+static enum dfu_result wifi_run_impl(const struct dfu_target *t,
 				const struct dfu_payload *payload,
 				const struct app_config *cfg)
 {
@@ -793,6 +813,17 @@ static enum dfu_result wifi_run(const struct dfu_target *t,
 	}
 	LOG_ERR("unexpected HTTP status %d", status);
 	return DFU_REMOTE_ERROR;
+}
+
+static enum dfu_result wifi_run(const struct dfu_target *t,
+	const struct dfu_payload *payload, const struct app_config *cfg,
+	bool (*cancelled)(void))
+{
+	s_cancelled = cancelled;
+	enum dfu_result result = wifi_cancelled() ? DFU_DISCONNECTED_EARLY :
+		wifi_run_impl(t, payload, cfg);
+	s_cancelled = NULL;
+	return result;
 }
 
 static void wifi_abort(void)

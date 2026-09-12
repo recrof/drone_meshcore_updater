@@ -131,14 +131,18 @@ struct dfu_transport {
 	 * cannot make sense of the pin it is handed returns -EINVAL, which the
 	 * runner reports as this file being unable to reach that target.
 	 */
+	/* Optional run-scoped cancellation source, passed down rather than
+	 * importing the runner. It remains valid for the blocking call only.
+	 * Successful find() transfers ownership to release(), including when
+	 * run() is never reached. Failed find() cleans its partial acquisition. */
 	int (*find)(struct dfu_target *out, const struct app_config *cfg,
-		    uint32_t timeout_ms, const char *pin);
+		    uint32_t timeout_ms, const char *pin, bool (*cancelled)(void));
 
 	/* Flash `bundle` into the peer find() reported. Blocks for the whole
 	 * transfer — the runner has its own thread for exactly this. */
 	enum dfu_result (*run)(const struct dfu_target *t,
 			       const struct dfu_payload *payload,
-			       const struct app_config *cfg);
+			       const struct app_config *cfg, bool (*cancelled)(void));
 
 	/* Which payload shape this transport can send. The runner checks
 	 * before calling run(), so a mismatch is reported as "this updater
@@ -177,7 +181,7 @@ struct dfu_transport {
 	 * NULL means the transport cannot tell, and run()'s answer stands.
 	 */
 	enum dfu_result (*verify)(const struct dfu_target *t,
-				  const struct app_config *cfg);
+				  const struct app_config *cfg, bool (*cancelled)(void));
 
 	/* Tear down whatever find() and run() left open. Always called, on
 	 * every path out, including failures. */

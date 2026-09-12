@@ -149,6 +149,8 @@ struct Firmware {
 
 /** Tunables. Defaults mirror DfuServiceInitiator. */
 struct Parameters {
+	/** Optional cancellation source, valid for the entire blocking run. */
+	bool (*cancelled)() = nullptr;
 	/**
 	 * Packets sent between Packet Receipt Notifications. 0 disables PRNs.
 	 * DfuServiceInitiator.DEFAULT_PRN_VALUE is 12.

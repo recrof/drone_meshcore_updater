@@ -293,7 +293,7 @@ void ble_scanner_cancel(void)
  * different scan. Callers set the criteria; this owns the semaphore, the
  * start/stop pair, and the three ways a wait can end.
  */
-static int scan_and_wait(uint32_t timeout_ms)
+static int scan_and_wait(uint32_t timeout_ms, bool (*cancelled)(void))
 {
 	if (!s_sem_inited) {
 		k_sem_init(&s_ctx.found_sem, 0, 1);
@@ -314,6 +314,13 @@ static int scan_and_wait(uint32_t timeout_ms)
 	s_ctx.found = false;
 	s_ctx.debug = s_debug;
 	memset(&s_ctx.match, 0, sizeof(s_ctx.match));
+	/* Stop may race connection cleanup, semaphore init or radio locking.
+	 * Check the caller's latch after resetting our scan-local state. */
+	if (cancelled && cancelled()) {
+		atomic_set(&s_radio, RADIO_IDLE);
+		k_mutex_unlock(&s_radio_lock);
+		return -ECANCELED;
+	}
 
 	int rc = bt_le_scan_start(&s_scan_params, scan_rx_cb);
 	if (rc) {
@@ -341,7 +348,7 @@ static int scan_and_wait(uint32_t timeout_ms)
 
 	/* Checked before rc, because a cancel wakes the semaphore exactly as a
 	 * match does — rc is 0 either way and s_ctx.match is stale. */
-	if (atomic_get(&s_cancel)) {
+	if (atomic_get(&s_cancel) || (cancelled && cancelled())) {
 		LOG_INF("scan cancelled");
 		return -ECANCELED;
 	}
@@ -354,6 +361,14 @@ int ble_scanner_find_first(struct ble_scanner_target *out,
 			   const char *name_filter,
 			   int8_t min_rssi,
 			   const bt_addr_le_t *prefer_mac)
+{
+	return ble_scanner_find_first_cancellable(out, timeout_ms, name_filter,
+		min_rssi, prefer_mac, NULL);
+}
+
+int ble_scanner_find_first_cancellable(struct ble_scanner_target *out,
+	uint32_t timeout_ms, const char *name_filter, int8_t min_rssi,
+	const bt_addr_le_t *prefer_mac, bool (*cancelled)(void))
 {
 	if (!out) return -EINVAL;
 
@@ -369,7 +384,7 @@ int ble_scanner_find_first(struct ble_scanner_target *out,
 		prefer_mac ? "mac_fallback " : "",
 		timeout_ms == 0 ? "no_timeout" : "with_timeout");
 
-	int rc = scan_and_wait(timeout_ms);
+	int rc = scan_and_wait(timeout_ms, cancelled);
 	if (rc) {
 		return rc;
 	}
@@ -385,6 +400,12 @@ int ble_scanner_find_pinned(struct ble_scanner_target *out,
 			    uint32_t timeout_ms,
 			    const bt_addr_le_t *addr)
 {
+	return ble_scanner_find_pinned_cancellable(out, timeout_ms, addr, NULL);
+}
+
+int ble_scanner_find_pinned_cancellable(struct ble_scanner_target *out,
+	uint32_t timeout_ms, const bt_addr_le_t *addr, bool (*cancelled)(void))
+{
 	if (!out || !addr) return -EINVAL;
 
 	s_ctx.name_filter = NULL;
@@ -397,7 +418,7 @@ int ble_scanner_find_pinned(struct ble_scanner_target *out,
 	bt_addr_le_to_str(addr, addr_s, sizeof(addr_s));
 	LOG_INF("scan started (pinned to %s or +1, no name/rssi filter)", addr_s);
 
-	int rc = scan_and_wait(timeout_ms);
+	int rc = scan_and_wait(timeout_ms, cancelled);
 	s_ctx.pinned_addr = NULL;   /* it points at the caller's storage */
 	if (rc) {
 		return rc;
@@ -412,6 +433,12 @@ int ble_scanner_find_pinned(struct ble_scanner_target *out,
 int ble_scanner_seen_at(const bt_addr_le_t *addr, uint32_t timeout_ms,
 			struct ble_scanner_target *out)
 {
+	return ble_scanner_seen_at_cancellable(addr, timeout_ms, out, NULL);
+}
+
+int ble_scanner_seen_at_cancellable(const bt_addr_le_t *addr,
+	uint32_t timeout_ms, struct ble_scanner_target *out, bool (*cancelled)(void))
+{
 	if (!addr || timeout_ms == 0) return -EINVAL;
 
 	s_ctx.name_filter = NULL;
@@ -424,7 +451,7 @@ int ble_scanner_seen_at(const bt_addr_le_t *addr, uint32_t timeout_ms,
 	bt_addr_le_to_str(addr, addr_s, sizeof(addr_s));
 	LOG_INF("watching for %s for %u ms", addr_s, timeout_ms);
 
-	int rc = scan_and_wait(timeout_ms);
+	int rc = scan_and_wait(timeout_ms, cancelled);
 	s_ctx.exact_addr = NULL;     /* it points at the caller's stack */
 	if (rc) {
 		return rc;

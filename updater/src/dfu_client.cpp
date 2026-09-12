@@ -307,13 +307,14 @@ extern "C" void dfu_client_abort(void)
 
 extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *target,
 					   const struct firmware_bundle *bundle,
-					   const struct app_config *cfg)
+					   const struct app_config *cfg, bool (*cancelled)(void))
 {
 	if (target == nullptr || bundle == nullptr || cfg == nullptr) {
 		return DFU_FS_ERROR;
 	}
 
 	ensure_callbacks();
+	if (cancelled && cancelled()) return DFU_DISCONNECTED_EARLY;
 
 	/* ---- connect ---- */
 	/* 7.5-15 ms. The interval is NOT what limits the packet rate — measured,
@@ -356,6 +357,7 @@ extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *targe
 
 	int rc = -EINVAL;
 	for (int attempt = 0; attempt < 12; attempt++) {
+		if (cancelled && cancelled()) return DFU_DISCONNECTED_EARLY;
 		k_sem_reset(&s_link.sem);
 		rc = bt_conn_le_create(&target->addr, &create_param, &conn_param,
 				       &s_link.conn);
@@ -372,7 +374,13 @@ extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *targe
 		LOG_ERR("bt_conn_le_create rc=%d", rc);
 		return DFU_CONNECT_FAILED;
 	}
-	if (k_sem_take(&s_link.sem, K_SECONDS(10)) < 0 || !s_link.connected) {
+	int wait_rc = -EAGAIN;
+	for (unsigned elapsed = 0; elapsed < 10000; elapsed += 100) {
+		if (cancelled && cancelled()) break;
+		wait_rc = k_sem_take(&s_link.sem, K_MSEC(100));
+		if (wait_rc == 0) break;
+	}
+	if ((cancelled && cancelled()) || wait_rc < 0 || !s_link.connected) {
 		LOG_ERR("connect timed out or failed");
 		disconnect_and_release();
 		return DFU_CONNECT_FAILED;
@@ -381,7 +389,7 @@ extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *targe
 	/* The LL can report success then drop with 0x3E on a weak link. */
 	k_sleep(K_MSEC(300));
 	log_conn_params(s_link.conn, "at connect");
-	if (!s_link.connected) {
+	if (!s_link.connected || (cancelled && cancelled())) {
 		LOG_WRN("link dropped immediately after connect");
 		disconnect_and_release();
 		return DFU_CONNECT_FAILED;
@@ -408,6 +416,7 @@ extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *targe
 
 	/* ---- map config -> Parameters ---- */
 	Parameters params;
+	params.cancelled = cancelled;
 	params.packets_before_notification = cfg->prn;
 	/* Parameters::mtu is only "exchange or not"; the payload is capped by
 	 * CONFIG_NORDIC_LEGACY_DFU_MAX_PACKET_SIZE either way. */

@@ -532,7 +532,7 @@ t("only the Bluetooth tab offers a flash button", /v-if="isBle"[\s\S]{0,200}Flas
                       main, join(SRC, "pin_addr.c")]);
     const run = (lines) =>
       execFileSync(join(dir, "t"), { input: lines.join("\n") + "\n" })
-        .toString().trim().split("\n");
+        .toString().trim().split(/\r?\n/);
 
     /* Zephyr is the authority on both halves, so both are read from it —
      * when it is there. `zephyr/` is a west sibling, not part of this repo, so
