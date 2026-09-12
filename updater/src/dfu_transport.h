@@ -119,8 +119,10 @@ struct dfu_transport {
 
 	/* Look for a peer this transport can reach. 0 on success, -ETIMEDOUT
 	 * if the window expired with no match, another negative errno if the
-	 * radio itself failed. May leave a connection open; release() is what
-	 * closes it.
+	 * radio itself failed. On success, ownership transfers to the runner,
+	 * which calls release() exactly once even if run() is never reached.
+	 * On error (including cancellation), find() must clean up its own
+	 * partial acquisition; the runner does not release a failed target.
 	 *
 	 * `pin` is NULL or "" for the usual search — take whatever matches the
 	 * configured filters. Otherwise it names one specific peer the operator
@@ -140,6 +142,7 @@ struct dfu_transport {
 
 	/* Find only the already selected peer, never another matching device.
 	 * The runner also retains this transport for the rest of the run.
+	 * Has the same success/error ownership contract as find().
 	 * `bootloader_transition` permits one protocol-directed application ->
 	 * bootloader transition; ordinary retries require the exact last peer.
 	 * NULL means identity-safe reacquisition is unsupported: the runner
@@ -195,8 +198,10 @@ struct dfu_transport {
 	enum dfu_result (*verify)(const struct dfu_target *t,
 				  const struct app_config *cfg);
 
-	/* Tear down whatever find() and run() left open. Always called, on
-	 * every path out, including failures. */
+	/* Tear down a successfully acquired target. Called exactly once per
+	 * successful find()/find_same(), on every subsequent exit including
+	 * cancellation or bundle failure before run(). Failed acquisitions
+	 * self-clean and are not passed here. */
 	void (*release)(struct dfu_target *t);
 };
 

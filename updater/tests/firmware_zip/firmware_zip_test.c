@@ -11,22 +11,27 @@
 static uint8_t archive[16384];
 static uint32_t archive_size;
 static unsigned reads;
+static bool start_dfu_on_read;
+static struct firmware_bundle active_bundle;
+static uint8_t active_archive[sizeof(archive)];
+static uint32_t active_archive_size;
 static struct { uint32_t offset; uint16_t name_size; } entries[64];
 static unsigned entry_count;
 
 void fs_file_t_init(struct fs_file_t *f) { memset(f, 0, sizeof(*f)); }
 int fs_open(struct fs_file_t *f, const char *path, int flags)
 {
-	(void)path;
 	(void)flags;
 	f->open = 1;
 	f->position = 0;
+	f->data = !strcmp(path, "active.zip") ? active_archive : archive;
+	f->size = !strcmp(path, "active.zip") ? active_archive_size : archive_size;
 	return 0;
 }
 int fs_close(struct fs_file_t *f) { f->open = 0; return 0; }
 int fs_seek(struct fs_file_t *f, off_t offset, int whence)
 {
-	int64_t position = (int64_t)offset + (whence == FS_SEEK_END ? archive_size : 0);
+	int64_t position = (int64_t)offset + (whence == FS_SEEK_END ? f->size : 0);
 	if (!f->open || position < 0 || (uint64_t)position > UINT32_MAX) return -EINVAL;
 	f->position = (uint32_t)position;
 	return 0;
@@ -36,10 +41,17 @@ ssize_t fs_read(struct fs_file_t *f, void *buf, size_t n)
 {
 	/* A malformed archive must be rejected without an unbounded walk. */
 	assert(++reads < 10000);
+	if (start_dfu_on_read) {
+		/* A run starts after inspection's idle check but before manifest
+		 * resolution. Its singleton must survive the rest of inspection. */
+		start_dfu_on_read = false;
+		char error[128];
+		assert(firmware_zip_open("active.zip", &active_bundle, error, sizeof(error)) == 0);
+	}
 	if (!f->open) return -EBADF;
-	if (f->position >= archive_size) return 0;
-	if (n > archive_size - f->position) n = archive_size - f->position;
-	memcpy(buf, archive + f->position, n);
+	if (f->position >= f->size) return 0;
+	if (n > f->size - f->position) n = f->size - f->position;
+	memcpy(buf, f->data + f->position, n);
 	f->position += (uint32_t)n;
 	return (ssize_t)n;
 }
@@ -241,6 +253,52 @@ int main(int argc, char **argv)
 		memset(text, ' ', sizeof(text));
 		memcpy(text, "\"application\":", 14);
 		append("manifest.json", text, sizeof(text)); finish(); invalid_archive();
+	} else if (!strcmp(name, "inspection_handle") || !strcmp(name, "inspection_handle_failure")) {
+		bundle(); finish();
+		memcpy(active_archive, archive, archive_size);
+		active_archive_size = archive_size;
+		bool bad_manifest = !strcmp(name, "inspection_handle_failure");
+		if (bad_manifest) {
+			archive_size = 0;
+			entry_count = 0;
+			const char invalid[] = "{\"manifest\":{}}";
+			append("manifest.json", invalid, sizeof(invalid) - 1);
+			finish();
+		}
+		start_dfu_on_read = true;
+		struct fw_inspect inspection;
+		uint8_t buf[sizeof(payload)];
+		assert(firmware_inspect("test.zip", &inspection) == 0);
+		assert(inspection.ok == !bad_manifest);
+		assert(firmware_zip_read(&active_bundle.bin, 0, buf, sizeof(buf)) == sizeof(buf));
+		assert(memcmp(buf, payload, sizeof(buf)) == 0);
+		firmware_zip_close();
+	} else if (!strcmp(name, "multiple_sections") || !strcmp(name, "duplicate_section")) {
+		char text[512];
+		snprintf(text, sizeof(text),
+			 "{\"manifest\":{\"application\":{\"bin_file\":\"app.bin\",\"dat_file\":\"app.dat\"},"
+			 "\"%s\":{\"bin_file\":\"app.bin\",\"dat_file\":\"app.dat\",\"sd_size\":2,\"bl_size\":4}}}",
+			 !strcmp(name, "multiple_sections") ? "softdevice_bootloader" : "application");
+		append("manifest.json", text, (uint32_t)strlen(text));
+		append("app.bin", payload, sizeof(payload)); append("app.dat", "init", 4);
+		finish(); invalid_archive();
+	} else if (!strcmp(name, "size_overflow") || !strcmp(name, "size_fraction") ||
+		   !strcmp(name, "valid_split")) {
+		char text[512];
+		const char *sd_size = !strcmp(name, "size_overflow") ? "4294967298" :
+			(!strcmp(name, "size_fraction") ? "2.0" : "2");
+		snprintf(text, sizeof(text),
+			 "{\"manifest\":{\"softdevice_bootloader\":{\"bin_file\":\"app.bin\",\"dat_file\":\"app.dat\","
+			 "\"sd_size\":%s,\"bl_size\":4}}}", sd_size);
+		append("manifest.json", text, (uint32_t)strlen(text));
+		append("app.bin", payload, sizeof(payload)); append("app.dat", "init", 4);
+		finish();
+		if (!strcmp(name, "valid_split")) {
+			struct firmware_bundle out;
+			assert(open_bundle(&out) == 0);
+			assert(out.sd_size == 2 && out.bl_size == 4);
+			firmware_zip_close();
+		} else invalid_archive();
 	} else if (!strcmp(name, "read_bounds")) {
 		bundle(); finish();
 		struct firmware_bundle out;

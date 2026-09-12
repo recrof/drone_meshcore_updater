@@ -70,6 +70,12 @@ struct firmware_bundle {
 int firmware_zip_open(const char *zip_path, struct firmware_bundle *out,
 		      char *err, size_t err_len);
 
+/* Resolve a bundle using a caller-owned, already-open handle. This only
+ * repositions that handle; it never opens/closes it or touches the streaming
+ * singleton. An inspector can therefore overlap the start of a DFU safely. */
+int firmware_zip_resolve(struct fs_file_t *file, struct firmware_bundle *out,
+			 char *err, size_t err_len);
+
 /* Stream `len` bytes from `entry` starting at byte `offset` within the
  * entry. Returns bytes read (0 = past end), or negative errno on error.
  */

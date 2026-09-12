@@ -356,6 +356,10 @@ address. Current WiFi transports cannot reacquire a verified physical identity,
 so a failed WiFi transfer stops after the first attempt instead of selecting
 another same-SSID target. Starting a new run makes a new target selection.
 
+Protocol-driven restarts have a separate budget of `retries`: one normal
+buttonless jump still works with `retries=1`, but repeated resets or mode-change
+loops cannot run forever. Configuration reloads on every rescan.
+
 Two keys are worth knowing about before a flight. **`auto_flash`** starts a
 flash the moment the device has power, with no browser connected and nothing to
 press — this is the setting that makes the device work at the far end of a

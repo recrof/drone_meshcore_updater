@@ -1,7 +1,8 @@
 # PR draft: add application-only Nordic Secure BLE DFU
 
-Status: **prepared locally; not pushed or submitted**. Full transfer and
-disconnect/resume are verified on the XIAO nRF52840 → RAK3401 test setup.
+Status: **prepared locally; not pushed or submitted**. Earlier builds verified
+full transfer and disconnect/resume on XIAO nRF52840 → RAK3401. The latest
+reliability fixes have software/build verification but have not been flashed.
 
 ## Summary
 
@@ -26,6 +27,15 @@ disconnect/resume are verified on the XIAO nRF52840 → RAK3401 test setup.
   WiFi retries until that transport supports identity-safe reacquisition.
 - Preserve Stop across scanner initialization, abort Legacy setup on pending
   MTU failures, and reject ZIP offset overflow, invalid bounds and entry loops.
+- Bound protocol restart loops and join the previous worker before reusing its
+  storage. Retain ATT command bytes/parameters until their completion callback.
+- Isolate inspection from the active transfer file handle; reject ambiguous
+  manifests and invalid component sizes before connecting or issuing START.
+- Track CCC request ownership independently from subscription-list membership,
+  retaining safe recovery after callback-less unsubscribe errors.
+- Reject incomplete/failed uploads and foreign session controls; release every
+  acquired target on Stop and bundle errors. Require a complete WiFi response
+  before claiming acceptance, and handle fragmented HTTP responses safely.
 
 ## Verification checklist
 
@@ -45,12 +55,14 @@ disconnect/resume are verified on the XIAO nRF52840 → RAK3401 test setup.
   flash, interruption and CRC-verified resume from byte 139,264; independent
   application/bootloader readbacks and running-application checks passed.
 
-The latest logic-fix build uses 370,596 bytes of flash and 120,880 bytes of RAM
-with NCS 3.4.0. All 29 aggregated native tests pass on Windows and Linux
-(ASan/UBSan), both Linux firmware configurations build, and all 28 Linux web
-test files pass. These latest fixes have not been flashed or hardware-qualified;
+The latest reliability build uses 372,184 bytes of flash and 121,008 bytes of RAM
+on nRF52840 with NCS 3.4.0. All 105 aggregated native tests pass on Windows and
+Linux (ASan/UBSan), both nRF52840 configurations and ESP32-S3/WiFi build, and all
+28 Linux web test files pass (optional release-artifact checks remain skipped).
+These latest fixes have not been flashed or hardware-qualified;
 the hardware results above apply to the preceding safety-follow-up build.
-See the [logic-fix record](secure-dfu-logic-tests.md). Windows verification is
+See the [transport reliability record](secure-dfu-transport-tests.md) and preceding
+[lifecycle-fix record](secure-dfu-lifecycle-tests.md). Windows verification is
 native testing, not a Windows Zephyr build. Other sender boards and stock
 Nordic signed receivers have not been hardware-qualified here.
 

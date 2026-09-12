@@ -4,6 +4,20 @@
 
 namespace nordic::dfu {
 namespace {
+bool valid_layout(const Firmware &fw)
+{
+	constexpr uint8_t types = IMAGE_SOFT_DEVICE | IMAGE_BOOTLOADER | IMAGE_APPLICATION;
+	if (!fw.image || !fw.image->size() || !fw.type || (fw.type & ~types)) return false;
+	const uint64_t total = uint64_t(fw.softdevice_size) + fw.bootloader_size + fw.application_size;
+	/* Zero sizes are shorthand only for a single component. A combined
+	 * image must state its split before START can erase a receiver. */
+	if (total == 0) return (fw.type & (fw.type - 1)) == 0;
+	if (bool(fw.type & IMAGE_SOFT_DEVICE) != bool(fw.softdevice_size) ||
+	    bool(fw.type & IMAGE_BOOTLOADER) != bool(fw.bootloader_size) ||
+	    bool(fw.type & IMAGE_APPLICATION) != bool(fw.application_size)) return false;
+	return total == fw.image->size();
+}
+
 struct Bytes { const uint8_t *p; size_t n; };
 uint32_t le(const uint8_t *p, unsigned n)
 {
@@ -140,7 +154,7 @@ PackageProtocol package_protocol(const Firmware &fw)
 {
 	/* Larger/custom layouts are unsupported, never assumed to be Legacy. */
 	uint8_t data[512];
-	if (!fw.image || !fw.image->size() || !fw.init_packet) return PackageProtocol::Unknown;
+	if (!valid_layout(fw) || !fw.init_packet) return PackageProtocol::Unknown;
 	uint32_t n = fw.init_packet->size();
 	if (!n || n > sizeof(data) || fw.init_packet->read(0, data, n) != int(n))
 		return PackageProtocol::Unknown;

@@ -248,8 +248,7 @@ static bool parse_init_packet(struct fs_file_t *f, const struct zip_entry *dat,
 
 /* ---- the ZIP path ------------------------------------------------------ */
 
-static void inspect_zip(struct fs_file_t *f, const char *path,
-			struct fw_inspect *out)
+static void inspect_zip(struct fs_file_t *f, struct fw_inspect *out)
 {
 	struct zip_entry e;
 	struct zip_entry manifest = { 0 }, bin = { 0 }, dat = { 0 };
@@ -343,19 +342,17 @@ static void inspect_zip(struct fs_file_t *f, const char *path,
 	 * resolution — the point of validating is to agree with the thing that
 	 * will actually read the file.
 	 *
-	 * It uses the module's single archive handle, which is why the caller
-	 * refuses to run while a DFU does. */
+	 * Resolve on our own handle. A DFU can start after the initial busy
+	 * check, and inspection must never close or replace its archive. */
 	struct firmware_bundle bundle;
 	char err[64];
-	int rc = firmware_zip_open(path, &bundle, err, sizeof(err));
+	int rc = firmware_zip_resolve(f, &bundle, err, sizeof(err));
 	if (rc < 0) {
 		snprintf(out->reason, sizeof(out->reason), "%s", err);
-		firmware_zip_close();
 		return;
 	}
 	bin = bundle.bin;
 	dat = bundle.dat;
-	firmware_zip_close();
 
 	out->kind = FW_KIND_NORDIC_ZIP;
 	out->transport = FW_TRANSPORT_BLE;
@@ -400,10 +397,9 @@ int firmware_inspect(const char *path, struct fw_inspect *out)
 		return 0;
 	}
 
-	/* inspect_zip() borrows firmware_zip.c's single archive handle for the
-	 * manifest half, and that handle belongs to a running transfer. Refuse
-	 * rather than reposition it: a DFU that fails because something asked
-	 * an unrelated question is a bug with no visible cause. */
+	/* Avoid competing for filesystem bandwidth during a running transfer.
+	 * This is an advisory check, not ownership: inspection has its own file
+	 * handle even when a DFU starts immediately after the check. */
 	if (dfu_runner_busy()) {
 		snprintf(out->reason, sizeof(out->reason),
 			 "a DFU is running — ask again when it finishes");
@@ -428,7 +424,7 @@ int firmware_inspect(const char *path, struct fw_inspect *out)
 	bool zipish = magic[0] == 'P' && magic[1] == 'K' && magic[2] == 0x03 && magic[3] == 0x04;
 
 	if (zipish) {
-		inspect_zip(&f, path, out);
+		inspect_zip(&f, out);
 	} else {
 		inspect_esp(&f, st.size, out);
 	}

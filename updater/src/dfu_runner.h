@@ -18,12 +18,16 @@ extern "C" {
 
 /* Kick off scan → parse → dfu on `zip_path`. Returns 0 if the job was
  * queued (async), -EBUSY if another DFU is already running,
- * -EINVAL / -errno on setup failure.
+ * -EINVAL / -errno on setup failure. Reusing the worker waits for the
+ * previous thread's kernel-termination tail, never for an active DFU.
  *
  * `zip_path` NULL or "" selects **auto-flash**: scan first, then pick the
  * bundle by matching the peer's advertised name against the rules in
  * `ble_firmware_mapping` (see firmware_map.h). The bundle is resolved once,
  * from the first target found, and reused for every retry in that run.
+ * Mode/restart rescans have a separate budget of `retries`; one normal
+ * buttonless jump therefore works with retries=1, but repeated jumps or
+ * INVALID_STATE/reset loops are bounded. Config reloads on every rescan.
  *
  * `pin` NULL or "" selects the usual search. Otherwise it names one specific
  * peer — the operator picked it out of a scan — and the run reaches that peer

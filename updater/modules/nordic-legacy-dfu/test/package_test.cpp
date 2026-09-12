@@ -68,5 +68,31 @@ int main()
 		dat.data[15] = 5; assert(package_protocol(fw) == PackageProtocol::Unknown);
 	}
 	dat.data = Vec(513, 0); assert(package_protocol(fw) == PackageProtocol::Unknown);
+	// A structurally valid init packet must not authorize an invalid START
+	// layout. In particular, uint32 component sums must not wrap into size().
+	dat.data = Vec(12, 0);
+	for (uint8_t type : {uint8_t(0), uint8_t(8), uint8_t(IMAGE_APPLICATION | 8)}) {
+		fw.type = type; assert(package_protocol(fw) == PackageProtocol::Unknown);
+	}
+	for (uint8_t type : {uint8_t(IMAGE_APPLICATION), uint8_t(IMAGE_SOFT_DEVICE), uint8_t(IMAGE_BOOTLOADER)}) {
+		fw.type = type; assert(package_protocol(fw) == PackageProtocol::Legacy);
+	}
+	fw.type = IMAGE_SOFT_DEVICE | IMAGE_BOOTLOADER;
+	assert(package_protocol(fw) == PackageProtocol::Unknown); // missing split
+	fw.softdevice_size = 512; fw.bootloader_size = 512;
+	assert(package_protocol(fw) == PackageProtocol::Legacy);
+	fw.bootloader_size = 511;
+	assert(package_protocol(fw) == PackageProtocol::Unknown);
+	fw.softdevice_size = UINT32_MAX; fw.bootloader_size = 1025;
+	assert(package_protocol(fw) == PackageProtocol::Unknown);
+	fw.softdevice_size = 0; fw.bootloader_size = 1024;
+	assert(package_protocol(fw) == PackageProtocol::Unknown);
+	fw.softdevice_size = 511; fw.bootloader_size = 512; fw.application_size = 1;
+	assert(package_protocol(fw) == PackageProtocol::Unknown); // unselected component
+	fw.type = IMAGE_APPLICATION; fw.softdevice_size = fw.bootloader_size = 0;
+	fw.application_size = 1024;
+	assert(package_protocol(fw) == PackageProtocol::Legacy);
+	fw.application_size = 1023;
+	assert(package_protocol(fw) == PackageProtocol::Unknown);
 	puts("Package format, truncation, duplicate, size/type and signed-envelope tests passed");
 }

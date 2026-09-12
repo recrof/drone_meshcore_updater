@@ -177,21 +177,27 @@ static int fsx_stream_setup(void)
 SYS_INIT(fsx_stream_setup, APPLICATION, 91);
 
 /* ---- session lifecycle ------------------------------------------------- */
-static void session_close(int rc)
+static int session_close(int rc)
 {
-	if (!s_sess.active) return;
-	fs_close(&s_sess.file);
+	if (!s_sess.active) return RC_NO_SESSION;
+	int close_rc = fs_close(&s_sess.file);
+	if (close_rc < 0) {
+		LOG_ERR("fs_close %s rc=%d", s_sess.path, close_rc);
+		rc = RC_WRITE_FAILED;
+	}
 	if (rc != RC_OK) {
-		/* Partially-written file → remove it so a retry can succeed
-		 * without hitting a stale-size check on the next START.
-		 */
-		fs_unlink(s_sess.path);
+		/* A rejected or unflushed upload must not look like a stored bundle. */
+		int unlink_rc = fs_unlink(s_sess.path);
+		if (unlink_rc < 0) {
+			LOG_ERR("could not discard %s rc=%d", s_sess.path, unlink_rc);
+		}
 	}
 	s_sess.active   = false;
 	s_sess.conn     = NULL;
 	s_sess.written  = 0;
 	s_sess.expected = 0;
 	memset(s_sess.path, 0, sizeof(s_sess.path));
+	return rc;
 }
 
 static void notify_reply(struct bt_conn *conn, const uint8_t *payload, uint16_t len)
@@ -238,8 +244,9 @@ static void reply_error(struct bt_conn *conn, uint8_t rc)
 static ssize_t on_ctrl_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			     const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
 {
-	ARG_UNUSED(attr); ARG_UNUSED(offset); ARG_UNUSED(flags);
+	ARG_UNUSED(attr); ARG_UNUSED(flags);
 	const uint8_t *p = buf;
+	if (offset != 0) return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
 	if (len < 1) return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 
 	k_mutex_lock(&s_sess.lock, K_FOREVER);
@@ -258,7 +265,7 @@ static ssize_t on_ctrl_write(struct bt_conn *conn, const struct bt_gatt_attr *at
 		if (name_len == 0 || name_len > FSX_STREAM_PATH_MAX) {
 			reply_error(conn, RC_INVALID); break;
 		}
-		if (len < (uint16_t)(2 + name_len + 4)) {
+		if (len != (uint16_t)(2 + name_len + 4) || memchr(&p[2], '\0', name_len)) {
 			reply_error(conn, RC_INVALID); break;
 		}
 		memcpy(s_sess.path, &p[2], name_len);
@@ -302,13 +309,17 @@ static ssize_t on_ctrl_write(struct bt_conn *conn, const struct bt_gatt_attr *at
 		break;
 	}
 	case OP_FINISH: {
-		if (!s_sess.active) { reply_error(conn, RC_NO_SESSION); break; }
+		if (len != 1) { reply_error(conn, RC_INVALID); break; }
+		if (!s_sess.active || s_sess.conn != conn) {
+			reply_error(conn, RC_NO_SESSION); break;
+		}
 		uint32_t written = s_sess.written;
 		char path_copy[FSX_STREAM_PATH_MAX + 1];
 		strncpy(path_copy, s_sess.path, sizeof(path_copy) - 1);
 		path_copy[sizeof(path_copy) - 1] = '\0';
-		session_close(RC_OK);
-		reply_done(conn, RC_OK, written);
+		int rc = session_close(written == s_sess.expected ? RC_OK : RC_WRITE_FAILED);
+		reply_done(conn, rc, written);
+		if (rc != RC_OK) break;
 		LOG_INF("stream finish: %s (%u B)", path_copy, written);
 		/* Same DFU-arm hook as the SMP upload path — a completed .zip
 		 * anywhere under /lfs1/ triggers the state machine.
@@ -317,8 +328,12 @@ static ssize_t on_ctrl_write(struct bt_conn *conn, const struct bt_gatt_attr *at
 		break;
 	}
 	case OP_ABORT:
+		if (len != 1) { reply_error(conn, RC_INVALID); break; }
+		if (!s_sess.active || s_sess.conn != conn) {
+			reply_error(conn, RC_NO_SESSION); break;
+		}
 		LOG_INF("stream abort");
-		session_close(RC_OK);   /* RC_OK avoids the auto-unlink */
+		session_close(RC_WRITE_FAILED);
 		break;
 	default:
 		reply_error(conn, RC_INVALID);
@@ -334,23 +349,30 @@ static ssize_t on_ctrl_write(struct bt_conn *conn, const struct bt_gatt_attr *at
 static ssize_t on_data_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			     const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
 {
-	ARG_UNUSED(attr); ARG_UNUSED(offset); ARG_UNUSED(flags);
+	ARG_UNUSED(attr); ARG_UNUSED(flags);
+	if (offset != 0) return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+
+	/* Keep ownership validation and file access in the same critical section. */
+	k_mutex_lock(&s_sess.lock, K_FOREVER);
 
 	/* Reject cross-connection data — the session belongs to one client. */
 	if (!s_sess.active || s_sess.conn != conn) {
 		reply_error(conn, RC_NO_SESSION);
+		k_mutex_unlock(&s_sess.lock);
 		return len;
 	}
 
-	/* fs_write in Zephyr's LittleFS backend is thread-safe under the
-	 * internal per-mount lock, but *this* handler runs on the BT-RX
-	 * thread and would race with a concurrent CTRL FINISH on the mcumgr
-	 * thread if we didn't take our own session mutex.
-	 */
-	k_mutex_lock(&s_sess.lock, K_FOREVER);
+	/* Subtraction is bounded by the invariant written <= expected. Reject
+	 * an oversized fragment before it can be appended or wrap the counter. */
+	if (len > s_sess.expected - s_sess.written) {
+		session_close(RC_WRITE_FAILED);
+		reply_error(conn, RC_WRITE_FAILED);
+		k_mutex_unlock(&s_sess.lock);
+		return len;
+	}
 
 	int rc = fs_write(&s_sess.file, buf, len);
-	if (rc < 0) {
+	if (rc != len) {
 		LOG_ERR("fs_write off=%u len=%u rc=%d", s_sess.written, len, rc);
 		session_close(RC_WRITE_FAILED);
 		reply_error(conn, RC_WRITE_FAILED);

@@ -5,7 +5,7 @@
 #define FS_O_READ 1
 #define FS_SEEK_SET 0
 #define FS_SEEK_END 2
-struct fs_file_t { uint32_t position; int open; };
+struct fs_file_t { uint32_t position; int open; const uint8_t *data; uint32_t size; };
 struct fs_dirent { size_t size; };
 void fs_file_t_init(struct fs_file_t *file);
 int fs_open(struct fs_file_t *file, const char *path, int flags);

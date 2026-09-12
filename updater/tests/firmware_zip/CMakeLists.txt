@@ -12,7 +12,8 @@ elseif(MSVC)
 endif()
 foreach(case valid cycle wrapped_size payload_bounds header_bounds store_sizes unknown_signature
     truncated_directory compressed streamed long_name entry_limit exact_entry_limit lookup_entry_limit
-    manifest_bounds read_bounds)
+    manifest_bounds inspection_handle inspection_handle_failure multiple_sections duplicate_section size_overflow
+    size_fraction valid_split read_bounds)
   add_test(NAME zip_${case} COMMAND firmware_zip_test ${case})
   set_tests_properties(zip_${case} PROPERTIES TIMEOUT 5)
 endforeach()

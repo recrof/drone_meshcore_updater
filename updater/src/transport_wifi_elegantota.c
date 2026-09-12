@@ -17,11 +17,10 @@
  *  2. **The file part's filename selects the partition.** `"filesystem"`
  *     means SPIFFS; anything else means the application slot. Get it wrong
  *     and the image lands on the filesystem.
- *  3. **Success looks like a failure.** The reply is `200 OK` with
- *     `Connection: close`, and then `ESP.restart()` about a second later. The
- *     AP vanishes. That is the shape of a completed update, not a dropped
- *     link, and reading it the other way would turn every success into a
- *     retry — which on this protocol means uploading the whole image again.
+ *  3. **The response precedes the reboot.** `200 OK` acknowledges the image;
+ *     the AP then vanishes as the peer restarts. A missing response cannot
+ *     distinguish that reboot from a lost link or a rejected upload, so it
+ *     must not be reported as acceptance. WiFi has no automatic retry.
  *
  * ---- Why find() holds a connection --------------------------------------
  *
@@ -34,6 +33,7 @@
  */
 
 #include "dfu_transport.h"
+#include "dfu_runner.h"
 #include "md5.h"
 #include "dfu_status.h"
 
@@ -304,8 +304,11 @@ static int associate(uint32_t timeout_ms)
 static void disassociate(void)
 {
 	struct net_if *iface = net_if_get_first_wifi();
-	if (iface && s.connected) {
-		(void)net_mgmt(NET_REQUEST_WIFI_DISCONNECT, iface, NULL, 0);
+	/* CONNECTING is also driver-owned, even before our connect/DHCP event.
+	 * The ESP32 disconnect operation cancels that attempt as well. */
+	if (iface) {
+		int rc = net_mgmt(NET_REQUEST_WIFI_DISCONNECT, iface, NULL, 0);
+		if (rc < 0) LOG_WRN("disconnect request rc=%d", rc);
 	}
 	s.connected = false;
 }
@@ -419,37 +422,89 @@ static int send_all(int fd, const void *data, size_t len)
 
 /* ---- GET /update/identity ---------------------------------------------- */
 
+struct identity_response {
+	char body[512];
+	size_t len;
+	bool complete;
+};
+
 static int identity_cb(struct http_response *rsp, enum http_final_call final,
 		       void *user)
 {
-	ARG_UNUSED(final);
-	char *out = user;
-
-	if (!rsp->body_frag_start || !rsp->body_frag_len) return 0;
-
-	/* {"id":"<name> (<Manufacturer>)","hardware":"ESP32"} — matched by
-	 * hand rather than with a JSON parser: one key, known shape, and the
-	 * whole reply is well under a hundred bytes. */
-	const char *p = strstr(rsp->body_frag_start, "\"id\"");
-	if (!p) return 0;
-	p = strchr(p + 4, ':');
-	if (!p) return 0;
-	p = strchr(p, '"');
-	if (!p) return 0;
-	p++;
-	const char *end = strchr(p, '"');
-	if (!end) return 0;
-
-	size_t n = (size_t)(end - p);
-	if (n >= DFU_TARGET_NAME_MAX) n = DFU_TARGET_NAME_MAX - 1;
-	memcpy(out, p, n);
-	out[n] = '\0';
+	struct identity_response *reply = user;
+	if (s.abort) return -ECANCELED;
+	if (rsp->http_status_code != 200) return -EBADMSG;
+	if (rsp->body_frag_len > sizeof(reply->body) - 1 - reply->len)
+		return -EMSGSIZE;
+	if (rsp->body_frag_len) {
+		if (!rsp->body_frag_start ||
+		    memchr(rsp->body_frag_start, '\0', rsp->body_frag_len)) return -EBADMSG;
+		memcpy(reply->body + reply->len, rsp->body_frag_start, rsp->body_frag_len);
+		reply->len += rsp->body_frag_len;
+	}
+	reply->body[reply->len] = '\0';
+	reply->complete = (final == HTTP_DATA_FINAL);
 	return 0;
+}
+
+static const char *skip_json_space(const char *p)
+{
+	while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+	return p;
+}
+
+/* AsyncElegantOTA emits a flat object of plain string fields. Reject a
+ * malformed/escaped identity rather than truncate it into another mapping.
+ * This parses only the bounded, complete response, never a socket fragment. */
+static int parse_identity(const char *body, char *name_out)
+{
+	const char *p = skip_json_space(body);
+	const char *identity = NULL;
+	size_t identity_len = 0;
+	if (*p++ != '{') return -EBADMSG;
+	for (;;) {
+		p = skip_json_space(p);
+		if (*p++ != '"') return -EBADMSG;
+		const char *key = p;
+		while (*p && *p != '"') {
+			if ((unsigned char)*p < 0x20 || *p == '\\') return -EBADMSG;
+			p++;
+		}
+		if (!*p) return -EBADMSG;
+		const size_t key_len = (size_t)(p++ - key);
+		p = skip_json_space(p);
+		if (*p++ != ':') return -EBADMSG;
+		p = skip_json_space(p);
+		if (*p++ != '"') return -EBADMSG;
+		const char *value = p;
+		while (*p && *p != '"') {
+			if ((unsigned char)*p < 0x20 || *p == '\\') return -EBADMSG;
+			p++;
+		}
+		if (!*p) return -EBADMSG;
+		const size_t value_len = (size_t)(p++ - value);
+		if (key_len == 2 && !memcmp(key, "id", 2)) {
+			if (identity || value_len == 0 || value_len >= DFU_TARGET_NAME_MAX)
+				return -EBADMSG;
+			identity = value;
+			identity_len = value_len;
+		}
+		p = skip_json_space(p);
+		if (*p == '}') {
+			if (*skip_json_space(p + 1) || !identity) return -EBADMSG;
+			memcpy(name_out, identity, identity_len);
+			name_out[identity_len] = '\0';
+			return 0;
+		}
+		if (*p++ != ',') return -EBADMSG;
+	}
 }
 
 static int read_identity(char *name_out)
 {
 	static uint8_t buf[512];
+	struct identity_response reply = {0};
+	name_out[0] = '\0';
 	int fd = open_sock();
 	if (fd < 0) return fd;
 
@@ -463,12 +518,11 @@ static int read_identity(char *name_out)
 		.recv_buf_len = sizeof(buf),
 	};
 
-	name_out[0] = '\0';
-	int rc = http_client_req(fd, &req, HTTP_TIMEOUT_MS, name_out);
+	int rc = http_client_req(fd, &req, HTTP_TIMEOUT_MS, &reply);
 	zsock_close(fd);
 	if (rc < 0) return rc;
-	if (!name_out[0]) return -ENOENT;
-	return 0;
+	if (!reply.complete) return -EBADMSG;
+	return parse_identity(reply.body, name_out);
 }
 
 /* ---- the upload --------------------------------------------------------- */
@@ -518,6 +572,7 @@ static int post_firmware(const struct dfu_payload *pl, const char *md5_hex,
 	uint8_t buf[CHUNK];
 	struct fs_file_t f;
 	int rc = 0;
+	*http_status = -1;
 
 	int pre_len = snprintf(pre, sizeof(pre),
 		"--" BOUNDARY "\r\n"
@@ -565,9 +620,9 @@ static int post_firmware(const struct dfu_payload *pl, const char *md5_hex,
 	while (sent < pl->size) {
 		if (s.abort) { rc = -ECANCELED; goto out; }
 
-		int n = fs_read(&f, buf, sizeof(buf));
+		int n = fs_read(&f, buf, MIN(sizeof(buf), (size_t)(pl->size - sent)));
 		if (n < 0) { rc = n; goto out; }
-		if (n == 0) break;
+		if (n == 0) { rc = -EIO; goto out; }
 
 		rc = send_all(fd, buf, (size_t)n);
 		if (rc < 0) goto out;
@@ -596,51 +651,46 @@ static int post_firmware(const struct dfu_payload *pl, const char *md5_hex,
 			(unsigned)(ms > 0 ? (uint64_t)sent / (uint64_t)ms : 0));
 	}
 
-	/*
-	 * Wait for the reply, but not forever.
-	 *
-	 * `200 OK` then the AP disappears about a second later, so on the good
-	 * path the network is torn down while this socket is still open. There
-	 * is nothing left to send a FIN or an RST — the peer is not refusing
-	 * the connection, it has ceased to exist — so a `recv` that waits for
-	 * a definite answer waits for one that can never come. Silence here is
-	 * therefore *evidence*, not an absence of it, and is read the same way
-	 * as a 200.
-	 */
+	/* TCP may split the status line anywhere. Accumulate a bounded complete
+	 * line, with one deadline for all fragments. Silence/EOF is not an ACK:
+	 * a successful reboot and a lost/rejected upload can both lose the reply. */
 	dfu_status_set_state(DFU_STATUS_VALIDATING);
 	char rsp[256];
 	const int64_t deadline = k_uptime_get() + REPLY_WAIT_MS;
-	int got = -1;
+	size_t used = 0;
+	rc = -ETIMEDOUT;
 
 	while (k_uptime_get() < deadline) {
 		if (s.abort) { rc = -ECANCELED; goto out; }
 
 		const int ready = sock_wait(fd, ZSOCK_POLLIN, SOCK_SLICE_MS);
-		if (ready < 0) { got = ready; break; }
+		if (ready < 0) { rc = ready; break; }
 		if (ready == 0) continue;
 
-		got = zsock_recv(fd, rsp, sizeof(rsp) - 1, 0);
+		int got = zsock_recv(fd, rsp + used, sizeof(rsp) - 1 - used, 0);
 		if (got < 0 && sock_would_block(errno)) continue;
-		break;    /* data, an orderly close, or a real error */
+		if (got <= 0) { rc = got < 0 ? -errno : -ECONNRESET; break; }
+		used += (size_t)got;
+		rsp[used] = '\0';
+		char *eol = memchr(rsp, '\n', used);
+		if (eol) {
+			if (eol - rsp < 14 || eol[-1] != '\r' ||
+			    memcmp(rsp, "HTTP/1.", 7) || (rsp[7] != '0' && rsp[7] != '1') ||
+			    rsp[8] != ' ' || rsp[9] < '1' || rsp[9] > '5' ||
+			    rsp[10] < '0' || rsp[10] > '9' || rsp[11] < '0' || rsp[11] > '9' ||
+			    rsp[12] != ' ' || memchr(rsp, '\0', (size_t)(eol - rsp))) {
+				rc = -EBADMSG;
+				break;
+			}
+			*http_status = (rsp[9] - '0') * 100 + (rsp[10] - '0') * 10 + rsp[11] - '0';
+			eol[-1] = '\0';
+			LOG_INF("peer replied: %s", rsp);
+			rc = 0;
+			break;
+		}
+		if (used == sizeof(rsp) - 1) { rc = -EMSGSIZE; break; }
 	}
-
-	if (got > 0) {
-		rsp[got] = '\0';
-		int code = 0;
-		if (sscanf(rsp, "HTTP/1.%*d %d", &code) == 1) *http_status = code;
-		/* The status line verbatim: ElegantOTA's body is "OK" or
-		 * "FAIL", and on anything unexpected the line itself is the
-		 * only thing that says what happened. */
-		char *eol = strpbrk(rsp, "\r\n");
-		if (eol) *eol = '\0';
-		LOG_INF("peer replied: %s", rsp);
-	} else {
-		LOG_WRN("no reply within %d ms — the peer restarting without "
-			"answering is what a successful flash looks like, so "
-			"this is being read as success",
-			REPLY_WAIT_MS);
-		*http_status = 0;
-	}
+	if (rc < 0) LOG_WRN("upload response unconfirmed (rc=%d)", rc);
 
 out:
 	fs_close(&f);
@@ -680,6 +730,9 @@ static int wifi_find(struct dfu_target *out, const struct app_config *cfg,
 	memset(out, 0, sizeof(*out));
 	out->tp = &dfu_transport_wifi_elegantota;
 	s.abort = false;
+	/* A Stop just before entry must survive resetting this transport's
+	 * previous-run hint. The runner's latch is the cancellation authority. */
+	if (dfu_runner_cancelled()) return -ECANCELED;
 
 	/*
 	 * `timeout_ms == 0` is the runner's word for "keep looking until you
@@ -736,12 +789,11 @@ static int wifi_find(struct dfu_target *out, const struct app_config *cfg,
 
 		rc = associate(attempt);
 		if (rc == 0) break;
+		/* Failed acquisition remains ours to clean up, including cancellation
+		 * while CONNECTING or waiting for DHCP. The runner only owns success. */
+		disassociate();
 		if (s.abort) return -ECANCELED;
 		if (rc != -ETIMEDOUT && rc != -ECONNREFUSED) return rc;
-
-		/* Leave no half-open association behind: the driver refuses a
-		 * fresh connect while it thinks one is in progress. */
-		disassociate();
 		spent += attempt;
 	}
 
@@ -781,11 +833,10 @@ static enum dfu_result wifi_run(const struct dfu_target *t,
 		return rc == -ETIMEDOUT ? DFU_TIMEOUT : DFU_DISCONNECTED_EARLY;
 	}
 
-	/* 200, or no reply at all: both mean the peer took it. A peer that
-	 * accepted the image restarts about a second later, and the reply can
-	 * be lost to that. 500 is ElegantOTA's own "FAIL", which is a genuine
-	 * rejection — usually the MD5. */
-	if (status == 200 || status == 0) return DFU_OK;
+	/* Only the complete 200 status line confirms acceptance. A missing
+	 * response has already returned an error; it cannot establish success.
+	 * 500 is ElegantOTA's own "FAIL", usually the MD5 or image size. */
+	if (status == 200) return DFU_OK;
 	if (status == 500) {
 		LOG_ERR("peer rejected the image (500) — MD5 mismatch, or the "
 			"image did not fit its OTA slot");

@@ -142,7 +142,7 @@ void ble_scanner_cancel() {}
 }
 
 static dfu_result run(bool secure_package, bool secure_target, const char *stage = "",
-		      MtuOutcome mtu = MtuOutcome::Disabled)
+		      MtuOutcome mtu = MtuOutcome::Disabled, unsigned layout = 0)
 {
 	stopped = false; stop_at = stage; writes = creates = discoveries = 0; secure_peer = secure_target;
 	mtu_outcome = mtu; pending_mtu = nullptr;
@@ -150,6 +150,11 @@ static dfu_result run(bool secure_package, bool secure_target, const char *stage
 	// Unsigned Secure Packet(Command(INIT, InitCommand(app_size=1024))).
 	init = secure_package ? std::vector<uint8_t>{10,7,8,1,18,3,56,128,8} : std::vector<uint8_t>(12,0);
 	firmware_bundle b{}; b.type = FW_TYPE_APPLICATION; b.bin.size = 1024;
+	if (layout) {
+		b.type = FW_TYPE_SOFTDEVICE | FW_TYPE_BOOTLOADER;
+		b.sd_size = 512; b.bl_size = layout == 1 ? 512 : 511;
+		if (layout == 3) { b.sd_size = UINT32_MAX; b.bl_size = 1025; }
+	}
 	b.dat.size = uint32_t(init.size()); b.dat.data_offset = 1;
 	ble_scanner_target target{}; app_config cfg{};
 	cfg.high_mtu = mtu != MtuOutcome::Disabled;
@@ -177,6 +182,12 @@ static void test_mtu_setup(bool secure)
 }
 int main()
 {
+	for (unsigned layout : {2u, 3u}) {
+		assert(run(false,false,"",MtuOutcome::Disabled,layout) == DFU_BAD_PACKAGE);
+		assert(creates == 0 && writes == 0);
+	}
+	assert(run(false,false,"",MtuOutcome::Disabled,1) == DFU_CANCELLED);
+	assert(creates == 1 && writes == 1); // Valid split still reaches START.
 	test_mtu_setup(false);
 #if defined(CONFIG_NORDIC_SECURE_DFU)
 	test_mtu_setup(true);

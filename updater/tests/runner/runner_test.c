@@ -11,11 +11,15 @@
 #include "firmware_map.h"
 #include "app.h"
 
-enum scenario { AUTO_RETRY, BUTTONLESS_RETRY, PIN_NO_DRIFT, TARGET_GONE, WIFI_RETRY, EXACT_RESTART, TRANSPORT_STAYS };
+enum scenario { AUTO_RETRY, BUTTONLESS_RETRY, PIN_NO_DRIFT, TARGET_GONE, WIFI_RETRY, EXACT_RESTART, TRANSPORT_STAYS,
+  RESTART_BUDGET, BUTTONLESS_BUDGET, CONFIG_ON_RESTART, THREAD_REUSE, ONE_BUTTONLESS, MAX_RESTART_BUDGET,
+  LOWER_RESTART_BUDGET };
 static enum scenario scenario;
 static struct app_config config;
 static unsigned broad_scans, pinned_scans, exact_scans, runs, maps, zip_opens;
 static unsigned list_reads, other_finds, wifi_finds;
+static unsigned config_loads;
+unsigned fake_thread_joins;
 static enum dfu_status_state state;
 static enum dfu_status_result finished;
 static const bt_addr_le_t app = {1, {{0x10, 0, 0, 0, 0, 0xC0}}};
@@ -24,7 +28,13 @@ static const bt_addr_le_t other = {1, {{0x80, 0, 0, 0, 0, 0xC0}}};
 uint32_t fake_now;
 
 void fake_event(const char *name) { (void)name; }
-bool app_config_load(void) { return true; }
+bool app_config_load(void)
+{
+  config_loads++;
+  if (scenario == CONFIG_ON_RESTART && config_loads > 1) config.prn = 7;
+  if (scenario == LOWER_RESTART_BUDGET && config_loads > 2) config.retries = 1;
+  return true;
+}
 const struct app_config *app_config_current(void) { return &config; }
 void ble_pairing_set_passkey(const char *p) { (void)p; }
 int ble_pairing_verdict(void) { return DFU_STATUS_RESULT_NONE; }
@@ -95,7 +105,8 @@ int ble_scanner_seen_at(const bt_addr_le_t *addr, uint32_t timeout,
   struct ble_scanner_target *out)
 {
   assert(timeout != 0);
-  const bt_addr_le_t *expected = scenario == BUTTONLESS_RETRY || scenario == PIN_NO_DRIFT ? &boot : &app;
+  const bt_addr_le_t *expected = scenario == BUTTONLESS_RETRY || scenario == PIN_NO_DRIFT ||
+    scenario == BUTTONLESS_BUDGET || scenario == ONE_BUTTONLESS ? &boot : &app;
   assert(bt_addr_le_eq(addr, expected));
   exact_scans++;
   if (scenario == TARGET_GONE && state != DFU_STATUS_VERIFYING) {
@@ -110,12 +121,21 @@ void dfu_client_abort(void) {}
 enum dfu_result dfu_client_run(const struct ble_scanner_target *target,
   const struct firmware_bundle *bundle, const struct app_config *cfg)
 {
-  (void)cfg;
   assert(bundle->bin.size == 1024);
   const bt_addr_le_t *expected = scenario == PIN_NO_DRIFT ||
-    (scenario == BUTTONLESS_RETRY && runs > 0) ? &boot : &app;
+    ((scenario == BUTTONLESS_RETRY || scenario == BUTTONLESS_BUDGET || scenario == ONE_BUTTONLESS) && runs > 0) ? &boot : &app;
   assert(bt_addr_le_eq(&target->addr, expected));
   runs++;
+  assert(runs <= 300); /* Bound the red test itself if the runner loops forever. */
+  if (scenario == RESTART_BUDGET || scenario == MAX_RESTART_BUDGET || scenario == LOWER_RESTART_BUDGET)
+    return DFU_RESTART_REQUIRED;
+  if (scenario == BUTTONLESS_BUDGET) return DFU_BUTTONLESS_TRIGGERED;
+  if (scenario == ONE_BUTTONLESS) return runs == 1 ? DFU_BUTTONLESS_TRIGGERED : DFU_OK;
+  if (scenario == CONFIG_ON_RESTART) {
+    if (runs == 1) return DFU_RESTART_REQUIRED;
+    assert(cfg->prn == 7);
+    return DFU_OK;
+  }
   if (scenario == BUTTONLESS_RETRY) return runs == 1 ? DFU_BUTTONLESS_TRIGGERED : runs == 2 ? DFU_TIMEOUT : DFU_OK;
   if (scenario == PIN_NO_DRIFT) return runs <= 2 ? DFU_BUTTONLESS_TRIGGERED : DFU_OK;
   if (scenario == EXACT_RESTART) return runs == 1 ? DFU_RESTART_REQUIRED : DFU_OK;
@@ -153,15 +173,23 @@ static void test(enum scenario which, const char *path, const char *pin)
 {
   scenario = which;
   broad_scans = pinned_scans = exact_scans = runs = maps = zip_opens = 0;
-  list_reads = other_finds = wifi_finds = fake_now = 0;
+  list_reads = other_finds = wifi_finds = fake_now = config_loads = 0;
   finished = DFU_STATUS_RESULT_NONE;
   memset(&config, 0, sizeof(config));
-  config.retries = 3;
+  config.retries = which == RESTART_BUDGET || which == BUTTONLESS_BUDGET || which == ONE_BUTTONLESS ? 1 :
+    which == MAX_RESTART_BUDGET ? 255 : 3;
   config.scan_timeout = which == TARGET_GONE ? 1 : 0;
   snprintf(config.ble_firmware_mapping, sizeof(config.ble_firmware_mapping), "RAK:rak.zip|XIAO:xiao.zip");
   assert(dfu_runner_start(path, pin, NULL) == 0);
   assert(!dfu_runner_busy());
   assert(other_finds == 0 && list_reads == 1);
+  if (which == RESTART_BUDGET || which == BUTTONLESS_BUDGET || which == MAX_RESTART_BUDGET ||
+      which == LOWER_RESTART_BUDGET) {
+    assert(finished == DFU_STATUS_RESULT_RETRIES_EXHAUSTED);
+    assert(runs == (which == MAX_RESTART_BUDGET ? 256u : 2u));
+    assert(config_loads == (which == LOWER_RESTART_BUDGET ? runs + 1 : runs));
+    return;
+  }
   if (which == WIFI_RETRY) {
     assert(runs == 1 && wifi_finds == 1 && finished == DFU_STATUS_RESULT_TIMEOUT);
   } else {
@@ -173,11 +201,20 @@ static void test(enum scenario which, const char *path, const char *pin)
     if (which == EXACT_RESTART) assert(runs == 2 && broad_scans == 1 && pinned_scans == 0);
     if (which == BUTTONLESS_RETRY) assert(runs == 3 && broad_scans == 1 && pinned_scans == 1);
     if (which == PIN_NO_DRIFT) assert(runs == 3 && broad_scans == 0 && pinned_scans == 2);
+    if (which == ONE_BUTTONLESS) assert(runs == 2 && pinned_scans == 1 && config.retries == 1);
+    if (which == CONFIG_ON_RESTART) assert(runs == 2 && config_loads == 2);
     assert(exact_scans > 0);
   }
 }
 static void run_case(enum scenario which)
 {
+  if (which == THREAD_REUSE) {
+    unsigned before = fake_thread_joins;
+    test(AUTO_RETRY, NULL, NULL);
+    test(AUTO_RETRY, NULL, NULL);
+    assert(fake_thread_joins > before);
+    return;
+  }
   test(which, which == PIN_NO_DRIFT ? "/lfs1/rak.zip" : which == WIFI_RETRY ? "/lfs1/wifi.bin" : NULL,
     which == PIN_NO_DRIFT ? "C0:00:00:00:00:10 (random)" : NULL);
 }
@@ -185,11 +222,11 @@ int main(int argc, char **argv)
 {
   if (argc > 1) {
     int which = atoi(argv[1]);
-    assert(which >= AUTO_RETRY && which <= TRANSPORT_STAYS);
+    assert(which >= AUTO_RETRY && which <= LOWER_RESTART_BUDGET);
     run_case((enum scenario)which);
   } else {
-    for (int which = AUTO_RETRY; which <= TRANSPORT_STAYS; which++) run_case((enum scenario)which);
+    for (int which = AUTO_RETRY; which <= LOWER_RESTART_BUDGET; which++) run_case((enum scenario)which);
   }
-  puts("real-runner identity checks passed");
+  puts("real-runner identity and lifecycle checks passed");
   return 0;
 }

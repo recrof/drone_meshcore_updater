@@ -105,6 +105,10 @@ scanner, ZIP walker and inspector against deterministic boundaries. It covers
 same-device retries, Stop during scanner initialization, pending MTU failures,
 and malformed ZIP bounds/loop prevention. See the
 [logic-fix verification record](secure-dfu-logic-tests.md).
+Additional restart, thread/ATT lifetime, inspection isolation and image-layout
+regressions are recorded in the [lifecycle follow-up](secure-dfu-lifecycle-tests.md).
+Upload completion, WiFi response handling and CCC ownership regressions are
+recorded in the [transport follow-up](secure-dfu-transport-tests.md).
 See the [XIAO/RAK3401 qualification record](secure-dfu-qualification.md) for
 the tested setup, results and remaining coverage limits.
 

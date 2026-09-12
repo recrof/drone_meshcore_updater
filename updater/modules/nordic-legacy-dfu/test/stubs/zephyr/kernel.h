@@ -19,6 +19,8 @@
 #define K_MUTEX_DEFINE(n) struct k_mutex n = {0}
 typedef int64_t k_timeout_t;
 struct k_mutex { int unused; };
+struct k_spinlock { int unused; };
+typedef int k_spinlock_key_t;
 struct k_sem { int count; };
 #ifdef __cplusplus
 extern "C" {
@@ -41,6 +43,8 @@ static inline int64_t k_uptime_ticks(void) { return fake_now; }
 static inline int64_t k_us_to_ticks_ceil64(uint64_t us) { return (int64_t)((us + 999) / 1000); }
 static inline void k_mutex_lock(struct k_mutex *m, k_timeout_t t) { (void)m; (void)t; }
 static inline void k_mutex_unlock(struct k_mutex *m) { (void)m; }
+static inline k_spinlock_key_t k_spin_lock(struct k_spinlock *s) { (void)s; return 0; }
+static inline void k_spin_unlock(struct k_spinlock *s, k_spinlock_key_t key) { (void)s; (void)key; }
 #ifdef __cplusplus
 }
 #endif

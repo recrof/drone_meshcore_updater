@@ -43,7 +43,9 @@ class GattLink {
 public:
 	GattLink() = default;
 
-	/** Bind to a connected peer and reset all session state. */
+	/** Bind to a connected peer and reset session state. Returns -EBUSY
+	 * while a prior Control Point or CCC write owns its ATT parameters.
+	 * A failed unsubscribe may require disconnecting its previous peer. */
 	int attach(bt_conn *conn, bool (*cancelled)() = nullptr);
 	/** Release the peer. Does not disconnect. */
 	void detach();
@@ -68,6 +70,8 @@ public:
 	/**
 	 * Write to the Control Point and wait for the ATT response.
 	 * Mirrors BaseDfuImpl.writeOpCode(characteristic, value, reset).
+	 * Copies the protocol command (1..6 bytes) into link-owned storage.
+	 * A timeout leaves it reserved until the host's completion callback.
 	 *
 	 * @param reset true for op codes that make the target reboot
 	 *              (Reset, Activate and Reset). Disconnects and ATT
@@ -118,6 +122,9 @@ public:
 
 private:
 	bool externally_cancelled() const { return cancelled_ && cancelled_(); }
+	bool control_write_pending();
+	bool subscription_busy(bool include_linked);
+	bt_conn *release_subscription_locked();
 	bool (*cancelled_)() = nullptr;
 	int wait(struct k_sem *sem, uint32_t timeout_ms);
 	void wake_all();
@@ -149,7 +156,8 @@ private:
 	bool secure_ = false;
 	bool response_overflow_ = false;
 
-	struct k_sem op_sem_;      /* read / write-with-response / subscribe / MTU */
+	struct k_sem op_sem_;      /* read / write-with-response / MTU */
+	struct k_sem ccc_sem_;     /* CCC enable only; never signalled by unsubscribe */
 	struct k_sem tx_sem_;      /* write-without-response handed to controller */
 	struct k_sem notify_sem_;  /* Control Point response notification */
 	struct k_sem receipt_sem_; /* Packet Receipt Notification */
@@ -182,21 +190,26 @@ private:
 	 */
 	bt_gatt_discover_params disc_params_{};
 	bt_gatt_subscribe_params sub_params_{};
-	/*
-	 * Does the *host* still have sub_params_ on one of its lists?
-	 *
-	 * Not the same question as `subscribed_`, which is about this session.
-	 * Zephyr removes a subscription when the connection's ATT channel
-	 * detaches, which can lag our own disconnect by a long way (Trap 3: a
-	 * pending ATT request outlives bt_conn_disconnect() by up to ATT's 30 s
-	 * timeout). Until then it holds a pointer *into* this struct, and
-	 * touching it is memory corruption in the host's own list.
-	 *
-	 * Cleared by notify_cb() when Zephyr calls it with data == NULL, which
-	 * is exactly the host announcing it has let go.
-	 */
-	volatile bool sub_linked_ = false;
+	/* List membership and pending CCC ownership are independent: the last
+	 * unsubscribe unlinks immediately but retains params until its ATT reply.
+	 * NCS 3.4 can omit both callbacks on an unsubscribe error; its actual
+	 * disconnected callback is the fallback fence after ATT/GATT cleanup. */
+	enum class CccOperation { None, Enable, Disable };
+	CccOperation ccc_operation_ = CccOperation::None;
+	bool sub_linked_ = false;
+	bt_conn *sub_conn_ = nullptr; /* Owned reference, survives detach(). */
+	struct k_spinlock sub_lock_{};
+	/* Registered links must have static lifetime, like their ATT params. */
+	GattLink *next_link_ = nullptr;
+	bool link_registered_ = false;
 	bt_gatt_write_params write_params_{};
+	/* Secure CREATE is the largest Control Point command (six bytes).
+	 * A timeout ends our wait, not Zephyr's ownership: a security retry
+	 * may re-encode data after the protocol caller's stack has unwound. */
+	uint8_t control_data_[6]{};
+	bt_conn *write_conn_ = nullptr;
+	atomic_t write_pending_ = ATOMIC_INIT(0);
+	struct k_spinlock write_lock_{};
 	bt_gatt_read_params read_params_{};
 	bt_gatt_exchange_params mtu_params_{};
 	bool subscribed_ = false;

@@ -338,12 +338,21 @@ extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *targe
 	if (dfu_runner_cancelled()) return DFU_CANCELLED;
 	// Reject unknown formats without even connecting. Each protocol also
 	// checks its own format before issuing any destructive command.
-	ZipStream preflight_image(&bundle->bin), preflight_init(&bundle->dat);
-	Firmware preflight;
-	preflight.type = bundle->type;
-	preflight.image = &preflight_image;
-	preflight.init_packet = &preflight_init;
-	PackageProtocol protocol = package_protocol(preflight);
+	ZipStream image(&bundle->bin), init_packet(&bundle->dat);
+	Firmware firmware;
+	firmware.type = bundle->type;
+	firmware.image = &image;
+	firmware.init_packet = &init_packet;
+	/* Preflight must see the same layout as the protocol client. Otherwise
+	 * a valid .dat could authorize START with inconsistent or wrapped sizes. */
+	if ((bundle->type & (bundle->type - 1)) != 0) {
+		firmware.softdevice_size = bundle->sd_size;
+		firmware.bootloader_size = bundle->bl_size;
+		const uint64_t combined = uint64_t(bundle->sd_size) + bundle->bl_size;
+		firmware.application_size = (bundle->type & FW_TYPE_APPLICATION) &&
+			bundle->bin.size > combined ? uint32_t(bundle->bin.size - combined) : 0;
+	}
+	PackageProtocol protocol = package_protocol(firmware);
 	if (protocol == PackageProtocol::Unknown) return DFU_BAD_PACKAGE;
 #if !defined(CONFIG_NORDIC_SECURE_DFU)
 	if (protocol == PackageProtocol::Secure) return DFU_BAD_PACKAGE;
@@ -434,25 +443,6 @@ extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *targe
 		LOG_WRN("link dropped immediately after connect");
 		disconnect_and_release();
 		return DFU_CONNECT_FAILED;
-	}
-
-	/* ---- describe the firmware ---- */
-	ZipStream image(&bundle->bin);
-	ZipStream init_packet(&bundle->dat);
-
-	Firmware firmware;
-	firmware.type = bundle->type;
-	firmware.image = &image;
-	firmware.init_packet = (bundle->dat.size > 0) ? &init_packet : nullptr;
-
-	/* Only a multi-image bundle has to state the split; for a single type
-	 * the library derives the sizes from type + image->size(). */
-	if ((bundle->type & (bundle->type - 1)) != 0) {
-		firmware.softdevice_size = bundle->sd_size;
-		firmware.bootloader_size = bundle->bl_size;
-		uint32_t combined = bundle->sd_size + bundle->bl_size;
-		firmware.application_size =
-			(bundle->bin.size > combined) ? (bundle->bin.size - combined) : 0;
 	}
 
 	/* ---- map config -> Parameters ---- */

@@ -56,11 +56,6 @@ int firmware_zip_read_at(struct fs_file_t *f, uint32_t off, void *buf, uint32_t 
 	return 0;
 }
 
-static int read_at(uint32_t off, void *buf, uint32_t len)
-{
-	return firmware_zip_read_at(&s_file, off, buf, len);
-}
-
 static uint16_t rd_u16(const uint8_t *p) { return p[0] | ((uint16_t)p[1] << 8); }
 static uint32_t rd_u32(const uint8_t *p)
 {
@@ -145,13 +140,13 @@ int firmware_zip_next(struct fs_file_t *f, uint32_t cursor,
 }
 
 /* Locate an entry by exact filename (case-sensitive). */
-static int zip_find(const char *name, struct zip_entry *out)
+static int zip_find(struct fs_file_t *file, const char *name, struct zip_entry *out)
 {
 	uint32_t cursor = 0;
 	unsigned entries = 0;
 	while (true) {
 		uint32_t next;
-		int rc = firmware_zip_next(&s_file, cursor, out, &next);
+		int rc = firmware_zip_next(file, cursor, out, &next);
 		if (rc < 0) return rc;
 		if (rc == 1) return -ENOENT;    /* end reached */
 		if (++entries > ZIP_ENTRY_MAX) return -E2BIG;
@@ -229,12 +224,17 @@ static bool json_get_uint(const char *buf, size_t buf_len, const char *key,
 	const char *end = buf + buf_len;
 	if (!p) return false;
 	p = skip_ws_colon(p, end);
-	if (!p || p >= end || !isdigit((int)*p)) return false;
+	if (!p || p >= end || !isdigit((unsigned char)*p)) return false;
 	uint32_t v = 0;
-	while (p < end && isdigit((int)*p)) {
-		v = v * 10u + (uint32_t)(*p - '0');
+	while (p < end && isdigit((unsigned char)*p)) {
+		uint32_t digit = (uint32_t)(*p - '0');
+		if (v > (UINT32_MAX - digit) / 10u) return false;
+		v = v * 10u + digit;
 		p++;
 	}
+	/* A decimal fraction or exponent is not an image byte count. */
+	while (p < end && isspace((unsigned char)*p)) p++;
+	if (p >= end || (*p != ',' && *p != '}')) return false;
 	*out = v;
 	return true;
 }
@@ -261,47 +261,46 @@ static uint8_t detect_section(const char *buf, size_t buf_len,
 		{ "softdevice",  FW_TYPE_SOFTDEVICE },
 	};
 
+	uint8_t found = 0;
 	for (size_t i = 0; i < ARRAY_SIZE(sections); i++) {
-		const char *p = find_quoted_key(buf, buf_len, sections[i].name);
-		if (!p) continue;
-		p = skip_ws_colon(p, buf + buf_len);
-		if (!p || p >= buf + buf_len || *p != '{') continue;
+		const char *search = buf;
+		while (search < buf + buf_len) {
+			const char *p = find_quoted_key(search, (size_t)(buf + buf_len - search),
+						      sections[i].name);
+			if (!p) break;
+			search = p;
+			p = skip_ws_colon(p, buf + buf_len);
+			if (!p || p >= buf + buf_len || *p != '{') continue;
 
-		/* Scope subsequent key lookups to this section's braces. */
-		int depth = 1;
-		const char *end = p + 1;
-		while (end < buf + buf_len && depth > 0) {
-			if (*end == '{') depth++;
-			else if (*end == '}') depth--;
-			end++;
+			/* Separate section objects need a multi-image/reconnect flow.
+			 * Never silently select just one of them (or a duplicate). */
+			if (found) return 0;
+			int depth = 1;
+			const char *end = p + 1;
+			while (end < buf + buf_len && depth > 0) {
+				if (*end == '{') depth++;
+				else if (*end == '}') depth--;
+				end++;
+			}
+			if (depth != 0) return 0;
+			*section_body_start = p;
+			*section_body_len   = (size_t)(end - p);
+			found = sections[i].type;
 		}
-		if (depth != 0) continue;
-		*section_body_start = p;
-		*section_body_len   = (size_t)(end - p);
-		return sections[i].type;
 	}
-	return 0;
+	return found;
 }
 
 /* ---- public API ------------------------------------------------------ */
-int firmware_zip_open(const char *zip_path, struct firmware_bundle *out,
-		      char *err, size_t err_len)
+int firmware_zip_resolve(struct fs_file_t *file, struct firmware_bundle *out,
+			 char *err, size_t err_len)
 {
 	memset(out, 0, sizeof(*out));
 	if (err && err_len) err[0] = '\0';
 
-	firmware_zip_close();     /* idempotent */
-	fs_file_t_init(&s_file);
-	int rc = fs_open(&s_file, zip_path, FS_O_READ);
-	if (rc < 0) {
-		if (err) snprintf(err, err_len, "open %s rc=%d", zip_path, rc);
-		return rc;
-	}
-	s_file_open = true;
-
 	/* Find manifest.json first. */
 	struct zip_entry man;
-	rc = zip_find("manifest.json", &man);
+	int rc = zip_find(file, "manifest.json", &man);
 	if (rc < 0) {
 		if (err) snprintf(err, err_len, "manifest.json not in zip (rc=%d)", rc);
 		goto fail;
@@ -313,7 +312,7 @@ int firmware_zip_open(const char *zip_path, struct firmware_bundle *out,
 	}
 
 	char mbuf[2048];
-	rc = read_at(man.data_offset, mbuf, man.size);
+	rc = firmware_zip_read_at(file, man.data_offset, mbuf, man.size);
 	if (rc < 0) {
 		if (err) snprintf(err, err_len, "manifest.json read rc=%d", rc);
 		goto fail;
@@ -324,7 +323,7 @@ int firmware_zip_open(const char *zip_path, struct firmware_bundle *out,
 	size_t      sec_len;
 	uint8_t type = detect_section(mbuf, man.size, &sec_start, &sec_len);
 	if (type == 0) {
-		if (err) snprintf(err, err_len, "no recognized firmware section in manifest");
+		if (err) snprintf(err, err_len, "manifest needs exactly one firmware section");
 		rc = -EINVAL;
 		goto fail;
 	}
@@ -351,12 +350,12 @@ int firmware_zip_open(const char *zip_path, struct firmware_bundle *out,
 		goto fail;
 	}
 
-	rc = zip_find(bin_name, &out->bin);
+	rc = zip_find(file, bin_name, &out->bin);
 	if (rc < 0) {
 		if (err) snprintf(err, err_len, "%s not in zip", bin_name);
 		goto fail;
 	}
-	rc = zip_find(dat_name, &out->dat);
+	rc = zip_find(file, dat_name, &out->dat);
 	if (rc < 0) {
 		if (err) snprintf(err, err_len, "%s not in zip", dat_name);
 		goto fail;
@@ -379,14 +378,31 @@ int firmware_zip_open(const char *zip_path, struct firmware_bundle *out,
 		}
 	}
 
-	LOG_INF("parsed %s: type=0x%02x bin=%s(%u B) dat=%s(%u B)%s",
-		zip_path, out->type, out->bin.name, out->bin.size,
+	LOG_INF("parsed type=0x%02x bin=%s(%u B) dat=%s(%u B)%s",
+		out->type, out->bin.name, out->bin.size,
 		out->dat.name, out->dat.size,
 		(out->type & FW_TYPE_SOFTDEVICE) ? " [SD+BL combo]" : "");
 	return 0;
 
 fail:
+	return rc;
+}
+
+int firmware_zip_open(const char *zip_path, struct firmware_bundle *out,
+		      char *err, size_t err_len)
+{
+	memset(out, 0, sizeof(*out));
+	if (err && err_len) err[0] = '\0';
 	firmware_zip_close();
+	fs_file_t_init(&s_file);
+	int rc = fs_open(&s_file, zip_path, FS_O_READ);
+	if (rc < 0) {
+		if (err) snprintf(err, err_len, "open %s rc=%d", zip_path, rc);
+		return rc;
+	}
+	s_file_open = true;
+	rc = firmware_zip_resolve(&s_file, out, err, err_len);
+	if (rc < 0) firmware_zip_close();
 	return rc;
 }
 
