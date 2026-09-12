@@ -189,7 +189,9 @@ int ble_scanner_with_radio_paused(int (*fn)(void));
  * Returns nothing because there is nothing useful to say: the caller that owns
  * the scan is the one that learns about it, as -ECANCELED from find_first().
  * Safe to call from any thread, and safe to call when no scan is running — the
- * flag is cleared at the start of the next find_first().
+ * scan-local flag is cleared at the start of the next search. The runner's
+ * Stop latch is checked after scanner setup, so cancellation during connection
+ * cleanup or semaphore initialization is still honored by that search.
  *
  * A scan with `timeout_ms == 0` waits K_FOREVER, which is the normal setting
  * for drone use. Without this there is no way to end one short of a reboot.

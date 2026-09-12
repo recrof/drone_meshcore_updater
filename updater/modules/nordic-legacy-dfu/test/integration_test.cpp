@@ -21,6 +21,10 @@ static std::vector<bt_conn_cb *> callbacks;
 static std::vector<uint8_t> init;
 static int scan_result;
 static bool scan_dfu;
+enum class MtuOutcome { Disabled, Success, Rejected, Timeout, Cancelled, Disconnected };
+static MtuOutcome mtu_outcome;
+static bt_gatt_exchange_params *pending_mtu;
+static unsigned mtu_calls, subscriptions, subscription_completions;
 static const bt_uuid_16 secure_service = {{BT_UUID_TYPE_16}, 0xfe59};
 static const bt_uuid_128 legacy_service = {{BT_UUID_TYPE_128},
 	{0x23,0xd1,0xbc,0xea,0x5f,0x78,0x23,0x15,0xde,0xef,0x12,0x12,0x30,0x15,0,0}};
@@ -47,6 +51,10 @@ int bt_conn_get_info(bt_conn *c, bt_conn_info *i) {
 int bt_conn_disconnect(bt_conn *c, uint8_t reason) {
 	pending_connect = false; c->state = BT_CONN_STATE_DISCONNECTED;
 	for (auto *cb : callbacks) if (cb->disconnected) cb->disconnected(c, reason);
+	if (pending_mtu) {
+		auto *p = pending_mtu; pending_mtu = nullptr;
+		p->func(c, 0x0e, p); // The outstanding ATT request is released on teardown.
+	}
 	return 0;
 }
 int bt_conn_le_create(const bt_addr_le_t *, const bt_conn_le_create_param *,
@@ -74,7 +82,17 @@ int bt_gatt_discover(bt_conn *c, bt_gatt_discover_params *p) {
 	p->func(c, nullptr, p);
 	fake_event("discovery"); return 0;
 }
-int bt_gatt_subscribe(bt_conn *c, bt_gatt_subscribe_params *p) { p->subscribe(c,0,p); return 0; }
+int bt_gatt_subscribe(bt_conn *c, bt_gatt_subscribe_params *p) {
+	++subscriptions;
+	if (pending_mtu) {
+		// Reproduce the old race: MTU completes only after the client has
+		// moved on to CCC. Its semaphore signal must not authorize START.
+		auto *mtu = pending_mtu; pending_mtu = nullptr;
+		mtu->func(c, 0, mtu);
+		return 0; // The subscription's own CCC response has not arrived.
+	}
+	++subscription_completions; p->subscribe(c,0,p); return 0;
+}
 int bt_gatt_unsubscribe(bt_conn *, bt_gatt_subscribe_params *) { return 0; }
 int bt_gatt_write(bt_conn *c, bt_gatt_write_params *p) {
 	++writes;
@@ -85,7 +103,21 @@ int bt_gatt_write(bt_conn *c, bt_gatt_write_params *p) {
 int bt_gatt_read(bt_conn *c, bt_gatt_read_params *p) {
 	const uint8_t v[] = {5,0}; p->func(c,0,p,v,2); p->func(c,0,p,nullptr,0); return 0;
 }
-int bt_gatt_exchange_mtu(bt_conn *c, bt_gatt_exchange_params *p) { p->func(c,0,p); return 0; }
+int bt_gatt_exchange_mtu(bt_conn *c, bt_gatt_exchange_params *p) {
+	++mtu_calls;
+	switch (mtu_outcome) {
+	case MtuOutcome::Timeout:
+		pending_mtu = p; return 0;
+	case MtuOutcome::Cancelled:
+		stopped = true; dfu_client_abort(); return 0;
+	case MtuOutcome::Disconnected:
+		bt_conn_disconnect(c, BT_HCI_ERR_REMOTE_USER_TERM_CONN); return 0;
+	case MtuOutcome::Rejected:
+		p->func(c, 0x06, p); return 0; // Completed ATT Request Not Supported.
+	default:
+		p->func(c, 0, p); return 0;
+	}
+}
 uint16_t bt_gatt_get_mtu(bt_conn *) { return 247; }
 int bt_gatt_write_without_response_cb(bt_conn *c, uint16_t, const void *, uint16_t,
 				    bool, void (*cb)(bt_conn *, void *), void *u) {
@@ -109,19 +141,46 @@ int ble_scanner_find_pinned(ble_scanner_target *, uint32_t, const bt_addr_le_t *
 void ble_scanner_cancel() {}
 }
 
-static dfu_result run(bool secure_package, bool secure_target, const char *stage = "")
+static dfu_result run(bool secure_package, bool secure_target, const char *stage = "",
+		      MtuOutcome mtu = MtuOutcome::Disabled)
 {
 	stopped = false; stop_at = stage; writes = creates = discoveries = 0; secure_peer = secure_target;
+	mtu_outcome = mtu; pending_mtu = nullptr;
+	mtu_calls = subscriptions = subscription_completions = 0;
 	// Unsigned Secure Packet(Command(INIT, InitCommand(app_size=1024))).
 	init = secure_package ? std::vector<uint8_t>{10,7,8,1,18,3,56,128,8} : std::vector<uint8_t>(12,0);
 	firmware_bundle b{}; b.type = FW_TYPE_APPLICATION; b.bin.size = 1024;
 	b.dat.size = uint32_t(init.size()); b.dat.data_offset = 1;
 	ble_scanner_target target{}; app_config cfg{};
+	cfg.high_mtu = mtu != MtuOutcome::Disabled;
 	if (stop_at == "before-run") stopped = true;
 	return dfu_client_run(&target,&b,&cfg);
 }
+
+static void test_mtu_setup(bool secure)
+{
+	// An unfinished MTU exchange must end this attempt before a CCC write,
+	// even if its late completion would wake the shared ATT semaphore.
+	assert(run(secure,secure,"",MtuOutcome::Timeout) == DFU_TIMEOUT);
+	assert(mtu_calls == 1 && subscriptions == 0 && writes == 0);
+	assert(run(secure,secure,"",MtuOutcome::Cancelled) == DFU_CANCELLED);
+	assert(mtu_calls == 1 && subscriptions == 0 && writes == 0);
+	assert(run(secure,secure,"",MtuOutcome::Disconnected) == DFU_DISCONNECTED_EARLY);
+	assert(mtu_calls == 1 && subscriptions == 0 && writes == 0);
+	// Both a negotiated MTU and a completed rejection may proceed, but
+	// only after receiving the subscription's own successful completion.
+	for (MtuOutcome outcome : {MtuOutcome::Success, MtuOutcome::Rejected}) {
+		assert(run(secure,secure,"",outcome) == DFU_CANCELLED); // Stop at first DFU command.
+		assert(mtu_calls == 1 && subscriptions == 1 && subscription_completions == 1);
+		assert(writes == 1);
+	}
+}
 int main()
 {
+	test_mtu_setup(false);
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+	test_mtu_setup(true);
+#endif
 	assert(run(true,false) == DFU_BAD_PACKAGE); assert(writes == 0);
 #if defined(CONFIG_NORDIC_SECURE_DFU)
 	assert(run(false,true) == DFU_BAD_PACKAGE); assert(writes == 0);
@@ -157,5 +216,5 @@ int main()
 	}
 	scan_result = -ECANCELED;
 	assert(dfu_transport_ble.verify(&target,&cfg) == DFU_CANCELLED);
-	puts("Real adapter/GATT: wrong packages, setup Stop races, fresh run and boot verification passed");
+	puts("Real adapter/GATT: MTU timeout/rejection, wrong packages, setup Stop races, fresh run and boot verification passed");
 }

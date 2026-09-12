@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Configure with sanitizers
         run: >-
-          cmake -S updater/modules/nordic-legacy-dfu/test -B build_secure_test
+          cmake -S updater/tests -B build_secure_test
           -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
           -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
       - run: cmake --build build_secure_test

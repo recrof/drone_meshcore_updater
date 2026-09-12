@@ -259,7 +259,7 @@ static void inspect_zip(struct fs_file_t *f, const char *path,
 
 	/* One pass to find and verify everything. The CRC is the expensive
 	 * part and is what makes this O(size). */
-	while (entries < 32) {
+	while (true) {
 		uint32_t next;
 		int rc = firmware_zip_next(f, cursor, &e, &next);
 		if (rc < 0) {
@@ -268,6 +268,11 @@ static void inspect_zip(struct fs_file_t *f, const char *path,
 			return;
 		}
 		if (rc == 1) break;
+		if (entries >= ZIP_ENTRY_MAX) {
+			snprintf(out->reason, sizeof(out->reason),
+				 "more than %u ZIP entries", ZIP_ENTRY_MAX);
+			return;
+		}
 		entries++;
 
 		if (e.streamed) {

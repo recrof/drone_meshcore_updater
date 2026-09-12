@@ -21,6 +21,11 @@ disconnect/resume are verified on the XIAO nRF52840 → RAK3401 test setup.
   is positively verified; never reflash based only on advertising or silence.
 - Add native integration tests for both protocol configurations and update the
   status display, wire result mapping and offline web cache together.
+- Retain the selected target and transport across retries; allow only one
+  protocol-authorized application/bootloader address transition. Stop unsafe
+  WiFi retries until that transport supports identity-safe reacquisition.
+- Preserve Stop across scanner initialization, abort Legacy setup on pending
+  MTU failures, and reject ZIP offset overflow, invalid bounds and entry loops.
 
 ## Verification checklist
 
@@ -40,10 +45,14 @@ disconnect/resume are verified on the XIAO nRF52840 → RAK3401 test setup.
   flash, interruption and CRC-verified resume from byte 139,264; independent
   application/bootloader readbacks and running-application checks passed.
 
-The revised Secure-enabled XIAO application uses 369,792 bytes of flash and 120,880
-bytes of RAM with NCS 3.4.0. Firmware was built on Linux; the Windows check is
-the native protocol suite, not a Windows Zephyr build. Other sender boards
-and stock Nordic signed receivers have not been hardware-qualified here.
+The latest logic-fix build uses 370,596 bytes of flash and 120,880 bytes of RAM
+with NCS 3.4.0. All 29 aggregated native tests pass on Windows and Linux
+(ASan/UBSan), both Linux firmware configurations build, and all 28 Linux web
+test files pass. These latest fixes have not been flashed or hardware-qualified;
+the hardware results above apply to the preceding safety-follow-up build.
+See the [logic-fix record](secure-dfu-logic-tests.md). Windows verification is
+native testing, not a Windows Zephyr build. Other sender boards and stock
+Nordic signed receivers have not been hardware-qualified here.
 
 See the [qualification record](secure-dfu-qualification.md): the final build
 resumed at byte 135,168 (23.19%), sent only the remaining 447,660 bytes, and

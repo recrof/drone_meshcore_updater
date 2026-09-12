@@ -14,6 +14,7 @@
  */
 
 #include "ble_scanner.h"
+#include "dfu_runner.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -320,6 +321,16 @@ static int scan_and_wait(uint32_t timeout_ms)
 	atomic_set(&s_radio, RADIO_FIND);
 
 	atomic_clear(&s_cancel);
+	/* Scanner-local cancellation is per scan, but Stop belongs to the
+	 * entire DFU run. It may have arrived during stale-link cleanup or
+	 * while the semaphore was being armed above. Check the run latch
+	 * after the last reset: a later Stop gives this now-ready semaphore,
+	 * so even an unlimited wait cannot lose the wake-up. */
+	if (dfu_runner_cancelled()) {
+		atomic_set(&s_radio, RADIO_IDLE);
+		k_mutex_unlock(&s_radio_lock);
+		return -ECANCELED;
+	}
 	s_ctx.found = false;
 	s_ctx.debug = s_debug;
 	memset(&s_ctx.match, 0, sizeof(s_ctx.match));
@@ -350,7 +361,7 @@ static int scan_and_wait(uint32_t timeout_ms)
 
 	/* Checked before rc, because a cancel wakes the semaphore exactly as a
 	 * match does — rc is 0 either way and s_ctx.match is stale. */
-	if (atomic_get(&s_cancel)) {
+	if (atomic_get(&s_cancel) || dfu_runner_cancelled()) {
 		LOG_INF("scan cancelled");
 		return -ECANCELED;
 	}

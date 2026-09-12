@@ -223,9 +223,9 @@ dfu_result to_dfu_result(const Report &r)
 	case Result::Success:
 		return DFU_OK;
 
-	/* All three mean "the target rebooted, find it again and re-run".
-	 * dfu_runner treats DFU_BUTTONLESS_TRIGGERED as a rescan that does
-	 * not consume a retry, which is what each of these wants.
+	/* All three need a rescan, but only a buttonless report explicitly
+	 * permitting an address change may broaden it to the bootloader's +1.
+	 * An invalid-state RESET must never authorize a different peer.
 	 *
 	 * ApplicationPending strictly wants the next run to send the
 	 * application alone. Our bundles are single-image in practice, so
@@ -233,9 +233,10 @@ dfu_result to_dfu_result(const Report &r)
 	 * ever used, this is the place that needs to remember it.
 	 */
 	case Result::JumpedToBootloader:
+		return r.address_may_change ? DFU_BUTTONLESS_TRIGGERED : DFU_RESTART_REQUIRED;
 	case Result::RestartRequired:
 	case Result::ApplicationPending:
-		return DFU_BUTTONLESS_TRIGGERED;
+		return DFU_RESTART_REQUIRED;
 
 	case Result::ServiceNotFound:        return DFU_SERVICE_MISSING;
 	case Result::CharacteristicNotFound: return DFU_CHAR_MISSING;

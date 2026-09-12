@@ -349,6 +349,13 @@ file a bug about.
 
 The `config.txt` file on `/lfs1/` holds the scan filter, the retry policy, and the transfer tuning. It is reloaded on every retry attempt, so edits apply mid-run. Every key is documented in the web client's Config dialog, which is generated from the same schema the firmware parses; `web/js/lib/config-file.js` is the single list. On first boot the file is seeded with sensible defaults if absent.
 
+Once a target is selected, retries keep that device, transport, and firmware
+bundle. BLE retries use its exact address; one protocol-directed buttonless
+transition may use the original application address or its +1 bootloader
+address. Current WiFi transports cannot reacquire a verified physical identity,
+so a failed WiFi transfer stops after the first attempt instead of selecting
+another same-SSID target. Starting a new run makes a new target selection.
+
 Two keys are worth knowing about before a flight. **`auto_flash`** starts a
 flash the moment the device has power, with no browser connected and nothing to
 press — this is the setting that makes the device work at the far end of a

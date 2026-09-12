@@ -24,6 +24,8 @@ extern "C" {
 
 
 #define ZIP_NAME_MAX 64
+/* Bound both upload inspection and manifest entry lookup. */
+#define ZIP_ENTRY_MAX 32
 
 /* Bit flags matching the Nordic Legacy DFU "Start" opcode's mode byte
  * (see LegacyDfuImpl.java). Combined images set multiple bits.
@@ -92,7 +94,9 @@ int firmware_zip_read_at(struct fs_file_t *f, uint32_t off, void *buf, uint32_t 
 
 /* Read the local file header at `cursor`. Returns 0 and fills `out` and
  * `next_cursor`; 1 at the end of the header sequence; negative errno on IO
- * error. Unlike the streaming path this does NOT reject compressed or
+ * error or invalid entry bounds/STORE sizes. Successful entries always make
+ * forward progress and fit inside the archive. Unlike the streaming path
+ * this does NOT reject compressed or
  * streamed entries — it reports them, so a caller can say which entry is the
  * problem instead of only that there is one. */
 int firmware_zip_next(struct fs_file_t *f, uint32_t cursor,

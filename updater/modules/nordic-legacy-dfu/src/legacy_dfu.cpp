@@ -452,6 +452,12 @@ Failure Session::open(bt_conn *conn, PeerMode *mode)
 	 * then notifications. */
 	if (params_.mtu != 0) {
 		rc = link_.exchange_mtu(params_.mtu);
+		/* Only a completed rejection may fall back to the current MTU.
+		 * An unfinished exchange still owns the shared ATT completion
+		 * semaphore: its late callback must not complete the CCC write. */
+		if (rc == -ETIMEDOUT || rc == -ECANCELED || rc == -ENOTCONN) {
+			return map_gatt(rc);
+		}
 		if (rc != 0) {
 			LOG_WRN("MTU exchange failed (%d), continuing at the current MTU", rc);
 		}

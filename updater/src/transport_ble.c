@@ -20,6 +20,7 @@
 #include <stdio.h>
 
 #include "dfu_transport.h"
+#include "dfu_runner.h"
 #include "pin_addr.h"
 #include <zephyr/sys/__assert.h>
 
@@ -211,7 +212,43 @@ static int ble_find(struct dfu_target *out, const struct app_config *cfg,
 		return rc;
 	}
 	snprintf(out->name, sizeof(out->name), "%s", out->ble.name);
+	if (pin != NULL && pin[0] != '\0') {
+		snprintf(out->retry_pin, sizeof(out->retry_pin), "%s", pin);
+	} else {
+		bt_addr_le_to_str(&out->ble.addr, out->retry_pin, sizeof(out->retry_pin));
+	}
 	return 0;
+}
+
+static int ble_find_same(struct dfu_target *out, const struct dfu_target *previous,
+			 const struct app_config *cfg, uint32_t timeout_ms,
+			 bool bootloader_transition)
+{
+	if (bootloader_transition) {
+		/* Keep the original pin even when its +1 address was the first
+		 * match. Re-basing it on each retry could eventually reach +2. */
+		return ble_find(out, cfg, timeout_ms, previous->retry_pin);
+	}
+
+	ble_reset_stale_links();
+	const uint32_t started = k_uptime_get_32();
+	for (;;) {
+		if (dfu_runner_cancelled()) return -ECANCELED;
+		uint32_t slice = 10000;
+		if (timeout_ms != 0) {
+			const uint32_t spent = k_uptime_get_32() - started;
+			if (spent >= timeout_ms) return -ETIMEDOUT;
+			slice = MIN(slice, timeout_ms - spent);
+		}
+		/* seen_at is exact and deliberately bounded. Repeating its
+		 * window preserves scan_timeout=0 without broadening identity. */
+		int rc = ble_scanner_seen_at(&previous->ble.addr, slice, &out->ble);
+		if (rc == -ETIMEDOUT) continue;
+		if (rc < 0) return rc;
+		snprintf(out->name, sizeof(out->name), "%s", out->ble.name);
+		snprintf(out->retry_pin, sizeof(out->retry_pin), "%s", previous->retry_pin);
+		return 0;
+	}
 }
 
 static enum dfu_result ble_run(const struct dfu_target *t,
@@ -303,6 +340,7 @@ const struct dfu_transport dfu_transport_ble = {
 	.name = "ble-legacy-dfu",
 	.available = NULL,           /* the radio is always there */
 	.find = ble_find,
+	.find_same = ble_find_same,
 	.run = ble_run,
 	.payload_kind = DFU_PAYLOAD_ZIP,
 	.verify = ble_verify,

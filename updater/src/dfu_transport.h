@@ -59,6 +59,7 @@ extern "C" {
  * that lands here: "<node name> (Seeed SenseCAP MeshTracker X1)". A BLE
  * advertised name is at most BLE_SCANNER_NAME_MAX and fits easily. */
 #define DFU_TARGET_NAME_MAX 64
+#define DFU_TARGET_PIN_MAX 40
 
 struct dfu_transport;
 
@@ -69,6 +70,9 @@ struct dfu_target {
 	 * the `id` field of GET /update/identity, which carries the board in
 	 * parentheses — "MyRepeater (Heltec V3)". */
 	char name[DFU_TARGET_NAME_MAX];
+	/* Immutable origin for a permitted application -> bootloader address
+	 * transition. A retry must not derive another +1 from the last +1 match. */
+	char retry_pin[DFU_TARGET_PIN_MAX + 1];
 
 	union {
 		struct ble_scanner_target ble;
@@ -133,6 +137,16 @@ struct dfu_transport {
 	 */
 	int (*find)(struct dfu_target *out, const struct app_config *cfg,
 		    uint32_t timeout_ms, const char *pin);
+
+	/* Find only the already selected peer, never another matching device.
+	 * The runner also retains this transport for the rest of the run.
+	 * `bootloader_transition` permits one protocol-directed application ->
+	 * bootloader transition; ordinary retries require the exact last peer.
+	 * NULL means identity-safe reacquisition is unsupported: the runner
+	 * fails closed instead of risking a different target with this bundle. */
+	int (*find_same)(struct dfu_target *out, const struct dfu_target *previous,
+			 const struct app_config *cfg, uint32_t timeout_ms,
+			 bool bootloader_transition);
 
 	/* Flash `bundle` into the peer find() reported. Blocks for the whole
 	 * transfer — the runner has its own thread for exactly this. */

@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.16)
+project(dfu_safety_tests LANGUAGES C CXX)
+enable_testing()
+add_subdirectory(../modules/nordic-legacy-dfu/test nordic_dfu)
+add_subdirectory(ble_scanner)
+add_subdirectory(firmware_zip)
+add_subdirectory(runner)

@@ -30,6 +30,8 @@ LOG_MODULE_REGISTER(firmware_zip, LOG_LEVEL_INF);
 #define ZIP_LFH_SIG  0x04034B50u
 /* Central Directory Header signature — we stop when we see this. */
 #define ZIP_CD_SIG   0x02014B50u
+/* An empty archive has an end-of-central-directory record but no CD. */
+#define ZIP_END_SIG  0x06054B50u
 
 /* Single open archive. Not re-entrant: one DFU runs at a time. */
 static struct fs_file_t s_file;
@@ -70,20 +72,34 @@ static uint32_t rd_u32(const uint8_t *p)
 
 /* ---- ZIP walk / find ------------------------------------------------- */
 /* Read the next Local File Header at `cursor` and populate `out`.
- * Returns 0 on success, 1 on end-of-LFH-sequence (hit CD or unknown sig),
- * negative errno on IO error or unsupported compression.
+ * Returns 0 on success, 1 on end-of-LFH-sequence (hit CD or EOCD),
+ * negative errno on IO error or malformed entry bounds.
  */
 int firmware_zip_next(struct fs_file_t *f, uint32_t cursor,
 		      struct zip_entry *out, uint32_t *next_cursor)
 {
-	/* LFH header is 30 bytes; read it in one shot. */
+	/* Treat every size as untrusted. In particular, adding csize to the
+	 * data offset can wrap back onto this header and make zip_find loop
+	 * forever. Bound each addition by the actual file length first. */
+	int rc = fs_seek(f, 0, FS_SEEK_END);
+	if (rc < 0) return rc;
+	off_t end = fs_tell(f);
+	if (end < 0) return (int)end;
+	if ((uint64_t)end > UINT32_MAX) return -EFBIG;
+	uint32_t file_size = (uint32_t)end;
+	if (cursor > file_size || file_size - cursor < 4) return -EINVAL;
+
 	uint8_t hdr[30];
-	int rc = firmware_zip_read_at(f, cursor, hdr, sizeof(hdr));
+	rc = firmware_zip_read_at(f, cursor, hdr, 4);
 	if (rc < 0) return rc;
 
 	uint32_t sig = rd_u32(&hdr[0]);
-	if (sig == ZIP_CD_SIG) return 1;    /* end of LFHs */
-	if (sig != ZIP_LFH_SIG) return 1;   /* corrupt / unknown */
+	if (sig == ZIP_CD_SIG) return file_size - cursor >= 46 ? 1 : -EINVAL;
+	if (sig == ZIP_END_SIG) return file_size - cursor >= 22 ? 1 : -EINVAL;
+	if (sig != ZIP_LFH_SIG) return -EINVAL;
+	if (file_size - cursor < sizeof(hdr)) return -EINVAL;
+	rc = firmware_zip_read_at(f, cursor, hdr, sizeof(hdr));
+	if (rc < 0) return rc;
 
 	uint16_t flags    = rd_u16(&hdr[6]);
 	uint16_t method   = rd_u16(&hdr[8]);
@@ -92,6 +108,13 @@ int firmware_zip_next(struct fs_file_t *f, uint32_t cursor,
 	uint32_t usize    = rd_u32(&hdr[22]);
 	uint16_t namelen  = rd_u16(&hdr[26]);
 	uint16_t extralen = rd_u16(&hdr[28]);
+	uint32_t header_size = 30u + namelen + extralen;
+	if (header_size > file_size - cursor) return -EINVAL;
+	uint32_t data_offset = cursor + header_size;
+	if (csize > file_size - data_offset) return -EINVAL;
+	/* For STORE the same bytes are both compressed and uncompressed.
+	 * Descriptor entries are reported below for the inspector to explain. */
+	if (method == 0 && !(flags & 0x0008u) && csize != usize) return -EINVAL;
 
 	/* Compression is *reported*, not rejected here. firmware_zip_open()
 	 * still refuses anything but STORE — see below — but an inspector has
@@ -114,7 +137,7 @@ int firmware_zip_next(struct fs_file_t *f, uint32_t cursor,
 	out->name[nread] = '\0';
 	out->name_len = namelen;
 
-	out->data_offset = cursor + 30 + namelen + extralen;
+	out->data_offset = data_offset;
 	out->size        = usize;
 	out->comp_size   = csize;
 	*next_cursor     = out->data_offset + csize;
@@ -125,26 +148,28 @@ int firmware_zip_next(struct fs_file_t *f, uint32_t cursor,
 static int zip_find(const char *name, struct zip_entry *out)
 {
 	uint32_t cursor = 0;
+	unsigned entries = 0;
 	while (true) {
 		uint32_t next;
 		int rc = firmware_zip_next(&s_file, cursor, out, &next);
 		if (rc < 0) return rc;
 		if (rc == 1) return -ENOENT;    /* end reached */
-		if (strcmp(out->name, name) == 0) {
-			/* The check that used to live in the walker. Kept on
-			 * this path because streaming is what cannot cope. */
-			if (out->method != 0) {
-				LOG_ERR("%s uses compression method %u "
-					"(only STORE=0 supported)", name, out->method);
-				return -ENOTSUP;
-			}
-			if (out->streamed) {
-				LOG_ERR("%s stores its size in a trailing "
-					"descriptor; header size is unusable", name);
-				return -ENOTSUP;
-			}
-			return 0;
+		if (++entries > ZIP_ENTRY_MAX) return -E2BIG;
+		/* Apply these to every entry, not only a matching one. A streamed
+		 * entry has no trustworthy next offset, and truncating its name
+		 * must not let it masquerade as another entry. */
+		if (out->name_len >= ZIP_NAME_MAX || next <= cursor) return -EINVAL;
+		if (out->method != 0) {
+			LOG_ERR("%s uses compression method %u "
+				"(only STORE=0 supported)", out->name, out->method);
+			return -ENOTSUP;
 		}
+		if (out->streamed) {
+			LOG_ERR("%s stores its size in a trailing "
+				"descriptor; header size is unusable", out->name);
+			return -ENOTSUP;
+		}
+		if (strcmp(out->name, name) == 0) return 0;
 		cursor = next;
 	}
 }
@@ -240,7 +265,7 @@ static uint8_t detect_section(const char *buf, size_t buf_len,
 		const char *p = find_quoted_key(buf, buf_len, sections[i].name);
 		if (!p) continue;
 		p = skip_ws_colon(p, buf + buf_len);
-		if (!p || *p != '{') continue;
+		if (!p || p >= buf + buf_len || *p != '{') continue;
 
 		/* Scope subsequent key lookups to this section's braces. */
 		int depth = 1;
@@ -250,6 +275,7 @@ static uint8_t detect_section(const char *buf, size_t buf_len,
 			else if (*end == '}') depth--;
 			end++;
 		}
+		if (depth != 0) continue;
 		*section_body_start = p;
 		*section_body_len   = (size_t)(end - p);
 		return sections[i].type;
@@ -369,7 +395,8 @@ int firmware_zip_read(const struct zip_entry *entry, uint32_t offset,
 {
 	if (!s_file_open) return -EINVAL;
 	if (offset >= entry->size) return 0;
-	if (offset + len > entry->size) len = entry->size - offset;
+	if (len > entry->size - offset) len = entry->size - offset;
+	if (entry->data_offset > UINT32_MAX - offset) return -EINVAL;
 	int rc = fs_seek(&s_file, entry->data_offset + offset, FS_SEEK_SET);
 	if (rc < 0) return rc;
 	return fs_read(&s_file, buf, len);

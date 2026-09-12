@@ -78,14 +78,14 @@ claiming verified success. There is no image-specific BLE boot verifier yet.
 Use the matching updated web client (offline cache v23) to see this result's
 label. The wire layout and all previous enum values are unchanged.
 
-## Native protocol tests
+## Native protocol and safety tests
 
 No Zephyr SDK, Bluetooth adapter or hardware is needed:
 
 ```sh
-cmake -S updater/modules/nordic-legacy-dfu/test -B build_secure_test
-cmake --build build_secure_test
-ctest --test-dir build_secure_test --output-on-failure
+cmake -S updater/tests -B build_safety_test
+cmake --build build_safety_test
+ctest --test-dir build_safety_test --output-on-failure
 ```
 
 The test target models the object protocol and retains state across simulated
@@ -100,6 +100,11 @@ BLE verifier against deterministic OS/Bluetooth stubs. They inject Stop during
 connection, attach, discovery and fallback, check mismatches produce zero DFU
 writes, and exercise uncertain post-upload scan outcomes. These are not radio
 or Zephyr scheduler tests.
+The aggregated suite also compiles the real runner, BLE reacquisition logic,
+scanner, ZIP walker and inspector against deterministic boundaries. It covers
+same-device retries, Stop during scanner initialization, pending MTU failures,
+and malformed ZIP bounds/loop prevention. See the
+[logic-fix verification record](secure-dfu-logic-tests.md).
 See the [XIAO/RAK3401 qualification record](secure-dfu-qualification.md) for
 the tested setup, results and remaining coverage limits.
 

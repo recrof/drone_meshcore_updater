@@ -146,7 +146,7 @@ static char             s_path[DFU_PATH_MAX + 1];
 /* The peer the operator picked, opaque to this file — see dfu_transport.h.
  * Empty means the usual search. Sized for "AA:BB:CC:DD:EE:FF (random)" with
  * room to spare, since a future transport may pin something longer. */
-#define DFU_PIN_MAX 40
+#define DFU_PIN_MAX DFU_TARGET_PIN_MAX
 static char             s_pin[DFU_PIN_MAX + 1];
 /* The PIN the operator typed for this one target, empty to fall back to
  * config.txt's `ble_pin`. Sized past a legal passkey deliberately — see
@@ -398,6 +398,10 @@ static void run_thread(void *a, void *b, void *c)
 	}
 
 	uint8_t attempt = 0;
+	struct dfu_target selected;
+	bool have_selected = false;
+	bool transition_pending = false;
+	bool transition_used = false;
 	while (attempt < cfg->retries) {
 		/* Re-read config on *every* attempt, not just once per run.
 		 * A run can span many minutes — five attempts separated by
@@ -436,7 +440,19 @@ static void run_thread(void *a, void *b, void *c)
 			LOG_DBG("scanning for %s targets only",
 				kinds == KIND_BIT(DFU_PAYLOAD_ZIP) ? "packaged" : "raw-image");
 		}
-		rc = find_target(&target, cfg, kinds, s_pin);
+		if (!have_selected) {
+			rc = find_target(&target, cfg, kinds, s_pin);
+		} else if (selected.tp->find_same == NULL) {
+			LOG_ERR("%s cannot reacquire the same target safely; not retrying",
+				selected.tp->name);
+			goto fail;
+		} else {
+			memset(&target, 0, sizeof(target));
+			target.tp = selected.tp;
+			rc = selected.tp->find_same(&target, &selected, cfg,
+				(uint32_t)cfg->scan_timeout * 1000u, transition_pending);
+			transition_pending = false;
+		}
 		if (rc == -ECANCELED || cancelled()) {
 			goto stopped;
 		}
@@ -451,6 +467,10 @@ static void run_thread(void *a, void *b, void *c)
 			goto fail;
 		}
 		dfu_status_target(target.name);
+		/* The file and the physical peer belong to the same run. Keep
+		 * both, including the transport, across failures and mode jumps. */
+		selected = target;
+		have_selected = true;
 
 		/* Resolve the bundle once, from the first peer we find, and
 		 * keep it for the rest of the run. Re-resolving per attempt
@@ -565,7 +585,11 @@ static void run_thread(void *a, void *b, void *c)
 			dfu_status_finish(DFU_STATUS_RESULT_OK);
 			goto done;
 		case DFU_BUTTONLESS_TRIGGERED:
-			LOG_INF("DFU runner: buttonless triggered, rescanning");
+			transition_pending = !transition_used;
+			transition_used = true;
+			/* fall through */
+		case DFU_RESTART_REQUIRED:
+			LOG_INF("DFU runner: target restarting, rescanning selected peer");
 			if (runner_sleep(K_SECONDS(2))) {
 				goto stopped;
 			}

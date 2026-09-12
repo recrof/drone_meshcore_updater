@@ -24,7 +24,7 @@ extern "C" {
 
 enum dfu_result {
 	DFU_OK,                    /* full DFU cycle succeeded, peer rebooted */
-	DFU_BUTTONLESS_TRIGGERED,  /* peer rebooted; rescan and run again */
+	DFU_BUTTONLESS_TRIGGERED,  /* app jumped; bootloader address may be +1 */
 	DFU_CONNECT_FAILED,        /* couldn't hold a connection long enough to talk */
 	DFU_SERVICE_MISSING,       /* connected but peer doesn't expose Legacy DFU service */
 	DFU_CHAR_MISSING,          /* service present but ctrl/packet char absent */
@@ -41,14 +41,16 @@ enum dfu_result {
 	DFU_BAD_PACKAGE,           /* unsupported init format or protocol mismatch; do not retry */
 	DFU_CANCELLED,
 	DFU_BOOT_UNVERIFIED,       /* transfer accepted; expected application not positively verified */
+	DFU_RESTART_REQUIRED,      /* rescan the exact peer; no address transition authorized */
 };
 
 /* Connect to `target`, run one Legacy DFU session, disconnect. Blocks the
  * calling thread for the whole transfer — call it from the DFU runner's
  * thread, never from the BT RX thread or a GATT callback.
  *
- * A buttonless jump returns DFU_BUTTONLESS_TRIGGERED; the caller is expected
- * to rescan and call again without consuming a retry.
+ * A buttonless jump that may change address returns DFU_BUTTONLESS_TRIGGERED.
+ * A same-address jump or protocol restart returns DFU_RESTART_REQUIRED.
+ * Both rescan without consuming a retry, but only the former permits +1.
  *
  * Config mapping: prn -> packets_before_notification, high_mtu -> whether to
  * exchange MTU at all, pkt_gap_ms -> Parameters::packet_interval_us,
