@@ -387,7 +387,7 @@ Failure Session::open(bt_conn *conn, PeerMode *mode)
 {
 	*mode = PeerMode::Unsupported;
 
-	int rc = link_.attach(conn);
+	int rc = link_.attach(conn, params_.cancelled);
 	if (rc != 0) {
 		return map_gatt(rc);
 	}
@@ -451,6 +451,11 @@ Failure Session::open(bt_conn *conn, PeerMode *mode)
 	 * then notifications. */
 	if (params_.mtu != 0) {
 		rc = link_.exchange_mtu(params_.mtu);
+		/* An incomplete ATT operation still owns its completion callback;
+		 * do not let its late completion satisfy the following CCC write. */
+		if (rc == -ETIMEDOUT || rc == -ECANCELED || rc == -ENOTCONN) {
+			return map_gatt(rc);
+		}
 		if (rc != 0) {
 			LOG_WRN("MTU exchange failed (%d), continuing at the current MTU", rc);
 		}

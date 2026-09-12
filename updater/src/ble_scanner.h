@@ -196,6 +196,16 @@ int ble_scanner_with_radio_paused(int (*fn)(void));
  */
 void ble_scanner_cancel(void);
 
+/* Run-scoped variants. NULL keeps ordinary scanning independent from an
+ * earlier DFU Stop. The callback stays valid throughout the blocking call. */
+int ble_scanner_find_first_cancellable(struct ble_scanner_target *out,
+	uint32_t timeout_ms, const char *name_filter, int8_t min_rssi,
+	const bt_addr_le_t *prefer_mac, bool (*cancelled)(void));
+int ble_scanner_find_pinned_cancellable(struct ble_scanner_target *out,
+	uint32_t timeout_ms, const bt_addr_le_t *addr, bool (*cancelled)(void));
+int ble_scanner_seen_at_cancellable(const bt_addr_le_t *addr,
+	uint32_t timeout_ms, struct ble_scanner_target *out, bool (*cancelled)(void));
+
 #ifdef __cplusplus
 }
 #endif

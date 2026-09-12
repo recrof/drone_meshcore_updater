@@ -55,7 +55,7 @@ enum dfu_result {
  */
 enum dfu_result dfu_client_run(const struct ble_scanner_target *target,
 			       const struct firmware_bundle *bundle,
-			       const struct app_config *cfg);
+				   const struct app_config *cfg, bool (*cancelled)(void));
 
 /* Make a dfu_client_run() that is in progress give up as soon as it can.
  *

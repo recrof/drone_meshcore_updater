@@ -14,6 +14,8 @@ concurrency:
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths: ['updater/**', 'web/**', '.github/workflows/build.yml']
   push:
     tags:
       # Release tags are vX.XX (v1.0, v1.02). Note that a tag filter too
@@ -31,7 +33,34 @@ on:
     types: [published]
 
 jobs:
+  native:
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Configure native tests with sanitizers
+        run: >-
+          cmake -S updater/tests -B build_native
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+      - run: cmake --build build_native --parallel
+      - run: ctest --test-dir build_native --output-on-failure
+      - name: Firmware and browser ZIP semantics agree
+        env:
+          DFU_ZIP_PROBE: build_native/firmware_zip/firmware_zip_probe
+        run: node web/test/zip-parity.test.mjs
+      - run: node web/test/workflows.test.mjs
+
   build:
+    if: github.event_name != 'pull_request' && (github.event_name != 'push' || startsWith(github.ref, 'refs/tags/'))
     # Nordic's official NCS toolchain container has west + the ARM
     # cross-compiler + all Python deps pre-installed, so we skip the
     # per-run west init dance.
@@ -352,6 +381,7 @@ jobs:
   # S3, RISC-V on the C5 — but both toolchains come from the one SDK install
   # below, so that is not what splits the jobs.
   build-esp32:
+    if: github.event_name != 'pull_request' && (github.event_name != 'push' || startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
     strategy:
       # Same reasoning as the Nordic matrix: one board's failure must not
@@ -513,7 +543,7 @@ jobs:
   # attaching them in one step also means a release is never half-populated
   # while a board is still compiling.
   release:
-    needs: [build, build-esp32]
+    needs: [native, build, build-esp32]
     # `!cancelled()` rather than the default "all needs succeeded".
     #
     # The matrix already says a board's failure must not cancel the others,
@@ -522,7 +552,7 @@ jobs:
     # A release carrying two of three boards is worth having, and which board
     # is missing is visible in the run. The empty-output guard below is what
     # stops this creating a release with nothing in it.
-    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/') }}
+    if: ${{ !cancelled() && needs.native.result == 'success' && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     steps:
       - name: Collect every board's artifacts

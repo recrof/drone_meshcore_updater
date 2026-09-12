@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.16)
+project(updater_native_tests LANGUAGES C CXX)
+enable_testing()
+add_subdirectory(firmware_zip)
+add_subdirectory(fsx_stream)
+add_subdirectory(gatt_lifetime)
+add_subdirectory(ble_scanner)
+add_subdirectory(runner)

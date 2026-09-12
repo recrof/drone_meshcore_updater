@@ -174,7 +174,7 @@ static void ble_reset_stale_links(void)
 }
 
 static int ble_find(struct dfu_target *out, const struct app_config *cfg,
-		    uint32_t timeout_ms, const char *pin)
+		    uint32_t timeout_ms, const char *pin, bool (*cancelled)(void))
 {
 	int rc;
 
@@ -202,10 +202,10 @@ static int ble_find(struct dfu_target *out, const struct app_config *cfg,
 			LOG_ERR("cannot parse pinned address '%s'", pin);
 			return -EINVAL;
 		}
-		rc = ble_scanner_find_pinned(&out->ble, timeout_ms, &addr);
+		rc = ble_scanner_find_pinned_cancellable(&out->ble, timeout_ms, &addr, cancelled);
 	} else {
-		rc = ble_scanner_find_first(&out->ble, timeout_ms, cfg->ble_name,
-					    cfg->min_rssi, NULL);
+		rc = ble_scanner_find_first_cancellable(&out->ble, timeout_ms, cfg->ble_name,
+					    cfg->min_rssi, NULL, cancelled);
 	}
 	if (rc < 0) {
 		return rc;
@@ -216,7 +216,7 @@ static int ble_find(struct dfu_target *out, const struct app_config *cfg,
 
 static enum dfu_result ble_run(const struct dfu_target *t,
 			       const struct dfu_payload *payload,
-			       const struct app_config *cfg)
+			       const struct app_config *cfg, bool (*cancelled)(void))
 {
 	/* The runner checks payload_kind before calling, so this is a
 	 * programming error rather than a bad file. Streaming a bare image at
@@ -224,7 +224,7 @@ static enum dfu_result ble_run(const struct dfu_target *t,
 	 * until VALIDATE. */
 	__ASSERT(payload->kind == DFU_PAYLOAD_ZIP,
 		 "BLE transport handed a non-zip payload");
-	return dfu_client_run(&t->ble, &payload->zip, cfg);
+	return dfu_client_run(&t->ble, &payload->zip, cfg, cancelled);
 }
 
 /*
@@ -282,7 +282,7 @@ static enum dfu_result ble_run(const struct dfu_target *t,
 #define VERIFY_WATCH_MS  5000
 
 static enum dfu_result ble_verify(const struct dfu_target *t,
-				  const struct app_config *cfg)
+				  const struct app_config *cfg, bool (*cancelled)(void))
 {
 	struct ble_scanner_target seen;
 
@@ -290,7 +290,7 @@ static enum dfu_result ble_verify(const struct dfu_target *t,
 
 	k_sleep(K_MSEC(VERIFY_SETTLE_MS));
 
-	int rc = ble_scanner_seen_at(&t->ble.addr, VERIFY_WATCH_MS, &seen);
+	int rc = ble_scanner_seen_at_cancellable(&t->ble.addr, VERIFY_WATCH_MS, &seen, cancelled);
 
 	if (rc == -ETIMEDOUT) {
 		LOG_INF("verify: %s is off the air — the new image is running",

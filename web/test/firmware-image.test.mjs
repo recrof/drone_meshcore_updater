@@ -61,6 +61,7 @@ function buildZip(files) {
       ...u16(name.length), ...u16(0),
       ...name, ...f.data);
   }
+  out.push(...u32(0x06054b50), ...Array(18).fill(0));
   return Uint8Array.from(out);
 }
 
@@ -101,7 +102,7 @@ function nordicPackage(over = {}) {
   /* A single flipped byte, with the header CRC left alone — which is exactly
    * what a truncated or mangled download looks like. */
   const z = nordicPackage();
-  const at = z.length - 12;
+  const at = walkZip(z).find(e => e.name === "app.dat").offset + 2;
   z[at] ^= 0xff;
   const rep = inspectFirmware(z, { name: "rak4631.zip" });
   t("a flipped byte fails the CRC", has(rep, "zip-crc"), codes(rep));
@@ -117,7 +118,7 @@ function nordicPackage(over = {}) {
   t("a streamed entry is refused", has(rep, "zip-streamed"), codes(rep));
 }
 {
-  /* 64 is ZIP_NAME_MAX in firmware_zip.h; the device truncates to 63. */
+  /* 64 is ZIP_NAME_MAX in firmware_zip.h; names need a terminator too. */
   const long = "a".repeat(70) + ".bin";
   const z = buildZip([
     { name: "manifest.json", data: enc(JSON.stringify({ manifest: { application: { bin_file: long, dat_file: "a.dat" } } })) },
