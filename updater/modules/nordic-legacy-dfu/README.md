@@ -9,7 +9,11 @@ failure handling. Where the Java could not be followed literally, the
 difference is listed under [Deviations](#deviations-from-the-java) — there are
 five, and all of them are transport-level.
 
-Secure DFU and the SDK 12+ buttonless services are **not** implemented. Legacy
+Secure DFU is optional (`CONFIG_NORDIC_SECURE_DFU=y`, default off). It supports
+application updates on targets already in Secure DFU mode, with CRC-verified
+resume and CREATE-based recovery. Init packets, including signatures, are sent
+unchanged; Secure buttonless entry and multi-image updates are not supported.
+Enable it only after checking the board's flash/RAM budget. Legacy
 buttonless (the `[0x01, 0x04]` jump on the legacy control point) **is**.
 
 ## Scope

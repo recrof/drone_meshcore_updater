@@ -1,0 +1,41 @@
+cmake_minimum_required(VERSION 3.16)
+project(nordic_secure_dfu_test LANGUAGES C CXX)
+enable_testing()
+add_executable(secure_transfer_test secure_transfer_test.cpp ../src/secure_transfer.cpp)
+target_include_directories(secure_transfer_test PRIVATE ../include ../src)
+target_compile_features(secure_transfer_test PRIVATE cxx_std_17)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(secure_transfer_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+elseif(MSVC)
+  target_compile_options(secure_transfer_test PRIVATE /W4 /UNDEBUG)
+endif()
+add_test(NAME secure_transfer COMMAND secure_transfer_test)
+
+add_executable(package_test package_test.cpp ../src/package.cpp)
+target_include_directories(package_test PRIVATE ../include)
+target_compile_features(package_test PRIVATE cxx_std_17)
+add_test(NAME package_preflight COMMAND package_test)
+
+foreach(variant secure legacy)
+  add_executable(integration_${variant}_test integration_test.cpp
+    ../src/package.cpp ../src/legacy_dfu.cpp ../src/gatt_link.cpp
+    ../../../src/dfu_client.cpp ../../../src/transport_ble.c ../../../src/pin_addr.c)
+  if(variant STREQUAL secure)
+    target_sources(integration_${variant}_test PRIVATE ../src/secure_dfu.cpp ../src/secure_transfer.cpp)
+    target_compile_definitions(integration_${variant}_test PRIVATE CONFIG_NORDIC_SECURE_DFU=1)
+  endif()
+  target_include_directories(integration_${variant}_test PRIVATE stubs ../include ../src ../../../src)
+  target_compile_features(integration_${variant}_test PRIVATE cxx_std_17)
+  target_compile_definitions(integration_${variant}_test PRIVATE
+    CONFIG_NORDIC_LEGACY_DFU_LOG_LEVEL=3 CONFIG_NORDIC_LEGACY_DFU_GATT_TIMEOUT_MS=15000
+    CONFIG_NORDIC_LEGACY_DFU_MAX_PACKET_SIZE=244 CONFIG_NORDIC_LEGACY_DFU_TX_RETRY_COUNT=10
+    CONFIG_NORDIC_LEGACY_DFU_TX_RETRY_DELAY_MS=10 CONFIG_BT_L2CAP_TX_MTU=247)
+  add_test(NAME integration_${variant} COMMAND integration_${variant}_test)
+endforeach()
+foreach(target package_test integration_secure_test integration_legacy_test)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  elseif(MSVC)
+    target_compile_options(${target} PRIVATE /W4 /UNDEBUG)
+  endif()
+endforeach()

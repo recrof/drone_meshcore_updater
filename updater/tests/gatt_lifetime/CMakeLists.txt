@@ -3,7 +3,8 @@ project(gatt_lifetime_test LANGUAGES CXX)
 enable_testing()
 add_executable(gatt_lifetime_test gatt_lifetime_test.cpp
   ../../modules/nordic-legacy-dfu/src/gatt_link.cpp
-  ../../modules/nordic-legacy-dfu/src/legacy_dfu.cpp)
+  ../../modules/nordic-legacy-dfu/src/legacy_dfu.cpp
+  ../../modules/nordic-legacy-dfu/src/package.cpp)
 target_include_directories(gatt_lifetime_test PRIVATE
   ../../modules/nordic-legacy-dfu/test/stubs ../../modules/nordic-legacy-dfu/src
   ../../modules/nordic-legacy-dfu/include)

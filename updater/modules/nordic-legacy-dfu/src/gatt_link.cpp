@@ -35,6 +35,15 @@ static const bt_uuid_128 kControlPointUuid = {{BT_UUID_TYPE_128}, DFU_UUID_BYTES
 static const bt_uuid_128 kPacketUuid = {{BT_UUID_TYPE_128}, DFU_UUID_BYTES(0x32)};
 static const bt_uuid_128 kVersionUuid = {{BT_UUID_TYPE_128}, DFU_UUID_BYTES(0x34)};
 
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+static const bt_uuid_16 kSecureServiceUuid = {{BT_UUID_TYPE_16}, 0xFE59};
+#define SECURE_UUID_BYTES(id) \
+	{0x50, 0xEA, 0xDA, 0x30, 0x88, 0x83, 0xB8, 0x9F, \
+	 0x60, 0x4F, 0x15, 0xF3, (id), 0x00, 0xC9, 0x8E}
+static const bt_uuid_128 kSecureControlUuid = {{BT_UUID_TYPE_128}, SECURE_UUID_BYTES(1)};
+static const bt_uuid_128 kSecurePacketUuid = {{BT_UUID_TYPE_128}, SECURE_UUID_BYTES(2)};
+#endif
+
 /* Op code 0x11: Packet Receipt Notification. Mirrors
  * LegacyDfuImpl.OP_CODE_PACKET_RECEIPT_NOTIF_KEY. */
 static constexpr uint8_t kOpCodePacketReceiptNotif = 0x11;
@@ -163,6 +172,9 @@ int GattLink::attach(bt_conn *conn, bool (*cancelled)())
 	subscribed_ = false;
 	response_pending_ = false;
 	response_len_ = 0;
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+	response_overflow_ = false;
+#endif
 	atomic_clear(&aborted_);
 	atomic_clear(&prn_bytes_);
 	k_sem_reset(&op_sem_);
@@ -258,7 +270,11 @@ uint8_t GattLink::discover_services_cb(bt_conn *conn, const bt_gatt_attr *attr,
 	const bt_gatt_service_val *svc = static_cast<const bt_gatt_service_val *>(attr->user_data);
 
 	self->h_.primary_service_count++;
-	if (bt_uuid_cmp(svc->uuid, &kServiceUuid.uuid) == 0) {
+	const bt_uuid *wanted = &kServiceUuid.uuid;
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+	if (self->secure_) wanted = &kSecureServiceUuid.uuid;
+#endif
+	if (bt_uuid_cmp(svc->uuid, wanted) == 0) {
 		self->h_.service_start = attr->handle;
 		self->h_.service_end = svc->end_handle;
 	}
@@ -282,9 +298,17 @@ uint8_t GattLink::discover_chars_cb(bt_conn *conn, const bt_gatt_attr *attr,
 
 	const bt_gatt_chrc *chrc = static_cast<const bt_gatt_chrc *>(attr->user_data);
 
-	if (bt_uuid_cmp(chrc->uuid, &kControlPointUuid.uuid) == 0) {
+	const bt_uuid *control = &kControlPointUuid.uuid;
+	const bt_uuid *packet = &kPacketUuid.uuid;
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+	if (self->secure_) {
+		control = &kSecureControlUuid.uuid;
+		packet = &kSecurePacketUuid.uuid;
+	}
+#endif
+	if (bt_uuid_cmp(chrc->uuid, control) == 0) {
 		self->h_.control_point = chrc->value_handle;
-	} else if (bt_uuid_cmp(chrc->uuid, &kPacketUuid.uuid) == 0) {
+	} else if (bt_uuid_cmp(chrc->uuid, packet) == 0) {
 		self->h_.packet = chrc->value_handle;
 	} else if (bt_uuid_cmp(chrc->uuid, &kVersionUuid.uuid) == 0) {
 		self->h_.version = chrc->value_handle;
@@ -312,8 +336,14 @@ uint8_t GattLink::discover_ccc_cb(bt_conn *conn, const bt_gatt_attr *attr,
 	return BT_GATT_ITER_STOP;
 }
 
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+int GattLink::discover(bool secure)
+{
+	secure_ = secure;
+#else
 int GattLink::discover()
 {
+#endif
 	/*
 	 * All primary services in one pass: it yields the DFU service range
 	 * and the service count that LegacyButtonlessDfuImpl needs to tell an
@@ -404,7 +434,7 @@ uint8_t GattLink::notify_cb(bt_conn *conn, bt_gatt_subscribe_params *params, con
 	 * binary semaphore coalesces two notifications into one wake-up and
 	 * the count is the only thing the protocol cares about.
 	 */
-	if (length >= 5 && value[0] == kOpCodePacketReceiptNotif) {
+	if (!self->secure_ && length >= 5 && value[0] == kOpCodePacketReceiptNotif) {
 		uint32_t received = static_cast<uint32_t>(value[1]) |
 				    (static_cast<uint32_t>(value[2]) << 8) |
 				    (static_cast<uint32_t>(value[3]) << 16) |
@@ -414,6 +444,13 @@ uint8_t GattLink::notify_cb(bt_conn *conn, bt_gatt_subscribe_params *params, con
 		return BT_GATT_ITER_CONTINUE;
 	}
 
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+	if (self->secure_ && (self->response_pending_ || length > sizeof(self->response_))) {
+		self->response_overflow_ = true;
+		k_sem_give(&self->notify_sem_);
+		return BT_GATT_ITER_CONTINUE;
+	}
+#endif
 	uint16_t n = (length > sizeof(self->response_)) ? sizeof(self->response_) : length;
 	memcpy(self->response_, data, n);
 	self->response_len_ = static_cast<uint8_t>(n);
@@ -645,14 +682,18 @@ int GattLink::wait_response(uint8_t *buf, uint8_t *len, uint32_t timeout_ms)
 {
 	if (!response_pending_) {
 		int rc = wait(&notify_sem_, timeout_ms);
-		if (rc != 0) {
+		/* Secure final Execute may notify and disconnect in the same RX
+		 * burst. A received response is still authoritative in that case. */
+		if (rc != 0 && !(secure_ && rc == -ENOTCONN && response_pending_)) {
 			return rc;
 		}
+		if (response_overflow_) return -EPROTO;
 		if (!response_pending_) {
 			return -EAGAIN;
 		}
 	}
 
+	if (response_overflow_) return -EPROTO;
 	if (buf != nullptr) {
 		memcpy(buf, response_, response_len_);
 	}

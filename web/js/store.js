@@ -218,8 +218,8 @@ smp.addEventListener("dfustatus", (e) => {
   const ended = next.terminal && !prev.terminal;
 
   if (ended) {
-    log(`DFU ${next.ok ? "succeeded" : "failed"}: ${next.resultLabel}`,
-        next.ok ? "ok" : "err");
+    log(`DFU ${next.bootUnverified ? "accepted (boot unverified)" : next.ok ? "succeeded" : "failed"}: ${next.resultLabel}`,
+        next.bootUnverified ? "warn" : next.ok ? "ok" : "err");
   }
 
   const asking = next.state === DFU_STATE.AWAITING_PIN &&

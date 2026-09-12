@@ -152,7 +152,8 @@ static bool mac_match_or_plus_one(const bt_addr_le_t *a, const bt_addr_le_t *ref
 /* Per-ad state assembled by bt_data_parse. */
 struct ad_parse {
 	char name[BLE_SCANNER_NAME_MAX];
-	bool has_dfu_uuid;
+	bool has_legacy_dfu_uuid;
+	bool has_secure_dfu_uuid;
 };
 
 static bool ad_data_cb(struct bt_data *data, void *user_data)
@@ -175,12 +176,21 @@ static bool ad_data_cb(struct bt_data *data, void *user_data)
 		 */
 		for (size_t off = 0; off + 16 <= data->data_len; off += 16) {
 			if (memcmp(&data->data[off], legacy_dfu_uuid.val, 16) == 0) {
-				ap->has_dfu_uuid = true;
-				return false;   /* stop parse — we have what we need */
+				ap->has_legacy_dfu_uuid = true;
+				return true;    /* parse the name and any other service too */
 			}
 		}
 		return true;
 	}
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+	case BT_DATA_UUID16_ALL:
+	case BT_DATA_UUID16_SOME:
+		for (size_t off = 0; off + 2 <= data->data_len; off += 2) {
+			if (data->data[off] == 0x59 && data->data[off + 1] == 0xFE)
+				ap->has_secure_dfu_uuid = true;
+		}
+		return true;
+#endif
 	default:
 		return true;
 	}
@@ -221,7 +231,7 @@ static void scan_rx_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
 	ARG_UNUSED(adv_type);
 	if (s_ctx.found) return;
 
-	struct ad_parse ap = { .name = { 0 }, .has_dfu_uuid = false };
+	struct ad_parse ap = { .name = { 0 }, .has_legacy_dfu_uuid = false };
 	bt_data_parse(ad, ad_data_cb, &ap);
 
 	/* Pinned mode: a deliberate choice, so name, UUID and RSSI are all
@@ -253,7 +263,9 @@ static void scan_rx_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
 	bool mac_ok  = mac_match_or_plus_one(addr, s_ctx.prefer_mac);
 	bool have_nf = (s_ctx.name_filter && s_ctx.name_filter[0]);
 	bool name_ok = have_nf && ble_scanner_name_matches(ap.name, s_ctx.name_filter);
-	bool uuid_ok = (!mac_ok && !have_nf) ? ap.has_dfu_uuid : false;
+	/* FE59 also belongs to buttonless applications. Secure targets require
+	 * an explicit name filter or pin, never an unfiltered UUID-only match. */
+	bool uuid_ok = (!mac_ok && !have_nf) ? ap.has_legacy_dfu_uuid : false;
 
 	if (!(mac_ok || name_ok || uuid_ok)) {
 		log_rejected(addr, ap.name, rssi,
@@ -265,7 +277,8 @@ matched:
 	bt_addr_le_copy(&s_ctx.match.addr, addr);
 	s_ctx.match.rssi = rssi;
 	memcpy(s_ctx.match.name, ap.name, sizeof(ap.name));
-	s_ctx.match.dfu_uuid = ap.has_dfu_uuid;
+	s_ctx.match.legacy_dfu_uuid = ap.has_legacy_dfu_uuid;
+	s_ctx.match.secure_dfu_uuid = ap.has_secure_dfu_uuid;
 	s_ctx.found = true;
 	k_sem_give(&s_ctx.found_sem);
 }
@@ -459,7 +472,7 @@ int ble_scanner_seen_at_cancellable(const bt_addr_le_t *addr,
 
 	LOG_INF("%s is advertising: rssi=%d name='%s' dfu_service=%s",
 		addr_s, s_ctx.match.rssi, s_ctx.match.name,
-		s_ctx.match.dfu_uuid ? "yes" : "no");
+		s_ctx.match.legacy_dfu_uuid ? "yes" : "no");
 	if (out) {
 		*out = s_ctx.match;
 	}
@@ -499,7 +512,7 @@ static K_WORK_DELAYABLE_DEFINE(s_survey_idle, survey_idle_fn);
  * never be one. RSSI only breaks ties. */
 static int survey_score(const struct ble_scanner_seen *e)
 {
-	return (e->dfu_uuid ? 4 : 0) + (e->name[0] ? 2 : 0);
+	return (e->legacy_dfu_uuid ? 4 : 0) + (e->name[0] ? 2 : 0);
 }
 
 static void survey_rx_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
@@ -507,7 +520,7 @@ static void survey_rx_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type
 {
 	ARG_UNUSED(adv_type);
 
-	struct ad_parse ap = { .name = { 0 }, .has_dfu_uuid = false };
+	struct ad_parse ap = { .name = { 0 }, .has_legacy_dfu_uuid = false };
 	bt_data_parse(ad, ad_data_cb, &ap);
 
 	k_spinlock_key_t key = k_spin_lock(&s_survey.lock);
@@ -530,15 +543,17 @@ static void survey_rx_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type
 		if (ap.name[0]) {
 			memcpy(e->name, ap.name, sizeof(e->name));
 		}
-		if (ap.has_dfu_uuid) {
-			e->dfu_uuid = true;
+		if (ap.has_legacy_dfu_uuid) {
+			e->legacy_dfu_uuid = true;
 		}
+		e->secure_dfu_uuid |= ap.has_secure_dfu_uuid;
 		k_spin_unlock(&s_survey.lock, key);
 		return;
 	}
 
 	struct ble_scanner_seen fresh = {
-		.rssi = rssi, .best = rssi, .count = 1, .dfu_uuid = ap.has_dfu_uuid,
+		.rssi = rssi, .best = rssi, .count = 1, .legacy_dfu_uuid = ap.has_legacy_dfu_uuid,
+		.secure_dfu_uuid = ap.has_secure_dfu_uuid,
 	};
 	bt_addr_le_copy(&fresh.addr, addr);
 	memcpy(fresh.name, ap.name, sizeof(fresh.name));

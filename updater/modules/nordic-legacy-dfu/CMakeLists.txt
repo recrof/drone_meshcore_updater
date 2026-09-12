@@ -6,8 +6,11 @@ if(CONFIG_NORDIC_LEGACY_DFU)
   zephyr_library_sources(
     src/legacy_dfu.cpp
     src/gatt_link.cpp
+    src/package.cpp
   )
 
   zephyr_include_directories(include)
+  zephyr_library_sources_ifdef(CONFIG_NORDIC_SECURE_DFU
+    src/secure_dfu.cpp src/secure_transfer.cpp)
   zephyr_library_include_directories(src)
 endif()

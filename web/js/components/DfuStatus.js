@@ -60,6 +60,7 @@ export default {
     });
 
     const tone = computed(() => {
+      if (s.value.bootUnverified) return "unverified";
       if (s.value.state === STATE.DONE) return "ok";
       if (s.value.state === STATE.FAILED) return "fail";
       return "run";

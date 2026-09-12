@@ -129,7 +129,7 @@ size_t survey_get(struct survey_row *out, size_t max, size_t off, size_t *total)
 				r->rssi  = tmp[i].rssi;
 				r->best  = tmp[i].best;
 				r->count = tmp[i].count;
-				r->flags = tmp[i].dfu_uuid ? SURVEY_F_DFU : 0;
+				r->flags = tmp[i].legacy_dfu_uuid ? SURVEY_F_DFU : 0;
 				/* Marked here rather than in the client: the
 				 * filter's pipe-delimited grammar lives in
 				 * ble_scanner.c and a second implementation of

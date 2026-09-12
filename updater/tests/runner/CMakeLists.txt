@@ -13,7 +13,7 @@ foreach(target runner_test runner_cleanup_test)
   endif()
 endforeach()
 set(cases retry buttonless restart_budget max_restart_budget config_reload
-  lower_budget thread_reuse wifi_retry verify_reject pin_retry)
+  lower_budget thread_reuse wifi_retry verify_reject pin_retry secure_accepted bad_package)
 set(i 0)
 foreach(case IN LISTS cases)
   add_test(NAME runner_${case} COMMAND runner_test ${i})

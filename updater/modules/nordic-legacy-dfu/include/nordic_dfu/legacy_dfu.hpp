@@ -18,7 +18,7 @@
 #pragma once
 
 #include <stdint.h>
-#include <zephyr/bluetooth/conn.h>
+struct bt_conn;
 
 #include "nordic_dfu/stream.hpp"
 
@@ -89,6 +89,8 @@ enum class Result {
 	GattError,
 	/** An operation exceeded Parameters::operation_timeout_ms. */
 	Timeout,
+	/** Init packet format/type/size is unsupported or wrong for this protocol. */
+	PackageMismatch,
 };
 
 /** Progress phases. Mirrors DfuBaseService.PROGRESS_*. */

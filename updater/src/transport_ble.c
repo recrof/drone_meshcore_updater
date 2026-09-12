@@ -311,7 +311,7 @@ static enum dfu_result ble_verify(const struct dfu_target *t,
 	}
 
 	/* Something is at that address. Which something is the whole question. */
-	if (!seen.dfu_uuid) {
+	if (!seen.legacy_dfu_uuid) {
 		LOG_INF("verify: %s is advertising without the DFU service "
 			"(name='%s') — that is the application, so the new "
 			"image is running", t->name, seen.name);

@@ -48,7 +48,7 @@ const t = (name, cond, extra = "") => {
 
 /* The flag exists and means what the check relies on. */
 t("the scanner reports whether an ad carried the DFU service",
-  /bool\s+dfu_uuid;/.test(scannerH));
+  /bool\s+legacy_dfu_uuid;/.test(scannerH));
 
 const verify = transport.slice(transport.indexOf("static enum dfu_result ble_verify"));
 const verifyCode = codeOf(verify);
@@ -58,17 +58,17 @@ const verifyCode = codeOf(verify);
  * rejection message*, and never used to decide anything. A verify that reads
  * the flag only to print it is the bug, not the fix.
  */
-t("verify branches on dfu_uuid rather than only printing it",
-  /if\s*\(!seen\.dfu_uuid\)/.test(verifyCode), verifyCode.slice(0, 200));
+t("verify branches on the Legacy UUID rather than FE59 or address alone",
+  /if\s*\(!seen\.legacy_dfu_uuid\)/.test(verifyCode), verifyCode.slice(0, 200));
 
 /* An advertiser with no DFU service is the application, so the image took. */
 t("...and no DFU service means the new image is running",
-  /if\s*\(!seen\.dfu_uuid\)\s*\{[\s\S]{0,400}?return DFU_OK;/.test(verifyCode));
+  /if\s*\(!seen\.legacy_dfu_uuid\)\s*\{[\s\S]{0,400}?return DFU_OK;/.test(verifyCode));
 
 /* And only a DFU service still on the air is a rejection. */
 t("only a still-advertised DFU service counts as a rejection",
   /return DFU_TARGET_REJECTED;/.test(verifyCode) &&
-  verifyCode.indexOf("DFU_TARGET_REJECTED") > verifyCode.indexOf("seen.dfu_uuid"));
+  verifyCode.indexOf("DFU_TARGET_REJECTED") > verifyCode.indexOf("seen.legacy_dfu_uuid"));
 
 /* Being unseen entirely is still success — the peer rebooted into something
  * that is not advertising yet. That path predates this fix and must survive

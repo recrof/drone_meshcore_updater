@@ -12,7 +12,7 @@
 
 enum scenario { RETRY, BUTTONLESS, RESTART_BUDGET, MAX_RESTART_BUDGET,
   CONFIG_RELOAD, LOWER_BUDGET, THREAD_REUSE, WIFI_RETRY, VERIFY_REJECT,
-  PIN_RETRY };
+  PIN_RETRY, SECURE_ACCEPTED, BAD_PACKAGE };
 static enum scenario scenario;
 static struct app_config config;
 static unsigned runs, finds, maps, opens, config_loads, verifies;
@@ -75,7 +75,7 @@ int ble_scanner_seen_at_cancellable(const bt_addr_le_t *addr, uint32_t timeout,
   assert(timeout && cancelled && !cancelled());
   assert(bt_addr_le_eq(addr, &app)); verifies++;
   memset(out, 0, sizeof(*out));
-  out->dfu_uuid = scenario == VERIFY_REJECT && verifies == 1;
+  out->legacy_dfu_uuid = scenario == VERIFY_REJECT && verifies == 1;
   return 0;
 }
 void ble_scanner_cancel(void) {}
@@ -86,6 +86,8 @@ enum dfu_result dfu_client_run(const struct ble_scanner_target *target,
   assert(bt_addr_le_eq(&target->addr, &app));
   assert(bundle->bin.size == 1024 && cancelled && !cancelled());
   runs++; assert(runs <= 300);
+  if (scenario == SECURE_ACCEPTED) return DFU_BOOT_UNVERIFIED;
+  if (scenario == BAD_PACKAGE) return DFU_BAD_PACKAGE;
   if (scenario == RESTART_BUDGET || scenario == MAX_RESTART_BUDGET || scenario == LOWER_BUDGET)
     return DFU_BUTTONLESS_TRIGGERED;
   if (scenario == BUTTONLESS || scenario == CONFIG_RELOAD) {
@@ -134,6 +136,9 @@ static void test(enum scenario which)
     assert(finished == DFU_STATUS_RESULT_RETRIES_EXHAUSTED);
     assert(runs == (which == MAX_RESTART_BUDGET ? 256u : 2u));
     assert(config_loads == (which == LOWER_BUDGET ? runs + 1 : runs));
+  } else if (which == SECURE_ACCEPTED || which == BAD_PACKAGE) {
+    assert(runs == 1 && finds == 1 && maps == 1 && opens == 1 && verifies == 0);
+    assert(finished == (which == SECURE_ACCEPTED ? DFU_STATUS_RESULT_BOOT_UNVERIFIED : DFU_STATUS_RESULT_BAD_BUNDLE));
   } else if (which == WIFI_RETRY) {
     assert(runs == 3 && finds == 3 && finished == DFU_STATUS_RESULT_TIMEOUT);
   } else {
@@ -147,7 +152,7 @@ int main(int argc, char **argv)
 {
   assert(argc == 2);
   enum scenario which = (enum scenario)atoi(argv[1]);
-  assert(which >= RETRY && which <= PIN_RETRY);
+  assert(which >= RETRY && which <= BAD_PACKAGE);
   if (which == THREAD_REUSE) {
     unsigned before = fake_thread_joins; test(RETRY); test(RETRY);
     assert(fake_thread_joins > before);

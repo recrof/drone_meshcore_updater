@@ -549,7 +549,7 @@ static void run_thread(void *a, void *b, void *c)
 		 */
 		int auth = ble_pairing_verdict();
 
-		if (r != DFU_OK && auth != DFU_STATUS_RESULT_NONE) {
+		if (r != DFU_OK && r != DFU_BOOT_UNVERIFIED && auth != DFU_STATUS_RESULT_NONE) {
 			LOG_ERR("DFU runner: %s",
 				auth == DFU_STATUS_RESULT_AUTH_REQUIRED
 					? "the target wants a PIN and none was offered"
@@ -559,6 +559,15 @@ static void run_thread(void *a, void *b, void *c)
 		}
 
 		switch (r) {
+		case DFU_BOOT_UNVERIFIED:
+			LOG_WRN("DFU runner: Secure transfer accepted; application boot unverified");
+			led_set_state(LED_STATE_IDLE);
+			dfu_status_finish(DFU_STATUS_RESULT_BOOT_UNVERIFIED);
+			goto done;
+		case DFU_BAD_PACKAGE:
+			LOG_ERR("DFU runner: unsupported package or protocol (not retrying)");
+			status_result = DFU_STATUS_RESULT_BAD_BUNDLE;
+			goto fail;
 		case DFU_OK:
 			LOG_INF("DFU runner: SUCCESS");
 			led_set_state(LED_STATE_DONE_OK);

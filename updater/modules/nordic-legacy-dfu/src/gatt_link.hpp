@@ -55,7 +55,11 @@ public:
 	const Handles &handles() const { return h_; }
 
 	/* ---- discovery ---- */
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+	int discover(bool secure = false);
+#else
 	int discover();
+#endif
 
 	/* ---- setup ---- */
 	int subscribe_control_point();
@@ -70,7 +74,7 @@ public:
 	/**
 	 * Write to the Control Point and wait for the ATT response.
 	 * Mirrors BaseDfuImpl.writeOpCode(characteristic, value, reset).
-	 * Copies the protocol command (1..3 bytes) into link-owned storage.
+	 * Copies the protocol command (1..6 bytes) into link-owned storage.
 	 * A timeout leaves it reserved until the host's completion callback.
 	 *
 	 * @param reset true for op codes that make the target reboot
@@ -153,6 +157,13 @@ private:
 	bt_conn *conn_ = nullptr;
 	volatile bool connected_ = false;
 	Handles h_{};
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+	bool secure_ = false;
+	bool response_overflow_ = false;
+#else
+	static constexpr bool secure_ = false;
+	static constexpr bool response_overflow_ = false;
+#endif
 
 	struct k_sem op_sem_;      /* read / write-with-response / MTU */
 	struct k_sem ccc_sem_;     /* CCC enable only; never signalled by unsubscribe */
@@ -201,10 +212,14 @@ private:
 	GattLink *next_link_ = nullptr;
 	bool link_registered_ = false;
 	bt_gatt_write_params write_params_{};
-	/* The Legacy PRN request is the largest Control Point command (three bytes).
+	/* Secure CREATE is the largest Control Point command (six bytes).
 	 * A timeout ends our wait, not Zephyr's ownership: a security retry
 	 * may re-encode data after the protocol caller's stack has unwound. */
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+	uint8_t control_data_[6]{};
+#else
 	uint8_t control_data_[3]{};
+#endif
 	bt_conn *write_conn_ = nullptr;
 	atomic_t write_pending_ = ATOMIC_INIT(0);
 	struct k_spinlock write_lock_{};

@@ -352,7 +352,8 @@ void dfu_status_finish(enum dfu_status_result result)
 {
 	k_spinlock_key_t key = k_spin_lock(&lock);
 	snap.result = (uint8_t)result;
-	snap.state = (result == DFU_STATUS_RESULT_OK) ? DFU_STATUS_DONE
+	snap.state = (result == DFU_STATUS_RESULT_OK ||
+		      result == DFU_STATUS_RESULT_BOOT_UNVERIFIED) ? DFU_STATUS_DONE
 						      : DFU_STATUS_FAILED;
 	snap.frozen_ms = k_uptime_get_32() - snap.t0;
 	snap.running = false;
@@ -385,6 +386,8 @@ enum dfu_status_result dfu_status_from_dfu_result(int dfu_result)
 {
 	switch (dfu_result) {
 	case DFU_OK:                   return DFU_STATUS_RESULT_OK;
+	case DFU_BAD_PACKAGE:          return DFU_STATUS_RESULT_BAD_BUNDLE;
+	case DFU_BOOT_UNVERIFIED:      return DFU_STATUS_RESULT_BOOT_UNVERIFIED;
 	case DFU_CONNECT_FAILED:       return DFU_STATUS_RESULT_CONNECT_FAILED;
 	case DFU_SERVICE_MISSING:      return DFU_STATUS_RESULT_SERVICE_MISSING;
 	case DFU_CHAR_MISSING:         return DFU_STATUS_RESULT_CHAR_MISSING;

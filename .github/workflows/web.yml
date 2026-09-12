@@ -76,6 +76,9 @@ jobs:
           node web/test/workflows.test.mjs
           node web/test/zip-parity.test.mjs
 
+      - name: Secure DFU opt-in and warning presentation
+        run: node web/test/secure-dfu.test.mjs
+
       - name: PWA manifest / precache tests
         run: node web/test/pwa.test.mjs
 

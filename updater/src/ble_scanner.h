@@ -23,7 +23,8 @@ struct ble_scanner_target {
 	bt_addr_le_t addr;                       /* peer address, ready for bt_conn_le_create */
 	int8_t       rssi;                       /* strongest RSSI seen at match time */
 	char         name[BLE_SCANNER_NAME_MAX]; /* advertised name or "" */
-	bool         dfu_uuid;                   /* the ad carried the Legacy DFU service UUID */
+	bool         legacy_dfu_uuid;            /* Legacy bootloader advertisement */
+	bool         secure_dfu_uuid;            /* FE59: bootloader OR buttonless app */
 };
 
 /* Toggle per-advertisement debug logging. When on, every rejected ad
@@ -130,7 +131,8 @@ struct ble_scanner_seen {
 	int8_t   best;                           /* strongest this survey */
 	uint16_t count;                          /* advertisements seen */
 	char     name[BLE_SCANNER_NAME_MAX];
-	bool     dfu_uuid;
+	bool     legacy_dfu_uuid;
+	bool     secure_dfu_uuid;
 };
 
 /* Begin (or restart the watchdog on) a survey. Idempotent: calling it while
