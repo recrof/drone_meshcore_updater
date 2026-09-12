@@ -1,7 +1,7 @@
 #pragma once
 
 /*
- * The app's Legacy DFU client: connect to a scanned peer, stream a firmware
+ * The app's Nordic DFU adapter: connect to a scanned peer, stream a firmware
  * bundle, hand back a result the runner can act on.
  *
  * The protocol itself lives in modules/nordic-legacy-dfu, a port of the
@@ -26,7 +26,7 @@ enum dfu_result {
 	DFU_OK,                    /* full DFU cycle succeeded, peer rebooted */
 	DFU_BUTTONLESS_TRIGGERED,  /* peer rebooted; rescan and run again */
 	DFU_CONNECT_FAILED,        /* couldn't hold a connection long enough to talk */
-	DFU_SERVICE_MISSING,       /* connected but peer doesn't expose Legacy DFU service */
+	DFU_SERVICE_MISSING,       /* peer does not expose the package's DFU service */
 	DFU_CHAR_MISSING,          /* service present but ctrl/packet char absent */
 	DFU_DISCONNECTED_EARLY,    /* link dropped mid-sequence */
 	DFU_TIMEOUT,               /* waited too long for a peer response */
@@ -38,9 +38,12 @@ enum dfu_result {
 	 * mirrors the status enum it maps *to*. Only a transport's verify()
 	 * hook produces this; dfu_client_run() never returns it. */
 	DFU_TARGET_REJECTED,
+	DFU_BAD_PACKAGE,           /* unsupported package/protocol; do not retry */
+	DFU_BOOT_UNVERIFIED,       /* Secure transfer accepted, boot not verified */
 };
 
-/* Connect to `target`, run one Legacy DFU session, disconnect. Blocks the
+/* Connect to `target`, run the package's Legacy or enabled Secure protocol,
+ * and disconnect. Secure success returns DFU_BOOT_UNVERIFIED. Blocks the
  * calling thread for the whole transfer — call it from the DFU runner's
  * thread, never from the BT RX thread or a GATT callback.
  *
@@ -55,7 +58,7 @@ enum dfu_result {
  */
 enum dfu_result dfu_client_run(const struct ble_scanner_target *target,
 			       const struct firmware_bundle *bundle,
-			       const struct app_config *cfg);
+				   const struct app_config *cfg, bool (*cancelled)(void));
 
 /* Make a dfu_client_run() that is in progress give up as soon as it can.
  *

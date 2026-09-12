@@ -228,6 +228,15 @@ t("a new run un-dismisses the banner", !!banner());
 
 /* --- failure ------------------------------------------------------------ */
 
+await feed({ state: STATE.DONE, result: RESULT.BOOT_UNVERIFIED, percent: 100 });
+t("unverified boot is explicitly labeled", /boot unverified/.test(text()), text());
+t("unverified boot is neither green success nor failure",
+  banner()?.classList.contains("unverified") && !banner()?.classList.contains("ok") && !banner()?.classList.contains("fail"));
+t("unverified transfer stops animating and can be dismissed",
+  !d.querySelector(".dfu-bar")?.classList.contains("indeterminate") && !!banner()?.querySelector(".dfu-dismiss"));
+t("unverified boot explains no automatic retry", /no automatic retry/.test(text()), text());
+await feed({ state: STATE.SCANNING, attempt: 1, retries: 5 });
+
 await feed({
   state: STATE.FAILED, result: RESULT.NO_TARGET, attempt: 5, retries: 5,
   elapsedMs: 60000, percent: 30,

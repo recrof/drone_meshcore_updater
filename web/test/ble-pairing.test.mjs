@@ -378,22 +378,30 @@ t("the DFU subscription is marked VOLATILE",
  * between a bond and a permanently unusable updater. */
 t("bonds are still RAM-only", !/^CONFIG_BT_SETTINGS=y$/m.test(prj));
 
-/* The host's own bits live in the same struct, which is now static and
- * outlives the connection that set them. */
-t("...and the host's transient flags are cleared before reuse",
-  /atomic_clear_bit\(sub_params_\.flags, BT_GATT_SUBSCRIBE_FLAG_WRITE_PENDING\);/
-    .test(gattCpp2) &&
+/* The host's transient bits live in static storage. Clearing them is safe
+ * only after both list membership and any CCC request have retired. */
+const subscribeCode2 = codeOf(gattCpp2.slice(
+  gattCpp2.indexOf("int GattLink::subscribe_control_point"),
+  gattCpp2.indexOf("void GattLink::unsubscribe_control_point")));
+t("...and the host's transient flags are cleared only after the ownership guard",
+  /if \(subscription_busy\(true\)\)[\s\S]*?return -EBUSY;[\s\S]*?atomic_clear_bit\(sub_params_\.flags, BT_GATT_SUBSCRIBE_FLAG_WRITE_PENDING\);/
+    .test(subscribeCode2) &&
   /atomic_clear_bit\(sub_params_\.flags, BT_GATT_SUBSCRIBE_FLAG_SENT\);/
-    .test(gattCpp2));
+    .test(subscribeCode2));
 
-/* Trap 14's rule: a failure whose consequence is "this device cannot flash
- * anything until someone power-cycles it" gets a recovery path, not a log
- * line. bt_gatt_unsubscribe() works by pointer identity on this connection's
- * list alone, so it reclaims the entry when it is ours and is a no-op when it
- * is not. */
-t("a subscription the host will not release is reclaimed, not surrendered",
-  /bt_gatt_unsubscribe\(conn_, &sub_params_\) == 0[\s\S]{0,120}?sub_linked_ = false;/
-    .test(gattCpp2));
+/* Last-subscriber unsubscribe removes the node immediately but leaves a CCC
+ * write outstanding. Forced reclamation was therefore unsafe. The pinned
+ * NCS host can omit both callbacks on a failed disable; its actual disconnect
+ * callback follows ATT/GATT cleanup and provides recovery without a reboot. */
+const disconnectedCode2 = codeOf(gattCpp2.slice(
+  gattCpp2.indexOf("void GattLink::disconnected_cb"),
+  gattCpp2.indexOf("void GattLink::wake_all")));
+t("subscription reuse never forces an unsubscribe to reclaim parameters",
+  !/bt_gatt_unsubscribe\(/.test(subscribeCode2));
+t("a missing CCC callback recovers at the matching peer's disconnect fence",
+  /for \(GattLink \*link = links;/.test(disconnectedCode2) &&
+  /if \(link->sub_conn_ == conn\)[\s\S]*?link->sub_linked_ = false;[\s\S]*?link->ccc_operation_ = CccOperation::None;[\s\S]*?release_subscription_locked\(\)/
+    .test(disconnectedCode2));
 
 /* --- the client asks while the digits are still on screen --------------- */
 

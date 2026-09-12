@@ -55,12 +55,15 @@ const kconfig = (key) => {
 
 const cacheDt = dtProp("cache-size");
 const cacheKc = kconfig("CONFIG_FS_LITTLEFS_CACHE_SIZE");
+const filesKc = kconfig("CONFIG_FS_LITTLEFS_NUM_FILES");
 const readSz = dtProp("read-size");
 const progSz = dtProp("prog-size");
 const lookahead = dtProp("lookahead-size");
 
 t("common.dtsi declares cache-size", cacheDt !== null, String(cacheDt));
 t("prj.conf declares CONFIG_FS_LITTLEFS_CACHE_SIZE", cacheKc !== null, String(cacheKc));
+t("cache heap covers log, SMP, stream, DFU, inspector and config handles",
+  filesKc !== null && filesKc >= 6, String(filesKc));
 t("common.dtsi declares read-size", readSz !== null, String(readSz));
 t("common.dtsi declares prog-size", progSz !== null, String(progSz));
 

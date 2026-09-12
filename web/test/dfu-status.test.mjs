@@ -170,6 +170,11 @@ t("DONE is not active", done.active === false);
 t("DONE reports ok", done.ok === true);
 t("DONE carries a result sentence", done.resultLabel.length > 10, done.resultLabel);
 
+const unverified = parseDfuStatus(build({ state: STATE.DONE, result: RESULT.BOOT_UNVERIFIED }));
+t("accepted/unverified is terminal, not a retry or failure", unverified.terminal && !unverified.active && unverified.ok);
+t("unverified boot has an explicit label", unverified.bootUnverified && /boot unverified/.test(unverified.stateLabel));
+t("unverified boot does not claim the application rebooted", /not been verified/.test(unverified.resultLabel) && !/flashed and rebooted/.test(unverified.resultLabel));
+
 const failed = parseDfuStatus(build({ state: STATE.FAILED, result: RESULT.NO_TARGET }));
 t("FAILED is terminal", failed.terminal === true);
 t("FAILED is not ok", failed.ok === false);

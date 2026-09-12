@@ -24,6 +24,10 @@
 #include <zephyr/bluetooth/hci.h>
 
 #include "nordic_dfu/legacy_dfu.hpp"
+#include "nordic_dfu/package.hpp"
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+#include "nordic_dfu/secure_dfu.hpp"
+#endif
 #include "dfu_status.h"
 #include "app.h"
 
@@ -146,6 +150,7 @@ public:
 		if (state == State::Uploading) {
 			t0_ = k_uptime_get_32();
 			next_ = 10;
+			first_progress_ = true;
 		}
 		/* A retry re-enters Starting with the previous attempt's
 		 * percentage still latched, which would leave the LED blinking
@@ -176,6 +181,12 @@ public:
 
 	void on_progress(uint8_t percent, uint32_t sent, uint32_t total) override
 	{
+		/* Secure resume reports the retained offset as its first progress
+		 * event. Those bytes count toward completion, not this link's rate. */
+		if (first_progress_) {
+			first_progress_ = false;
+			rate_base_ = sent;
+		}
 		/* Every update, not one per 10%: this is what shortens the green
 		 * blink from 600 ms to 30 ms across the transfer. */
 		led_set_progress(percent);
@@ -187,8 +198,9 @@ public:
 		 * backend writes to flash. */
 		if (percent >= next_ || percent == 100) {
 			uint32_t ms = k_uptime_get_32() - t0_;
+			uint32_t streamed = sent >= rate_base_ ? sent - rate_base_ : 0;
 			LOG_INF("upload %u%% (%u/%u B, %u.%u KB/s)", percent, sent, total,
-				ms ? (sent / ms) : 0u, ms ? ((sent * 10u / ms) % 10u) : 0u);
+				ms ? (streamed / ms) : 0u, ms ? ((streamed * 10u / ms) % 10u) : 0u);
 			next_ = static_cast<uint8_t>(percent + 10);
 		}
 	}
@@ -198,6 +210,8 @@ public:
 private:
 	uint32_t t0_ = 0;
 	uint8_t next_ = 10;
+	uint32_t rate_base_ = 0;
+	bool first_progress_ = true;
 };
 
 /* ---- result translation ---------------------------------------------- */
@@ -208,9 +222,8 @@ dfu_result to_dfu_result(const Report &r)
 	case Result::Success:
 		return DFU_OK;
 
-	/* All three mean "the target rebooted, find it again and re-run".
-	 * dfu_runner treats DFU_BUTTONLESS_TRIGGERED as a rescan that does
-	 * not consume a retry, which is what each of these wants.
+	/* All three mean the target rebooted: preserve the Legacy rescan
+	 * and retry policy. Secure updates do not use buttonless entry.
 	 *
 	 * ApplicationPending strictly wants the next run to send the
 	 * application alone. Our bundles are single-image in practice, so
@@ -232,6 +245,7 @@ dfu_result to_dfu_result(const Report &r)
 	case Result::FileError:              return DFU_FS_ERROR;
 	case Result::InitPacketRequired:     return DFU_FS_ERROR;
 	case Result::Aborted:                return DFU_DISCONNECTED_EARLY;
+	case Result::PackageMismatch:        return DFU_BAD_PACKAGE;
 	}
 	return DFU_REMOTE_ERROR;
 }
@@ -286,6 +300,9 @@ void disconnect_and_release(void)
  * it never blocks the transfer.
  */
 static LegacyDfuClient *s_active;
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+static SecureDfuClient *s_secure_active;
+#endif
 static K_MUTEX_DEFINE(s_active_lock);
 
 static void set_active(LegacyDfuClient *c)
@@ -298,6 +315,9 @@ static void set_active(LegacyDfuClient *c)
 extern "C" void dfu_client_abort(void)
 {
 	k_mutex_lock(&s_active_lock, K_FOREVER);
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+	if (s_secure_active != nullptr) s_secure_active->abort();
+#endif
 	if (s_active != nullptr) {
 		LOG_WRN("abort requested — ending the session in progress");
 		s_active->abort();
@@ -307,11 +327,33 @@ extern "C" void dfu_client_abort(void)
 
 extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *target,
 					   const struct firmware_bundle *bundle,
-					   const struct app_config *cfg)
+					   const struct app_config *cfg, bool (*cancelled)(void))
 {
 	if (target == nullptr || bundle == nullptr || cfg == nullptr) {
 		return DFU_FS_ERROR;
 	}
+	if (cancelled && cancelled()) return DFU_DISCONNECTED_EARLY;
+	// Reject unknown formats without even connecting. Each protocol also
+	// checks its own format before issuing any destructive command.
+	ZipStream image(&bundle->bin), init_packet(&bundle->dat);
+	Firmware firmware;
+	firmware.type = bundle->type;
+	firmware.image = &image;
+	firmware.init_packet = &init_packet;
+	/* Preflight must see the same layout as the protocol client. Otherwise
+	 * a valid .dat could authorize START with inconsistent or wrapped sizes. */
+	if ((bundle->type & (bundle->type - 1)) != 0) {
+		firmware.softdevice_size = bundle->sd_size;
+		firmware.bootloader_size = bundle->bl_size;
+		const uint64_t combined = uint64_t(bundle->sd_size) + bundle->bl_size;
+		firmware.application_size = (bundle->type & FW_TYPE_APPLICATION) &&
+			bundle->bin.size > combined ? uint32_t(bundle->bin.size - combined) : 0;
+	}
+	PackageProtocol protocol = package_protocol(firmware);
+	if (protocol == PackageProtocol::Unknown) return DFU_BAD_PACKAGE;
+#if !defined(CONFIG_NORDIC_SECURE_DFU)
+	if (protocol == PackageProtocol::Secure) return DFU_BAD_PACKAGE;
+#endif
 
 	ensure_callbacks();
 
@@ -356,6 +398,7 @@ extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *targe
 
 	int rc = -EINVAL;
 	for (int attempt = 0; attempt < 12; attempt++) {
+		if (cancelled && cancelled()) return DFU_DISCONNECTED_EARLY;
 		k_sem_reset(&s_link.sem);
 		rc = bt_conn_le_create(&target->addr, &create_param, &conn_param,
 				       &s_link.conn);
@@ -372,7 +415,15 @@ extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *targe
 		LOG_ERR("bt_conn_le_create rc=%d", rc);
 		return DFU_CONNECT_FAILED;
 	}
-	if (k_sem_take(&s_link.sem, K_SECONDS(10)) < 0 || !s_link.connected) {
+	uint32_t connect_start = k_uptime_get_32();
+	while (!(cancelled && cancelled()) && k_uptime_get_32() - connect_start < 10000) {
+		if (k_sem_take(&s_link.sem, K_MSEC(100)) == 0) break;
+	}
+	if (cancelled && cancelled()) {
+		disconnect_and_release();
+		return DFU_DISCONNECTED_EARLY;
+	}
+	if (!s_link.connected) {
 		LOG_ERR("connect timed out or failed");
 		disconnect_and_release();
 		return DFU_CONNECT_FAILED;
@@ -380,6 +431,10 @@ extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *targe
 
 	/* The LL can report success then drop with 0x3E on a weak link. */
 	k_sleep(K_MSEC(300));
+	if (cancelled && cancelled()) {
+		disconnect_and_release();
+		return DFU_DISCONNECTED_EARLY;
+	}
 	log_conn_params(s_link.conn, "at connect");
 	if (!s_link.connected) {
 		LOG_WRN("link dropped immediately after connect");
@@ -387,27 +442,9 @@ extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *targe
 		return DFU_CONNECT_FAILED;
 	}
 
-	/* ---- describe the firmware ---- */
-	ZipStream image(&bundle->bin);
-	ZipStream init_packet(&bundle->dat);
-
-	Firmware firmware;
-	firmware.type = bundle->type;
-	firmware.image = &image;
-	firmware.init_packet = (bundle->dat.size > 0) ? &init_packet : nullptr;
-
-	/* Only a multi-image bundle has to state the split; for a single type
-	 * the library derives the sizes from type + image->size(). */
-	if ((bundle->type & (bundle->type - 1)) != 0) {
-		firmware.softdevice_size = bundle->sd_size;
-		firmware.bootloader_size = bundle->bl_size;
-		uint32_t combined = bundle->sd_size + bundle->bl_size;
-		firmware.application_size =
-			(bundle->bin.size > combined) ? (bundle->bin.size - combined) : 0;
-	}
-
 	/* ---- map config -> Parameters ---- */
 	Parameters params;
+	params.cancelled = cancelled;
 	params.packets_before_notification = cfg->prn;
 	/* Parameters::mtu is only "exchange or not"; the payload is capped by
 	 * CONFIG_NORDIC_LEGACY_DFU_MAX_PACKET_SIZE either way. */
@@ -436,29 +473,51 @@ extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *targe
 		init_packet.size(), params.packets_before_notification,
 		cfg->high_mtu ? "exchange" : "default", cfg->pkt_gap_ms,
 		cfg->erase_pause_ms, cfg->erase_inflight);
-	if (cfg->erase_pause_ms == 0 && cfg->pkt_gap_ms < 18) {
-		LOG_WRN("uniform pacing with pkt_gap_ms=%u is below the measured "
-			"floor of 18 ms — expect OPERATION FAILED or a stalled "
-			"packet write within the first few pages",
-			cfg->pkt_gap_ms);
-	}
 
 	LogObserver observer;
 	observer.start();
 
 	LegacyDfuClient client;
 	client.set_observer(&observer);
+	Report report;
+	const bool secure = protocol == PackageProtocol::Secure;
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+	SecureDfuClient secure_client;
+	secure_client.set_observer(&observer);
+	if (secure) {
+		k_mutex_lock(&s_active_lock, K_FOREVER);
+		s_secure_active = &secure_client;
+		k_mutex_unlock(&s_active_lock);
+		report = secure_client.run(s_link.conn, firmware, params);
+		k_mutex_lock(&s_active_lock, K_FOREVER);
+		s_secure_active = nullptr;
+		k_mutex_unlock(&s_active_lock);
+	}
+#endif
 
 	/* Published only for the duration of run(); cleared before `client`
-	 * goes out of scope so a late abort cannot touch a dead object. */
-	set_active(&client);
-	Report report = client.run(s_link.conn, firmware, params);
-	set_active(nullptr);
+	 * goes out of scope so a late abort cannot touch a dead object.
+	 * Dispatch by the validated package, not a failed protocol probe. A
+	 * Legacy update never discovers FE59, and a Secure error never falls
+	 * through to a Legacy RESET or START command. */
+	if (!secure) {
+		/* This measured pacing limit belongs to the Legacy receiver,
+		 * not Secure's CRC-checked object/receipt flow. */
+		if (cfg->erase_pause_ms == 0 && cfg->pkt_gap_ms < 18) {
+			LOG_WRN("Legacy uniform pacing with pkt_gap_ms=%u is below the measured "
+				"floor of 18 ms — expect OPERATION FAILED or a stalled "
+				"packet write within the first few pages", cfg->pkt_gap_ms);
+		}
+		set_active(&client);
+		report = client.run(s_link.conn, firmware, params);
+		set_active(nullptr);
+	}
 
 	if (report.result == Result::RemoteError) {
 		LOG_ERR("result=%s remote=0x%02x (%s) sent=%u",
 			result_str(report.result), report.remote,
-			remote_status_str(report.remote), report.bytes_sent);
+			secure ? "Secure DFU status; see detail above" : remote_status_str(report.remote),
+			report.bytes_sent);
 	} else {
 		LOG_INF("result=%s err=%d version=%u sent=%u",
 			result_str(report.result), report.err,
@@ -475,5 +534,9 @@ extern "C" enum dfu_result dfu_client_run(const struct ble_scanner_target *targe
 		LOG_INF("target may re-advertise at address+1 (SDK 6.1 style)");
 	}
 
+	/* FE59 can also advertise a buttonless application. Only an actual
+	 * Secure transfer gets the explicitly unverified boot verdict; Legacy
+	 * retains its existing post-transfer DFU-service verification. */
+	if (secure && report.result == Result::Success) return DFU_BOOT_UNVERIFIED;
 	return to_dfu_result(report);
 }

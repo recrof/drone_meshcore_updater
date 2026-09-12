@@ -23,7 +23,8 @@ struct ble_scanner_target {
 	bt_addr_le_t addr;                       /* peer address, ready for bt_conn_le_create */
 	int8_t       rssi;                       /* strongest RSSI seen at match time */
 	char         name[BLE_SCANNER_NAME_MAX]; /* advertised name or "" */
-	bool         dfu_uuid;                   /* the ad carried the Legacy DFU service UUID */
+	bool         legacy_dfu_uuid;            /* Legacy bootloader advertisement */
+	bool         secure_dfu_uuid;            /* FE59: bootloader OR buttonless app */
 };
 
 /* Toggle per-advertisement debug logging. When on, every rejected ad
@@ -130,7 +131,8 @@ struct ble_scanner_seen {
 	int8_t   best;                           /* strongest this survey */
 	uint16_t count;                          /* advertisements seen */
 	char     name[BLE_SCANNER_NAME_MAX];
-	bool     dfu_uuid;
+	bool     legacy_dfu_uuid;
+	bool     secure_dfu_uuid;
 };
 
 /* Begin (or restart the watchdog on) a survey. Idempotent: calling it while
@@ -195,6 +197,16 @@ int ble_scanner_with_radio_paused(int (*fn)(void));
  * for drone use. Without this there is no way to end one short of a reboot.
  */
 void ble_scanner_cancel(void);
+
+/* Run-scoped variants. NULL keeps ordinary scanning independent from an
+ * earlier DFU Stop. The callback stays valid throughout the blocking call. */
+int ble_scanner_find_first_cancellable(struct ble_scanner_target *out,
+	uint32_t timeout_ms, const char *name_filter, int8_t min_rssi,
+	const bt_addr_le_t *prefer_mac, bool (*cancelled)(void));
+int ble_scanner_find_pinned_cancellable(struct ble_scanner_target *out,
+	uint32_t timeout_ms, const bt_addr_le_t *addr, bool (*cancelled)(void));
+int ble_scanner_seen_at_cancellable(const bt_addr_le_t *addr,
+	uint32_t timeout_ms, struct ble_scanner_target *out, bool (*cancelled)(void));
 
 #ifdef __cplusplus
 }

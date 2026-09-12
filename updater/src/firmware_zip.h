@@ -24,6 +24,8 @@ extern "C" {
 
 
 #define ZIP_NAME_MAX 64
+/* Bound both upload inspection and manifest entry lookup. */
+#define ZIP_ENTRY_MAX 32
 
 /* Bit flags matching the Nordic Legacy DFU "Start" opcode's mode byte
  * (see LegacyDfuImpl.java). Combined images set multiple bits.
@@ -68,6 +70,12 @@ struct firmware_bundle {
 int firmware_zip_open(const char *zip_path, struct firmware_bundle *out,
 		      char *err, size_t err_len);
 
+/* Resolve a bundle using a caller-owned, already-open handle. This only
+ * repositions that handle; it never opens/closes it or touches the streaming
+ * singleton. An inspector can therefore overlap the start of a DFU safely. */
+int firmware_zip_resolve(struct fs_file_t *file, struct firmware_bundle *out,
+			 char *err, size_t err_len);
+
 /* Stream `len` bytes from `entry` starting at byte `offset` within the
  * entry. Returns bytes read (0 = past end), or negative errno on error.
  */
@@ -92,7 +100,9 @@ int firmware_zip_read_at(struct fs_file_t *f, uint32_t off, void *buf, uint32_t 
 
 /* Read the local file header at `cursor`. Returns 0 and fills `out` and
  * `next_cursor`; 1 at the end of the header sequence; negative errno on IO
- * error. Unlike the streaming path this does NOT reject compressed or
+ * error or invalid entry bounds/STORE sizes. Successful entries always make
+ * forward progress and fit inside the archive. Unlike the streaming path
+ * this does NOT reject compressed or
  * streamed entries — it reports them, so a caller can say which entry is the
  * problem instead of only that there is one. */
 int firmware_zip_next(struct fs_file_t *f, uint32_t cursor,

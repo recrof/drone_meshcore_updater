@@ -108,7 +108,7 @@ K_THREAD_STACK_DEFINE(s_stack, DFU_STACK_SIZE);
 static struct k_thread s_thread;
 static k_tid_t         s_tid;
 
-static struct k_mutex   s_lock;
+static K_MUTEX_DEFINE(s_lock);
 static bool             s_busy;
 
 /*
@@ -290,7 +290,8 @@ static int find_target(struct dfu_target *out, const struct app_config *cfg,
 			if (n > 1) {
 				LOG_INF("scanning via %s (%u ms)", usable[i]->name, slice);
 			}
-			int rc = usable[i]->find(out, cfg, slice, pin);
+			if (cancelled()) return -ECANCELED;
+			int rc = usable[i]->find(out, cfg, slice, pin, cancelled);
 			if (rc == -ECANCELED) {
 				return rc;   /* stopped — not a transport fault */
 			}
@@ -374,6 +375,8 @@ static void run_thread(void *a, void *b, void *c)
 	 */
 	const bool auto_mode  = (s_path[0] == '\0');
 	bool       bundle_open = false;
+	struct dfu_target target;
+	bool target_acquired = false;
 
 	if (auto_mode) {
 		if (!cfg->ble_firmware_mapping[0]) {
@@ -396,6 +399,8 @@ static void run_thread(void *a, void *b, void *c)
 	}
 
 	uint8_t attempt = 0;
+	uint16_t restarts = 0;
+	bool first_pass = true;
 	while (attempt < cfg->retries) {
 		/* Re-read config on *every* attempt, not just once per run.
 		 * A run can span many minutes — five attempts separated by
@@ -410,11 +415,17 @@ static void run_thread(void *a, void *b, void *c)
 		 * condition is intentional too — lowering it should be able to
 		 * cut a grinding retry loop short.
 		 */
-		if (attempt > 0) {
+		if (!first_pass) {
 			app_config_load();
 			LOG_INF("DFU runner: attempt %u cfg prn=%u pkt_gap_ms=%u "
 				"min_rssi=%d", attempt + 1, cfg->prn,
 				cfg->pkt_gap_ms, cfg->min_rssi);
+		}
+		first_pass = false;
+		/* Restart-only iterations still reload and obey a lowered budget. */
+		if (attempt >= cfg->retries || restarts > cfg->retries) {
+			status_result = DFU_STATUS_RESULT_RETRIES_EXHAUSTED;
+			goto fail;
 		}
 
 		if (cancelled()) {
@@ -424,7 +435,6 @@ static void run_thread(void *a, void *b, void *c)
 		dfu_status_attempt(attempt + 1);
 		dfu_status_set_state(DFU_STATUS_SCANNING);
 
-		struct dfu_target target;
 		/* Explicit path: the file is already open, so its shape picks
 		 * the transport outright. Auto path: narrow by what the
 		 * mapping rules could select, which is usually still one. */
@@ -435,6 +445,9 @@ static void run_thread(void *a, void *b, void *c)
 				kinds == KIND_BIT(DFU_PAYLOAD_ZIP) ? "packaged" : "raw-image");
 		}
 		rc = find_target(&target, cfg, kinds, s_pin);
+		/* find() may already own a connection. Even a Stop or mapping
+		 * failure before run() must release this acquisition exactly once. */
+		target_acquired = (rc == 0);
 		if (rc == -ECANCELED || cancelled()) {
 			goto stopped;
 		}
@@ -491,12 +504,12 @@ static void run_thread(void *a, void *b, void *c)
 				path_held,
 				payload.kind == DFU_PAYLOAD_ZIP ? "package" : "raw image");
 			status_result = DFU_STATUS_RESULT_BAD_BUNDLE;
-			target.tp->release(&target);
 			goto fail;
 		}
 
-		enum dfu_result r = target.tp->run(&target, &payload, cfg);
+		enum dfu_result r = target.tp->run(&target, &payload, cfg, cancelled);
 		target.tp->release(&target);
+		target_acquired = false;
 		/* Checked before the result is interpreted: an aborted transfer
 		 * reports whatever error its own path produced, and recording
 		 * that as a genuine failure would be a lie about a run the
@@ -515,7 +528,7 @@ static void run_thread(void *a, void *b, void *c)
 		 */
 		if (r == DFU_OK && target.tp->verify != NULL) {
 			dfu_status_set_state(DFU_STATUS_VERIFYING);
-			r = target.tp->verify(&target, cfg);
+			r = target.tp->verify(&target, cfg, cancelled);
 			if (cancelled()) {
 				goto stopped;
 			}
@@ -536,7 +549,7 @@ static void run_thread(void *a, void *b, void *c)
 		 */
 		int auth = ble_pairing_verdict();
 
-		if (r != DFU_OK && auth != DFU_STATUS_RESULT_NONE) {
+		if (r != DFU_OK && r != DFU_BOOT_UNVERIFIED && auth != DFU_STATUS_RESULT_NONE) {
 			LOG_ERR("DFU runner: %s",
 				auth == DFU_STATUS_RESULT_AUTH_REQUIRED
 					? "the target wants a PIN and none was offered"
@@ -546,17 +559,32 @@ static void run_thread(void *a, void *b, void *c)
 		}
 
 		switch (r) {
+		case DFU_BOOT_UNVERIFIED:
+			LOG_WRN("DFU runner: Secure transfer accepted; application boot unverified");
+			led_set_state(LED_STATE_IDLE);
+			dfu_status_finish(DFU_STATUS_RESULT_BOOT_UNVERIFIED);
+			goto done;
+		case DFU_BAD_PACKAGE:
+			LOG_ERR("DFU runner: unsupported package or protocol (not retrying)");
+			status_result = DFU_STATUS_RESULT_BAD_BUNDLE;
+			goto fail;
 		case DFU_OK:
 			LOG_INF("DFU runner: SUCCESS");
 			led_set_state(LED_STATE_DONE_OK);
 			dfu_status_finish(DFU_STATUS_RESULT_OK);
 			goto done;
 		case DFU_BUTTONLESS_TRIGGERED:
+			/* Mode changes must work with retries=1, but cannot reset the
+			 * same attempt forever if a peer never leaves its old mode. */
+			if (++restarts > cfg->retries) {
+				status_result = DFU_STATUS_RESULT_RETRIES_EXHAUSTED;
+				goto fail;
+			}
 			LOG_INF("DFU runner: buttonless triggered, rescanning");
 			if (runner_sleep(K_SECONDS(2))) {
 				goto stopped;
 			}
-			continue;    /* doesn't consume a retry */
+			continue;    /* consumes the separate restart budget */
 		case DFU_CONNECT_FAILED:
 			LOG_WRN("DFU runner: connect failed — short cooldown");
 			status_result = dfu_status_from_dfu_result((int)r);
@@ -613,6 +641,7 @@ fail:
 	led_set_state(LED_STATE_DONE_FAIL);
 	dfu_status_finish(status_result);
 done:
+	if (target_acquired) target.tp->release(&target);
 	/* One close for every exit path — auto mode can bail before a bundle
 	 * was ever opened, so it has to be conditional.
 	 */
@@ -628,16 +657,19 @@ int dfu_runner_start(const char *zip_path, const char *pin,
 	/* NULL or "" selects auto-flash — the bundle is chosen from
 	 * ble_firmware_mapping once a target has been found.
 	 */
-	static bool inited;
-	if (!inited) {
-		k_mutex_init(&s_lock);
-		inited = true;
-	}
-
 	k_mutex_lock(&s_lock, K_FOREVER);
 	if (s_busy) {
 		k_mutex_unlock(&s_lock);
 		return -EBUSY;
+	}
+	/* Application completion precedes kernel termination. Join before
+	 * reusing the old thread object/stack; it no longer takes s_lock. */
+	if (s_tid != NULL) {
+		int rc = k_thread_join(s_tid, K_FOREVER);
+		if (rc < 0) {
+			k_mutex_unlock(&s_lock);
+			return rc;
+		}
 	}
 	snprintf(s_path, sizeof(s_path), "%s", zip_path ? zip_path : "");
 	snprintf(s_pin,  sizeof(s_pin),  "%s", pin ? pin : "");
@@ -657,16 +689,13 @@ int dfu_runner_start(const char *zip_path, const char *pin,
 	 * The stale give is drained for the same reason. */
 	atomic_clear(&s_cancel);
 	k_sem_reset(&s_wake);
-	k_mutex_unlock(&s_lock);
-
-	/* Abandon any previous thread — Zephyr threads are lightweight, we
-	 * just create a fresh one per DFU cycle. Stack is static so no
-	 * allocation.
-	 */
+	/* Publish the handle and name before execution; serialize with Stop. */
 	s_tid = k_thread_create(&s_thread, s_stack, DFU_STACK_SIZE,
 				run_thread, NULL, NULL, NULL,
-				K_PRIO_PREEMPT(7), 0, K_NO_WAIT);
+				K_PRIO_PREEMPT(7), 0, K_FOREVER);
 	k_thread_name_set(s_tid, "dfu_runner");
+	k_thread_start(s_tid);
+	k_mutex_unlock(&s_lock);
 	return 0;
 }
 
@@ -674,7 +703,6 @@ int dfu_runner_stop(void)
 {
 	k_mutex_lock(&s_lock, K_FOREVER);
 	bool busy = s_busy;
-	k_mutex_unlock(&s_lock);
 
 	if (!busy) {
 		/* Idle, but DONE/FAILED are sticky, so there is still something
@@ -683,6 +711,7 @@ int dfu_runner_stop(void)
 		 * disabled — pressing it always leaves the same clean state. */
 		dfu_status_reset();
 		LOG_INF("DFU runner: stop requested while idle — status cleared");
+		k_mutex_unlock(&s_lock);
 		return -EALREADY;
 	}
 
@@ -700,6 +729,8 @@ int dfu_runner_stop(void)
 			tps[i]->abort();
 		}
 	}
+	/* No old Stop may wake or abort a newly started run. */
+	k_mutex_unlock(&s_lock);
 	return 0;
 }
 

@@ -40,8 +40,8 @@
  *                   bundle and has nothing to do with legacy DFU. Same file
  *                   extension, same conventional name, unrelated schema.
  *                   Confusing the two is a documented trap.
- *   name length     ZIP_NAME_MAX in firmware_zip.h is 64. A longer name is
- *                   truncated on device and then does not match the manifest.
+ *   ZIP limits      the device bounds every entry's name and the total count;
+ *                   compare actual parser verdicts in zip-parity.test.mjs.
  */
 
 /* ---- CRC-32 (IEEE 802.3), which is what a ZIP stores -------------------- */
@@ -127,15 +127,29 @@ export function transportForName(name) {
 /* ---- ZIP ---------------------------------------------------------------- */
 
 const LFH_SIG = 0x04034b50;
-const ZIP_NAME_MAX = 64;   /* firmware_zip.h */
+export const ZIP_NAME_MAX = 64;   /* firmware_zip.h; bytes, not characters */
+export const ZIP_ENTRY_MAX = 32;
+export const NORDIC_SECTIONS = [
+  "softdevice_bootloader_application", "softdevice_bootloader",
+  "application", "bootloader", "softdevice",
+];
 
 /** Walk local file headers from offset 0. Returns entries, or throws. */
 export function walkZip(bytes) {
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const out = [];
   let p = 0;
-  while (p + 30 <= bytes.length) {
-    if (dv.getUint32(p, true) !== LFH_SIG) break;
+  while (true) {
+    if (bytes.length - p < 4) throw new Error("truncated ZIP terminator");
+    const sig = dv.getUint32(p, true);
+    if (sig === 0x02014b50 || sig === 0x06054b50) {
+      if (bytes.length - p < (sig === 0x02014b50 ? 46 : 22)) {
+        throw new Error("truncated ZIP directory record");
+      }
+      break;
+    }
+    if (sig !== LFH_SIG) throw new Error("invalid ZIP record signature");
+    if (bytes.length - p < 30) throw new Error("truncated local file header");
     const flags = dv.getUint16(p + 6, true);
     const method = dv.getUint16(p + 8, true);
     const crc = dv.getUint32(p + 14, true);
@@ -148,8 +162,11 @@ export function walkZip(bytes) {
     const name = new TextDecoder().decode(bytes.subarray(nameAt, nameAt + nameLen));
     const dataAt = nameAt + nameLen + extraLen;
     if (dataAt + csize > bytes.length) throw new Error(`truncated data for ${name}`);
+    if (method === 0 && !(flags & 0x08) && csize !== usize) {
+      throw new Error(`STORE sizes disagree for ${name}`);
+    }
     out.push({
-      name, method, crc, size: usize, offset: dataAt,
+      name, nameLength: nameLen, method, crc, size: usize, offset: dataAt,
       /* Bit 3 puts the sizes in a trailing descriptor, leaving the header's
        * copies as zero. Nordic's packager does not do this; a file that does
        * cannot be walked header-to-header, which is exactly how the device
@@ -288,8 +305,14 @@ function inspectZip(bytes, r) {
     return { kind: KIND.UNKNOWN, details: {} };
   }
 
-  const byName = new Map(entries.map(e => [e.name, e]));
+  // firmware_zip.c resolves the first exact-name entry, not the last.
+  const byName = new Map();
+  for (const e of entries) if (!byName.has(e.name)) byName.set(e.name, e);
   const manifest = byName.get("manifest.json");
+
+  if (entries.length > ZIP_ENTRY_MAX) {
+    r.add("error", "zip-too-many-entries", `The device accepts at most ${ZIP_ENTRY_MAX} ZIP entries.`);
+  }
 
   /* ---- integrity, for whatever kind this turns out to be ---- */
   for (const e of entries) {
@@ -312,11 +335,10 @@ function inspectZip(bytes, r) {
         `${e.name} fails its CRC-32 — the archive is damaged ` +
         `(header 0x${e.crc.toString(16)}, data 0x${actual.toString(16)}).`);
     }
-    if (e.name.length >= ZIP_NAME_MAX) {
+    if (e.nameLength >= ZIP_NAME_MAX) {
       r.add("error", "zip-name-too-long",
-        `"${e.name}" is ${e.name.length} characters; the device truncates ` +
-        `names at ${ZIP_NAME_MAX - 1} and would then fail to match it against ` +
-        `the manifest.`);
+        `"${e.name}" is ${e.nameLength} bytes; every ZIP entry name must fit ` +
+        `in ${ZIP_NAME_MAX - 1} bytes, including unrelated entries.`);
     }
   }
 
@@ -328,6 +350,10 @@ function inspectZip(bytes, r) {
   }
 
   let doc;
+  if (!manifest.size || manifest.size > 2048) {
+    r.add("error", "manifest-size", "The device requires a manifest of 1–2048 bytes.");
+    return { kind: KIND.UNKNOWN, details: {} };
+  }
   try {
     doc = JSON.parse(new TextDecoder().decode(manifest.data));
   } catch (e) {
@@ -353,9 +379,27 @@ function inspectZip(bytes, r) {
     return { kind: KIND.UNKNOWN, details: {} };
   }
 
-  const sections = Object.keys(doc.manifest);
-  const section = doc.manifest[sections[0]] ?? {};
-  const details = { sections, binFile: section.bin_file, datFile: section.dat_file };
+  const sections = NORDIC_SECTIONS.filter(key =>
+    doc.manifest[key] && typeof doc.manifest[key] === "object" && !Array.isArray(doc.manifest[key]));
+  const selected = sections[0];
+  if (!selected || selected === "softdevice_bootloader_application") {
+    r.add("error", "manifest-section", selected
+      ? "The combined SoftDevice/bootloader/application flow is not supported."
+      : "The manifest has no recognized firmware section.");
+    return { kind: KIND.UNKNOWN, details: { sections } };
+  }
+  const section = doc.manifest[selected];
+  const details = { sections, selectedSection: selected, binFile: section.bin_file, datFile: section.dat_file };
+  if (sections.length > 1) {
+    r.add("warn", "manifest-selected-section",
+      `Only the ${selected} section will be transferred; the updater does not perform a multi-stage update.`);
+  }
+  if (selected === "softdevice_bootloader") {
+    const sizes = ["sd_size", "bl_size"].map(key => section[key] ?? section.info_read_only_metadata?.[key]);
+    if (sizes.some(n => !Number.isInteger(n) || n <= 0 || n > 0xffffffff)) {
+      r.add("error", "manifest-sizes", "SoftDevice and bootloader sizes must be positive 32-bit integers.");
+    }
+  }
 
   for (const [key, file] of [["bin_file", section.bin_file], ["dat_file", section.dat_file]]) {
     if (!file) {

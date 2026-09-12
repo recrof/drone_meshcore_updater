@@ -35,6 +35,15 @@ static const bt_uuid_128 kControlPointUuid = {{BT_UUID_TYPE_128}, DFU_UUID_BYTES
 static const bt_uuid_128 kPacketUuid = {{BT_UUID_TYPE_128}, DFU_UUID_BYTES(0x32)};
 static const bt_uuid_128 kVersionUuid = {{BT_UUID_TYPE_128}, DFU_UUID_BYTES(0x34)};
 
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+static const bt_uuid_16 kSecureServiceUuid = {{BT_UUID_TYPE_16}, 0xFE59};
+#define SECURE_UUID_BYTES(id) \
+	{0x50, 0xEA, 0xDA, 0x30, 0x88, 0x83, 0xB8, 0x9F, \
+	 0x60, 0x4F, 0x15, 0xF3, (id), 0x00, 0xC9, 0x8E}
+static const bt_uuid_128 kSecureControlUuid = {{BT_UUID_TYPE_128}, SECURE_UUID_BYTES(1)};
+static const bt_uuid_128 kSecurePacketUuid = {{BT_UUID_TYPE_128}, SECURE_UUID_BYTES(2)};
+#endif
+
 /* Op code 0x11: Packet Receipt Notification. Mirrors
  * LegacyDfuImpl.OP_CODE_PACKET_RECEIPT_NOTIF_KEY. */
 static constexpr uint8_t kOpCodePacketReceiptNotif = 0x11;
@@ -46,6 +55,8 @@ static constexpr uint8_t kOpCodePacketReceiptNotif = 0x11;
  * callback slot and must be ignored.
  */
 static GattLink *s_active;
+static GattLink *s_links;
+static struct k_spinlock s_links_lock;
 static bt_conn_cb s_conn_cb;
 static bool s_conn_cb_registered;
 
@@ -64,6 +75,27 @@ void GattLink::connected_cb(bt_conn *conn, uint8_t err)
 
 void GattLink::disconnected_cb(bt_conn *conn, uint8_t reason)
 {
+	/* NCS 3.4 conn.c calls bt_l2cap_disconnected before notifying us.
+	 * ATT requests and volatile GATT subscriptions have therefore retired.
+	 * Visit detached owners too: a failed last-unsubscribe CCC response can
+	 * return without either application callback (gatt_write_ccc_rsp). */
+	k_spinlock_key_t links_key = k_spin_lock(&s_links_lock);
+	GattLink *links = s_links;
+	k_spin_unlock(&s_links_lock, links_key);
+	/* Registry nodes and next pointers have static lifetime and are never
+	 * removed or changed after insertion. Do not unref under a spinlock. */
+	for (GattLink *link = links; link != nullptr; link = link->next_link_) {
+		k_spinlock_key_t key = k_spin_lock(&link->sub_lock_);
+		bt_conn *released = nullptr;
+		if (link->sub_conn_ == conn) {
+			link->sub_linked_ = false;
+			link->subscribed_ = false;
+			link->ccc_operation_ = CccOperation::None;
+			released = link->release_subscription_locked();
+		}
+		k_spin_unlock(&link->sub_lock_, key);
+		if (released) bt_conn_unref(released);
+	}
 	GattLink *self = s_active;
 
 	if (self == nullptr || conn != self->conn_) {
@@ -77,20 +109,32 @@ void GattLink::disconnected_cb(bt_conn *conn, uint8_t reason)
 void GattLink::wake_all()
 {
 	k_sem_give(&op_sem_);
+	k_sem_give(&ccc_sem_);
 	k_sem_give(&tx_sem_);
 	k_sem_give(&notify_sem_);
 	k_sem_give(&receipt_sem_);
 	k_sem_give(&link_sem_);
 }
 
-int GattLink::attach(bt_conn *conn)
+int GattLink::attach(bt_conn *conn, bool (*cancelled)())
 {
+	cancelled_ = cancelled;
+	if (externally_cancelled()) return -ECANCELED;
 	if (conn == nullptr) {
 		return -EINVAL;
+	}
+	/* Parameters and their data may still be retained after detach().
+	 * Do not reset completion state or borrow their storage for a retry
+	 * until the host has delivered the previous write's callback. */
+	if (control_write_pending()) return -EBUSY;
+	if (subscription_busy(false)) {
+		LOG_WRN("previous CCC operation not released; wait or disconnect its peer before retrying");
+		return -EBUSY;
 	}
 
 	if (!sems_ready_) {
 		k_sem_init(&op_sem_, 0, 1);
+		k_sem_init(&ccc_sem_, 0, 1);
 		k_sem_init(&tx_sem_, 0, 1);
 		k_sem_init(&notify_sem_, 0, 1);
 		k_sem_init(&receipt_sem_, 0, 1);
@@ -108,6 +152,13 @@ int GattLink::attach(bt_conn *conn)
 		}
 		s_conn_cb_registered = true;
 	}
+	if (!link_registered_) {
+		k_spinlock_key_t key = k_spin_lock(&s_links_lock);
+		next_link_ = s_links;
+		s_links = this;
+		link_registered_ = true;
+		k_spin_unlock(&s_links_lock, key);
+	}
 
 	conn_ = bt_conn_ref(conn);
 	if (conn_ == nullptr) {
@@ -121,9 +172,13 @@ int GattLink::attach(bt_conn *conn)
 	subscribed_ = false;
 	response_pending_ = false;
 	response_len_ = 0;
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+	response_overflow_ = false;
+#endif
 	atomic_clear(&aborted_);
 	atomic_clear(&prn_bytes_);
 	k_sem_reset(&op_sem_);
+	k_sem_reset(&ccc_sem_);
 	k_sem_reset(&tx_sem_);
 	k_sem_reset(&notify_sem_);
 	k_sem_reset(&receipt_sem_);
@@ -135,7 +190,7 @@ int GattLink::attach(bt_conn *conn)
 		connected_ = (info.state == BT_CONN_STATE_CONNECTED);
 	}
 
-	return connected_ ? 0 : -ENOTCONN;
+	return aborted() ? -ECANCELED : (connected_ ? 0 : -ENOTCONN);
 }
 
 void GattLink::detach()
@@ -152,19 +207,18 @@ void GattLink::detach()
 
 int GattLink::wait(struct k_sem *sem, uint32_t timeout_ms)
 {
-	k_timeout_t timeout = (timeout_ms != 0) ? K_MSEC(timeout_ms) : K_FOREVER;
-	int rc = k_sem_take(sem, timeout);
-
-	if (aborted()) {
-		return -ECANCELED;
+	uint32_t start = k_uptime_get_32();
+	for (;;) {
+		if (aborted()) return -ECANCELED;
+		if (!connected_) return -ENOTCONN;
+		uint32_t elapsed = k_uptime_get_32() - start;
+		if (timeout_ms && elapsed >= timeout_ms) return -ETIMEDOUT;
+		uint32_t slice = timeout_ms ? MIN(100u, timeout_ms - elapsed) : 100u;
+		int rc = k_sem_take(sem, K_MSEC(slice));
+		if (aborted()) return -ECANCELED;
+		if (!connected_) return -ENOTCONN;
+		if (rc == 0) return 0;
 	}
-	if (!connected_) {
-		return -ENOTCONN;
-	}
-	if (rc != 0) {
-		return -ETIMEDOUT;
-	}
-	return 0;
 }
 
 void GattLink::abort()
@@ -182,6 +236,7 @@ void GattLink::abort()
 int GattLink::run_discovery(const bt_uuid *uuid, uint8_t type, uint16_t start, uint16_t end,
 			    bt_gatt_discover_func_t func)
 {
+	if (aborted()) return -ECANCELED;
 	memset(&disc_params_, 0, sizeof(disc_params_));
 	disc_params_.uuid = uuid;
 	disc_params_.func = func;
@@ -204,7 +259,7 @@ uint8_t GattLink::discover_services_cb(bt_conn *conn, const bt_gatt_attr *attr,
 	ARG_UNUSED(params);
 	GattLink *self = s_active;
 
-	if (self == nullptr) {
+	if (self == nullptr || conn != self->conn_ || params != &self->disc_params_) {
 		return BT_GATT_ITER_STOP;
 	}
 	if (attr == nullptr) {
@@ -215,7 +270,11 @@ uint8_t GattLink::discover_services_cb(bt_conn *conn, const bt_gatt_attr *attr,
 	const bt_gatt_service_val *svc = static_cast<const bt_gatt_service_val *>(attr->user_data);
 
 	self->h_.primary_service_count++;
-	if (bt_uuid_cmp(svc->uuid, &kServiceUuid.uuid) == 0) {
+	const bt_uuid *wanted = &kServiceUuid.uuid;
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+	if (self->secure_) wanted = &kSecureServiceUuid.uuid;
+#endif
+	if (bt_uuid_cmp(svc->uuid, wanted) == 0) {
 		self->h_.service_start = attr->handle;
 		self->h_.service_end = svc->end_handle;
 	}
@@ -229,7 +288,7 @@ uint8_t GattLink::discover_chars_cb(bt_conn *conn, const bt_gatt_attr *attr,
 	ARG_UNUSED(params);
 	GattLink *self = s_active;
 
-	if (self == nullptr) {
+	if (self == nullptr || conn != self->conn_ || params != &self->disc_params_) {
 		return BT_GATT_ITER_STOP;
 	}
 	if (attr == nullptr) {
@@ -239,9 +298,17 @@ uint8_t GattLink::discover_chars_cb(bt_conn *conn, const bt_gatt_attr *attr,
 
 	const bt_gatt_chrc *chrc = static_cast<const bt_gatt_chrc *>(attr->user_data);
 
-	if (bt_uuid_cmp(chrc->uuid, &kControlPointUuid.uuid) == 0) {
+	const bt_uuid *control = &kControlPointUuid.uuid;
+	const bt_uuid *packet = &kPacketUuid.uuid;
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+	if (self->secure_) {
+		control = &kSecureControlUuid.uuid;
+		packet = &kSecurePacketUuid.uuid;
+	}
+#endif
+	if (bt_uuid_cmp(chrc->uuid, control) == 0) {
 		self->h_.control_point = chrc->value_handle;
-	} else if (bt_uuid_cmp(chrc->uuid, &kPacketUuid.uuid) == 0) {
+	} else if (bt_uuid_cmp(chrc->uuid, packet) == 0) {
 		self->h_.packet = chrc->value_handle;
 	} else if (bt_uuid_cmp(chrc->uuid, &kVersionUuid.uuid) == 0) {
 		self->h_.version = chrc->value_handle;
@@ -256,7 +323,7 @@ uint8_t GattLink::discover_ccc_cb(bt_conn *conn, const bt_gatt_attr *attr,
 	ARG_UNUSED(params);
 	GattLink *self = s_active;
 
-	if (self == nullptr) {
+	if (self == nullptr || conn != self->conn_ || params != &self->disc_params_) {
 		return BT_GATT_ITER_STOP;
 	}
 	if (attr == nullptr) {
@@ -269,8 +336,14 @@ uint8_t GattLink::discover_ccc_cb(bt_conn *conn, const bt_gatt_attr *attr,
 	return BT_GATT_ITER_STOP;
 }
 
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+int GattLink::discover(bool secure)
+{
+	secure_ = secure;
+#else
 int GattLink::discover()
 {
+#endif
 	/*
 	 * All primary services in one pass: it yields the DFU service range
 	 * and the service count that LegacyButtonlessDfuImpl needs to tell an
@@ -331,12 +404,20 @@ uint8_t GattLink::notify_cb(bt_conn *conn, bt_gatt_subscribe_params *params, con
 		return BT_GATT_ITER_STOP;
 	}
 	if (data == nullptr) {
-		/* The host has let go of sub_params_. */
+		/* List removal can precede the CCC completion callback. */
+		k_spinlock_key_t key = k_spin_lock(&self->sub_lock_);
+		if (conn != nullptr && conn != self->sub_conn_) {
+			k_spin_unlock(&self->sub_lock_, key);
+			return BT_GATT_ITER_STOP;
+		}
 		self->subscribed_ = false;
 		self->sub_linked_ = false;
+		bt_conn *released = self->release_subscription_locked();
+		k_spin_unlock(&self->sub_lock_, key);
+		if (released) bt_conn_unref(released);
 		return BT_GATT_ITER_STOP;
 	}
-	if (self != s_active) {
+	if (self != s_active || conn != self->conn_) {
 		/* A late notification from a connection that is over. */
 		return BT_GATT_ITER_STOP;
 	}
@@ -353,7 +434,7 @@ uint8_t GattLink::notify_cb(bt_conn *conn, bt_gatt_subscribe_params *params, con
 	 * binary semaphore coalesces two notifications into one wake-up and
 	 * the count is the only thing the protocol cares about.
 	 */
-	if (length >= 5 && value[0] == kOpCodePacketReceiptNotif) {
+	if (!self->secure_ && length >= 5 && value[0] == kOpCodePacketReceiptNotif) {
 		uint32_t received = static_cast<uint32_t>(value[1]) |
 				    (static_cast<uint32_t>(value[2]) << 8) |
 				    (static_cast<uint32_t>(value[3]) << 16) |
@@ -363,6 +444,13 @@ uint8_t GattLink::notify_cb(bt_conn *conn, bt_gatt_subscribe_params *params, con
 		return BT_GATT_ITER_CONTINUE;
 	}
 
+#if defined(CONFIG_NORDIC_SECURE_DFU)
+	if (self->secure_ && (self->response_pending_ || length > sizeof(self->response_))) {
+		self->response_overflow_ = true;
+		k_sem_give(&self->notify_sem_);
+		return BT_GATT_ITER_CONTINUE;
+	}
+#endif
 	uint16_t n = (length > sizeof(self->response_)) ? sizeof(self->response_) : length;
 	memcpy(self->response_, data, n);
 	self->response_len_ = static_cast<uint8_t>(n);
@@ -376,15 +464,37 @@ uint8_t GattLink::notify_cb(bt_conn *conn, bt_gatt_subscribe_params *params, con
 
 void GattLink::subscribe_cb(bt_conn *conn, uint8_t err, bt_gatt_subscribe_params *params)
 {
-	ARG_UNUSED(conn);
-	ARG_UNUSED(params);
-	GattLink *self = s_active;
-
-	if (self == nullptr) {
+	GattLink *self = CONTAINER_OF(params, GattLink, sub_params_);
+	k_spinlock_key_t key = k_spin_lock(&self->sub_lock_);
+	if (conn != self->sub_conn_) {
+		k_spin_unlock(&self->sub_lock_, key);
 		return;
 	}
-	self->att_err_ = err;
-	k_sem_give(&self->op_sem_);
+	if (self->ccc_operation_ == CccOperation::Enable && self == s_active &&
+	    conn == self->conn_) {
+		self->att_err_ = err;
+		k_sem_give(&self->ccc_sem_);
+	}
+	self->ccc_operation_ = CccOperation::None;
+	bt_conn *released = self->release_subscription_locked();
+	k_spin_unlock(&self->sub_lock_, key);
+	if (released) bt_conn_unref(released);
+}
+
+bt_conn *GattLink::release_subscription_locked()
+{
+	if (sub_linked_ || ccc_operation_ != CccOperation::None) return nullptr;
+	bt_conn *released = sub_conn_;
+	sub_conn_ = nullptr;
+	return released;
+}
+
+bool GattLink::subscription_busy(bool include_linked)
+{
+	k_spinlock_key_t key = k_spin_lock(&sub_lock_);
+	bool busy = ccc_operation_ != CccOperation::None || (include_linked && sub_linked_);
+	k_spin_unlock(&sub_lock_, key);
+	return busy;
 }
 
 int GattLink::subscribe_control_point()
@@ -407,40 +517,17 @@ int GattLink::subscribe_control_point()
 	 * attempt refused with -EBUSY costs one retry, and the alternative is
 	 * corrupting a list the Bluetooth host walks on every disconnect.
 	 */
-	for (int i = 0; sub_linked_ && i < 60; i++) {
+	for (int i = 0; subscription_busy(true) && i < 60; i++) {
+		if (aborted()) return -ECANCELED;
+		if (!connected_) return -ENOTCONN;
 		if (i == 0) {
 			LOG_WRN("previous subscription not released yet — "
 				"waiting before reusing it");
 		}
 		k_sleep(K_MSEC(50));
 	}
-	if (sub_linked_) {
-		/*
-		 * Take it back rather than give up for the rest of the boot.
-		 *
-		 * bt_gatt_unsubscribe() works by pointer identity on *this*
-		 * connection's list only: 0 means it was there and is now
-		 * gone, and anything else means it belongs to some other peer
-		 * and is not ours to touch. So this is safe in the one case it
-		 * can help and a no-op in the one where meddling would corrupt
-		 * a list. It costs a CCC write we are about to make again.
-		 *
-		 * The reason for having it at all is Trap 14's rule: a failure
-		 * whose consequence is "this device cannot flash anything until
-		 * someone power-cycles it" gets a recovery path, not a log
-		 * line. The bonded-subscription retention that produced exactly
-		 * that is fixed below, at its cause; this is the net under any
-		 * future way of arriving at the same place.
-		 */
-		LOG_WRN("the host still holds the last subscription after 3 s — "
-			"reclaiming it");
-		if (bt_gatt_unsubscribe(conn_, &sub_params_) == 0) {
-			sub_linked_ = false;
-		}
-	}
-	if (sub_linked_) {
-		LOG_ERR("the last subscription belongs to another link and "
-			"cannot be reclaimed; refusing to reuse it");
+	if (subscription_busy(true)) {
+		LOG_ERR("previous subscription still owned by host; disconnect its peer before retrying");
 		return -EBUSY;
 	}
 
@@ -518,33 +605,33 @@ int GattLink::subscribe_control_point()
 	 */
 	atomic_set_bit(sub_params_.flags, BT_GATT_SUBSCRIBE_FLAG_VOLATILE);
 
-	/*
-	 * The host's own bookkeeping bits, cleared because this struct is now
-	 * static and outlives the connection that set them (see
-	 * `Session::link_`). WRITE_PENDING left over from a CCC write that a
-	 * disconnect interrupted would describe a response that can never
-	 * arrive. They were free before only because the struct was reborn on
-	 * a fresh stack frame each run — which is exactly the property that
-	 * had to go.
-	 */
+	/* The previous operation AND list membership have retired. Only now
+	 * may the host's bookkeeping bits and the CCC parameters be reused. */
 	atomic_clear_bit(sub_params_.flags, BT_GATT_SUBSCRIBE_FLAG_WRITE_PENDING);
 	atomic_clear_bit(sub_params_.flags, BT_GATT_SUBSCRIBE_FLAG_SENT);
 
 	att_err_ = 0;
-	k_sem_reset(&op_sem_);
+	k_sem_reset(&ccc_sem_);
+	k_spinlock_key_t key = k_spin_lock(&sub_lock_);
+	sub_conn_ = bt_conn_ref(conn_);
+	sub_linked_ = true;
+	ccc_operation_ = CccOperation::Enable;
+	k_spin_unlock(&sub_lock_, key);
 
 	int rc = bt_gatt_subscribe(conn_, &sub_params_);
-	if (rc == -EALREADY) {
-		subscribed_ = true;
-		sub_linked_ = true;
-		return 0;
-	}
 	if (rc != 0) {
+		key = k_spin_lock(&sub_lock_);
+		ccc_operation_ = CccOperation::None;
+		/* EALREADY means the host still links these parameters. Do not
+		 * mistake that for a confirmed successful CCC enable. */
+		sub_linked_ = (rc == -EALREADY);
+		bt_conn *released = release_subscription_locked();
+		k_spin_unlock(&sub_lock_, key);
+		if (released) bt_conn_unref(released);
 		return rc;
 	}
-	sub_linked_ = true;
 
-	rc = wait(&op_sem_, CONFIG_NORDIC_LEGACY_DFU_GATT_TIMEOUT_MS);
+	rc = wait(&ccc_sem_, CONFIG_NORDIC_LEGACY_DFU_GATT_TIMEOUT_MS);
 	if (rc != 0) {
 		return rc;
 	}
@@ -557,20 +644,31 @@ int GattLink::subscribe_control_point()
 
 void GattLink::unsubscribe_control_point()
 {
-	if (subscribed_ && conn_ != nullptr && connected_) {
-		/*
-		 * A clean unsubscribe takes the node off the host's list
-		 * synchronously — and on the last-subscription path it does so
-		 * *without* calling notify(), so nothing else would ever clear
-		 * sub_linked_. Leaving it set would wedge every later run on
-		 * the -EBUSY in subscribe_control_point(): a permanent failure
-		 * produced by the tidy path rather than the untidy one.
-		 */
-		if (bt_gatt_unsubscribe(conn_, &sub_params_) == 0) {
-			sub_linked_ = false;
-		}
-	}
+	k_spinlock_key_t key = k_spin_lock(&sub_lock_);
+	bool can_unsubscribe = subscribed_ && conn_ != nullptr && connected_ &&
+		sub_conn_ == conn_ && ccc_operation_ == CccOperation::None;
 	subscribed_ = false;
+	if (can_unsubscribe) ccc_operation_ = CccOperation::Disable;
+	k_spin_unlock(&sub_lock_, key);
+	if (!can_unsubscribe) return;
+
+	int rc = bt_gatt_unsubscribe(conn_, &sub_params_);
+	key = k_spin_lock(&sub_lock_);
+	if (rc == 0) {
+		/* Membership ends now, but the last subscriber's CCC write still
+		 * owns params until subscribe_cb or the actual disconnect fence.
+		 * With another subscriber, Zephyr leaves value nonzero and calls
+		 * notify(NULL) synchronously; no CCC request was queued. */
+		sub_linked_ = false;
+		if (sub_params_.value != 0) ccc_operation_ = CccOperation::None;
+	} else {
+		/* No disable was queued. The host may still own the linked entry;
+		 * preserve it for volatile-subscription disconnect cleanup. */
+		ccc_operation_ = CccOperation::None;
+	}
+	bt_conn *released = release_subscription_locked();
+	k_spin_unlock(&sub_lock_, key);
+	if (released) bt_conn_unref(released);
 }
 
 void GattLink::clear_response()
@@ -584,14 +682,18 @@ int GattLink::wait_response(uint8_t *buf, uint8_t *len, uint32_t timeout_ms)
 {
 	if (!response_pending_) {
 		int rc = wait(&notify_sem_, timeout_ms);
-		if (rc != 0) {
+		/* Secure final Execute may notify and disconnect in the same RX
+		 * burst. A received response is still authoritative in that case. */
+		if (rc != 0 && !(secure_ && rc == -ENOTCONN && response_pending_)) {
 			return rc;
 		}
+		if (response_overflow_) return -EPROTO;
 		if (!response_pending_) {
 			return -EAGAIN;
 		}
 	}
 
+	if (response_overflow_) return -EPROTO;
 	if (buf != nullptr) {
 		memcpy(buf, response_, response_len_);
 	}
@@ -638,7 +740,7 @@ uint8_t GattLink::read_cb(bt_conn *conn, uint8_t err, bt_gatt_read_params *param
 	ARG_UNUSED(params);
 	GattLink *self = s_active;
 
-	if (self == nullptr) {
+	if (self == nullptr || conn != self->conn_ || params != &self->read_params_) {
 		return BT_GATT_ITER_STOP;
 	}
 	self->att_err_ = err;
@@ -690,17 +792,35 @@ int GattLink::read_version(uint16_t *out)
 	return 0;
 }
 
+bool GattLink::control_write_pending()
+{
+	/* A cleared flag must also mean the old completion signal has been
+	 * delivered. Otherwise attach could reset op_sem_ between clear/give. */
+	k_spinlock_key_t key = k_spin_lock(&write_lock_);
+	bool pending = atomic_get(&write_pending_) != 0;
+	k_spin_unlock(&write_lock_, key);
+	return pending;
+}
+
 void GattLink::write_cb(bt_conn *conn, uint8_t err, bt_gatt_write_params *params)
 {
-	ARG_UNUSED(conn);
-	ARG_UNUSED(params);
-	GattLink *self = s_active;
+	/* Retire the parameter owner even when its session has detached.
+	 * Only the still-active connection may receive the completion event. */
+	GattLink *self = CONTAINER_OF(params, GattLink, write_params_);
+	k_spinlock_key_t key = k_spin_lock(&self->write_lock_);
 
-	if (self == nullptr) {
+	if (conn != self->write_conn_) {
+		k_spin_unlock(&self->write_lock_, key);
 		return;
 	}
-	self->att_err_ = err;
-	k_sem_give(&self->op_sem_);
+	if (self == s_active && conn == self->conn_) {
+		self->att_err_ = err;
+		atomic_clear(&self->write_pending_);
+		k_sem_give(&self->op_sem_);
+	} else {
+		atomic_clear(&self->write_pending_);
+	}
+	k_spin_unlock(&self->write_lock_, key);
 }
 
 int GattLink::write_control_point(const void *data, uint16_t len, bool reset)
@@ -708,22 +828,28 @@ int GattLink::write_control_point(const void *data, uint16_t len, bool reset)
 	if (h_.control_point == 0) {
 		return -ENOENT;
 	}
-	if (aborted() && !reset) {
+	if (externally_cancelled() || (aborted() && !reset)) {
 		return -ECANCELED;
 	}
+	if (control_write_pending()) return -EBUSY;
+	if (data == nullptr || len == 0 || len > sizeof(control_data_)) return -EINVAL;
 
+	memcpy(control_data_, data, len);
 	memset(&write_params_, 0, sizeof(write_params_));
 	write_params_.func = write_cb;
 	write_params_.handle = h_.control_point;
 	write_params_.offset = 0;
-	write_params_.data = data;
+	write_params_.data = control_data_;
 	write_params_.length = len;
 
 	att_err_ = 0;
 	k_sem_reset(&op_sem_);
 
+	write_conn_ = conn_;
+	atomic_set(&write_pending_, 1);
 	int rc = bt_gatt_write(conn_, &write_params_);
 	if (rc != 0) {
+		atomic_clear(&write_pending_); // No callback for an unqueued request.
 		/*
 		 * A target that reboots on Reset or Activate may tear the link
 		 * down before the request is even queued. BaseDfuImpl treats
@@ -748,7 +874,7 @@ void GattLink::packet_sent_cb(bt_conn *conn, void *user_data)
 	ARG_UNUSED(user_data);
 	GattLink *self = s_active;
 
-	if (self != nullptr) {
+	if (self != nullptr && conn == self->conn_) {
 		k_sem_give(&self->tx_sem_);
 	}
 }
@@ -827,7 +953,7 @@ void GattLink::mtu_cb(bt_conn *conn, uint8_t err, bt_gatt_exchange_params *param
 	ARG_UNUSED(params);
 	GattLink *self = s_active;
 
-	if (self == nullptr) {
+	if (self == nullptr || conn != self->conn_ || params != &self->mtu_params_) {
 		return;
 	}
 	self->att_err_ = err;
@@ -836,6 +962,7 @@ void GattLink::mtu_cb(bt_conn *conn, uint8_t err, bt_gatt_exchange_params *param
 
 int GattLink::exchange_mtu(uint16_t mtu)
 {
+	if (aborted()) return -ECANCELED;
 	ARG_UNUSED(mtu);
 
 	/*
@@ -883,23 +1010,16 @@ int GattLink::wait_disconnected(uint32_t timeout_ms)
 		return 0;
 	}
 
-	k_timeout_t timeout = (timeout_ms != 0) ? K_MSEC(timeout_ms) : K_FOREVER;
-	uint32_t deadline = k_uptime_get_32() + timeout_ms;
+	uint32_t start = k_uptime_get_32();
 
 	while (connected_) {
 		if (aborted()) {
 			return -ECANCELED;
 		}
-		if (k_sem_take(&link_sem_, timeout) != 0) {
-			return -ETIMEDOUT;
-		}
-		if (timeout_ms != 0) {
-			int32_t remaining = static_cast<int32_t>(deadline - k_uptime_get_32());
-			if (remaining <= 0 && connected_) {
-				return -ETIMEDOUT;
-			}
-			timeout = K_MSEC(remaining > 0 ? remaining : 0);
-		}
+		uint32_t elapsed = k_uptime_get_32() - start;
+		if (timeout_ms && elapsed >= timeout_ms) return -ETIMEDOUT;
+		uint32_t slice = timeout_ms ? MIN(100u, timeout_ms - elapsed) : 100u;
+		(void)k_sem_take(&link_sem_, K_MSEC(slice));
 	}
 	return 0;
 }

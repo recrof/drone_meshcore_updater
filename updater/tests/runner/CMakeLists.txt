@@ -1,0 +1,28 @@
+cmake_minimum_required(VERSION 3.16)
+project(dfu_runner_test LANGUAGES C)
+enable_testing()
+add_executable(runner_test runner_test.c ../../src/dfu_runner.c
+  ../../src/transport_ble.c ../../src/pin_addr.c)
+add_executable(runner_cleanup_test cleanup_test.c ../../src/dfu_runner.c)
+foreach(target runner_test runner_cleanup_test)
+  target_include_directories(${target} PRIVATE stubs
+    ../../modules/nordic-legacy-dfu/test/stubs ../../src)
+  target_compile_features(${target} PRIVATE c_std_11)
+  if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  endif()
+endforeach()
+set(cases retry buttonless restart_budget max_restart_budget config_reload
+  lower_budget thread_reuse wifi_retry verify_reject pin_retry secure_accepted bad_package)
+set(i 0)
+foreach(case IN LISTS cases)
+  add_test(NAME runner_${case} COMMAND runner_test ${i})
+  math(EXPR i "${i} + 1")
+endforeach()
+set(cases map_fail open_fail cancel_find success kind_mismatch run_fail
+  cancel_run find_fail preopen_fail cancel_refind)
+set(i 0)
+foreach(case IN LISTS cases)
+  add_test(NAME runner_cleanup_${case} COMMAND runner_cleanup_test ${i})
+  math(EXPR i "${i} + 1")
+endforeach()

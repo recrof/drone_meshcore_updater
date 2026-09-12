@@ -208,6 +208,7 @@ td.actions button:has(.icon),
   font-size: 13px;
 }
 .dfu-banner.ok   { background: color-mix(in srgb, var(--accent) 12%, var(--bg)); }
+.dfu-banner.unverified { background: color-mix(in srgb, var(--warn) 12%, var(--bg)); }
 .dfu-banner.fail { background: color-mix(in srgb, var(--danger) 12%, var(--bg)); }
 
 .dfu-row { display: flex; align-items: center; gap: 10px; }
@@ -218,6 +219,7 @@ td.actions button:has(.icon),
 }
 .dfu-result { color: var(--fg); }
 .dfu-banner.fail .dfu-result { color: var(--danger); }
+.dfu-banner.unverified .dfu-result { color: var(--warn); }
 .dfu-pct { font-family: var(--mono); font-size: 11px; color: var(--fg); }
 
 /* The same pulsing dot the header uses for "connected", reused here for

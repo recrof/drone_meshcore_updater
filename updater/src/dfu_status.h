@@ -154,6 +154,7 @@ enum dfu_status_result {
 	 */
 	DFU_STATUS_RESULT_AUTH_REQUIRED      = 14,
 	DFU_STATUS_RESULT_AUTH_FAILED        = 15,
+	DFU_STATUS_RESULT_BOOT_UNVERIFIED    = 16, /* Secure accepted, boot unverified */
 };
 
 /* Start a new run: clears the snapshot, starts the elapsed clock, and enters

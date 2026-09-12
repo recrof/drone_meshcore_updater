@@ -128,7 +128,7 @@ t("every bt_le_scan_start() uses the shared parameters",
 /* A scan start that fails must hand the radio back. It did not, and the
  * consequence was a device that answered -EBUSY to every later survey and
  * blamed a DFU that was not running. */
-const wait = body(scanner, "static int scan_and_wait(uint32_t timeout_ms)");
+const wait = body(scanner, "static int scan_and_wait(");
 t("scan_and_wait() releases the radio when the scan will not start",
   wait !== null &&
   /bt_le_scan_start[\s\S]*?if\s*\(rc\)\s*\{[\s\S]*?atomic_set\s*\(\s*&s_radio\s*,\s*RADIO_IDLE\s*\)/.test(wait));

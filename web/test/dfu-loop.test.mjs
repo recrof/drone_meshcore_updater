@@ -48,7 +48,7 @@ const t = (name, cond, extra = "") => {
 
 /* The flag exists and means what the check relies on. */
 t("the scanner reports whether an ad carried the DFU service",
-  /bool\s+dfu_uuid;/.test(scannerH));
+  /bool\s+legacy_dfu_uuid;/.test(scannerH));
 
 const verify = transport.slice(transport.indexOf("static enum dfu_result ble_verify"));
 const verifyCode = codeOf(verify);
@@ -58,17 +58,17 @@ const verifyCode = codeOf(verify);
  * rejection message*, and never used to decide anything. A verify that reads
  * the flag only to print it is the bug, not the fix.
  */
-t("verify branches on dfu_uuid rather than only printing it",
-  /if\s*\(!seen\.dfu_uuid\)/.test(verifyCode), verifyCode.slice(0, 200));
+t("verify branches on the Legacy UUID rather than FE59 or address alone",
+  /if\s*\(!seen\.legacy_dfu_uuid\)/.test(verifyCode), verifyCode.slice(0, 200));
 
 /* An advertiser with no DFU service is the application, so the image took. */
 t("...and no DFU service means the new image is running",
-  /if\s*\(!seen\.dfu_uuid\)\s*\{[\s\S]{0,400}?return DFU_OK;/.test(verifyCode));
+  /if\s*\(!seen\.legacy_dfu_uuid\)\s*\{[\s\S]{0,400}?return DFU_OK;/.test(verifyCode));
 
 /* And only a DFU service still on the air is a rejection. */
 t("only a still-advertised DFU service counts as a rejection",
   /return DFU_TARGET_REJECTED;/.test(verifyCode) &&
-  verifyCode.indexOf("DFU_TARGET_REJECTED") > verifyCode.indexOf("seen.dfu_uuid"));
+  verifyCode.indexOf("DFU_TARGET_REJECTED") > verifyCode.indexOf("seen.legacy_dfu_uuid"));
 
 /* Being unseen entirely is still success — the peer rebooted into something
  * that is not advertising yet. That path predates this fix and must survive
@@ -79,13 +79,24 @@ t("an address that goes quiet is still a success",
 /* --- 2. the host's subscription list is not ours to zero ----------------- */
 
 /*
- * `sub_params_` is reused for every attempt. Zephyr
- * keeps `&sub_params_.node` on its own list until the *previous* connection's
- * ATT channel detaches, which lags our disconnect by up to ATT's 30 s timeout
- * (Trap 3). memset in between zeroes `notify`, and the host's next
- * `gatt_sub_remove()` calls it: pc=0x00000000, lr inside gatt.c:3443.
+ * `sub_params_` is reused for every attempt. Starting a disconnect or ending
+ * a local wait does not release host-owned parameters. memset while the host
+ * still links them zeroes `notify`, and a later `gatt_sub_remove()` calls it.
+ * The pinned NCS host's public disconnected callback follows ATT/GATT cleanup;
+ * list removal alone is not a fence for an outstanding CCC request.
  */
-const subFn = gattCpp.slice(gattCpp.indexOf("int GattLink::subscribe_control_point"));
+const subFn = codeOf(gattCpp.slice(
+  gattCpp.indexOf("int GattLink::subscribe_control_point"),
+  gattCpp.indexOf("void GattLink::unsubscribe_control_point")));
+const notifyFn = codeOf(gattCpp.slice(
+  gattCpp.indexOf("uint8_t GattLink::notify_cb"),
+  gattCpp.indexOf("void GattLink::subscribe_cb")));
+const cccFn = codeOf(gattCpp.slice(
+  gattCpp.indexOf("void GattLink::subscribe_cb"),
+  gattCpp.indexOf("bt_conn *GattLink::release_subscription_locked")));
+const releaseFn = codeOf(gattCpp.slice(
+  gattCpp.indexOf("bt_conn *GattLink::release_subscription_locked"),
+  gattCpp.indexOf("bool GattLink::subscription_busy")));
 t("subscribe_control_point does not zero the params it reuses",
   !/memset\s*\(\s*&sub_params_/.test(codeOf(subFn)));
 
@@ -95,14 +106,19 @@ t("notify and subscribe are always assigned",
   /sub_params_\.notify\s*=\s*notify_cb;/.test(subFn) &&
   /sub_params_\.subscribe\s*=\s*subscribe_cb;/.test(subFn));
 
-/* Whether the host still holds it is a separate question from whether *we*
- * think we are subscribed, and only the host can answer it. */
-t("the module tracks host ownership separately from its own state",
-  /sub_linked_/.test(gattHpp) && /bool subscribed_/.test(gattHpp));
-t("...set when a subscription is accepted",
-  /sub_linked_ = true;/.test(gattCpp));
+/* Membership, pending CCC ownership, and session state are distinct. A last
+ * unsubscribe removes its node before its CCC-disable response arrives. */
+t("the module tracks membership and CCC ownership separately from session state",
+  /bool sub_linked_/.test(gattHpp) && /bool subscribed_/.test(gattHpp) &&
+  /enum class CccOperation \{ None, Enable, Disable \}/.test(gattHpp));
+t("ownership is established before a subscribe callback can run",
+  /sub_conn_ = bt_conn_ref\(conn_\);[\s\S]*?sub_linked_ = true;[\s\S]*?ccc_operation_ = CccOperation::Enable;[\s\S]*?bt_gatt_subscribe\(/
+    .test(subFn));
 t("...and cleared when the host announces removal",
-  /data == nullptr[\s\S]{0,300}?sub_linked_ = false;/.test(gattCpp));
+  /data == nullptr[\s\S]*?sub_linked_ = false;/.test(notifyFn));
+t("removal alone cannot clear a still-pending CCC operation",
+  !/ccc_operation_\s*=\s*CccOperation::None/.test(notifyFn) &&
+  /if \(sub_linked_ \|\| ccc_operation_ != CccOperation::None\) return nullptr;/.test(releaseFn));
 
 /*
  * The removal callback arrives after detach() has cleared s_active, so the
@@ -111,25 +127,35 @@ t("...and cleared when the host announces removal",
  * fail every subsequent attempt with -EBUSY instead of crashing, but still
  * break the device.
  */
-t("the object is recovered from params, not from s_active",
-  /CONTAINER_OF\(params, GattLink, sub_params_\)/.test(gattCpp));
+t("both subscription callbacks recover detached owners from params",
+  /CONTAINER_OF\(params, GattLink, sub_params_\)/.test(notifyFn) &&
+  /CONTAINER_OF\(params, GattLink, sub_params_\)/.test(cccFn));
 
 /* Reuse waits for the host, bounded, and refuses rather than forcing it. */
 t("reuse waits for the previous subscription to be released",
-  /for \(int i = 0; sub_linked_[\s\S]{0,300}?k_sleep/.test(subFn));
+  /for \(int i = 0; subscription_busy\(true\) && i < 60; i\+\+\)[\s\S]*?k_sleep/.test(subFn));
 t("...and gives up with -EBUSY rather than corrupting the list",
-  /if \(sub_linked_\)\s*\{[\s\S]{0,300}?return -EBUSY;/.test(subFn));
+  /if \(subscription_busy\(true\)\)\s*\{[\s\S]*?return -EBUSY;/.test(subFn) &&
+  !/bt_gatt_unsubscribe\(/.test(subFn));
 
 /*
- * A clean unsubscribe takes the node off the list itself and, on the
- * last-subscription path, without calling notify() — so nothing else would
- * ever clear the flag. Left set, the tidy path wedges every later run on the
- * -EBUSY above: a permanent failure caused by the DFU that went well.
+ * Unsubscribe clears membership, not necessarily request ownership. Only the
+ * shared-subscriber path leaves value nonzero and removes synchronously;
+ * the last-subscriber path must await its CCC callback or disconnect cleanup.
  */
-const unsubFn = gattCpp.slice(gattCpp.indexOf("void GattLink::unsubscribe_control_point"));
-t("a clean unsubscribe clears the ownership flag itself",
-  /bt_gatt_unsubscribe\([\s\S]{0,80}?\)\s*==\s*0[\s\S]{0,200}?sub_linked_ = false;/
-    .test(codeOf(unsubFn)));
+const unsubFn = codeOf(gattCpp.slice(
+  gattCpp.indexOf("void GattLink::unsubscribe_control_point"),
+  gattCpp.indexOf("void GattLink::clear_response")));
+t("unsubscribe retains pending ownership on the asynchronous last-subscriber path",
+  /ccc_operation_ = CccOperation::Disable;[\s\S]*?bt_gatt_unsubscribe\(/.test(unsubFn) &&
+  /if \(rc == 0\)\s*\{\s*sub_linked_ = false;\s*if \(sub_params_\.value != 0\) ccc_operation_ = CccOperation::None;/.test(unsubFn));
+t("only CCC enable completion can signal the dedicated subscription semaphore",
+  /ccc_operation_ == CccOperation::Enable[\s\S]*?k_sem_give\(&self->ccc_sem_\)/.test(cccFn) &&
+  !/op_sem_/.test(cccFn) &&
+  /wait\(&ccc_sem_, CONFIG_NORDIC_LEGACY_DFU_GATT_TIMEOUT_MS\)/.test(subFn));
+
+/* Behavior and callback interleavings, including the pinned host's silent
+ * unsubscribe-error path, are exercised by the real-GattLink native suite. */
 
 /* --- 3. the params must outlive the run that created them ---------------- */
 
