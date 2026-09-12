@@ -12,20 +12,27 @@
 
 enum scenario { RETRY, BUTTONLESS, RESTART_BUDGET, MAX_RESTART_BUDGET,
   CONFIG_RELOAD, LOWER_BUDGET, THREAD_REUSE, WIFI_RETRY, VERIFY_REJECT,
-  PIN_RETRY };
+  PIN_RETRY, TWO_RESTARTS, THREE_RESTARTS, RETRY_RESTARTS,
+  RESTART_RECOVER, STOP_RESTART_COOLDOWN, LOWER_RETRY_BUDGET };
 static enum scenario scenario;
 static struct app_config config;
 static unsigned runs, finds, maps, opens, config_loads, verifies;
+static unsigned attempt, cooldowns;
+static bool in_cooldown;
 static enum dfu_status_result finished;
 unsigned fake_thread_joins;
 uint32_t fake_now;
 static const bt_addr_le_t app = {1, {{0x10, 0, 0, 0, 0, 0xC0}}};
 
-void fake_event(const char *name) { (void)name; }
+void fake_event(const char *name) {
+  if (scenario == STOP_RESTART_COOLDOWN && in_cooldown && !strcmp(name, "wait"))
+    dfu_runner_stop();
+}
 bool app_config_load(void) {
   config_loads++;
   if (scenario == CONFIG_RELOAD && config_loads > 1) config.prn = 7;
   if (scenario == LOWER_BUDGET && config_loads > 2) config.retries = 1;
+  if (scenario == LOWER_RETRY_BUDGET && config_loads > 4) config.retries = 1;
   return true;
 }
 const struct app_config *app_config_current(void) { return &config; }
@@ -36,9 +43,12 @@ void survey_stop(void) {}
 void led_set_state(enum led_state s) { (void)s; }
 void dfu_status_begin(uint8_t retries) { (void)retries; }
 void dfu_status_bundle(const char *p) { (void)p; }
-void dfu_status_attempt(uint8_t n) { (void)n; }
+void dfu_status_attempt(uint8_t n) { attempt = n; }
 void dfu_status_target(const char *s) { (void)s; }
-void dfu_status_set_state(enum dfu_status_state s) { (void)s; }
+void dfu_status_set_state(enum dfu_status_state s) {
+  in_cooldown = s == DFU_STATUS_COOLDOWN;
+  if (in_cooldown) cooldowns++;
+}
 void dfu_status_finish(enum dfu_status_result result) { finished = result; }
 void dfu_status_reset(void) { finished = DFU_STATUS_RESULT_NONE; }
 enum dfu_status_result dfu_status_from_dfu_result(int r)
@@ -85,9 +95,23 @@ enum dfu_result dfu_client_run(const struct ble_scanner_target *target,
 {
   assert(bt_addr_le_eq(&target->addr, &app));
   assert(bundle->bin.size == 1024 && cancelled && !cancelled());
-  runs++; assert(runs <= 300);
-  if (scenario == RESTART_BUDGET || scenario == MAX_RESTART_BUDGET || scenario == LOWER_BUDGET)
+  runs++; assert(runs <= 1020);
+  if (scenario == RESTART_BUDGET || scenario == MAX_RESTART_BUDGET ||
+      scenario == LOWER_BUDGET || scenario == LOWER_RETRY_BUDGET ||
+      scenario == STOP_RESTART_COOLDOWN) {
+    assert(attempt == (runs - 1) / 4 + 1);
     return DFU_BUTTONLESS_TRIGGERED;
+  }
+  if (scenario == TWO_RESTARTS || scenario == THREE_RESTARTS) {
+    assert(attempt == 1);
+    return runs <= (scenario == TWO_RESTARTS ? 2u : 3u) ? DFU_BUTTONLESS_TRIGGERED : DFU_OK;
+  }
+  if (scenario == RETRY_RESTARTS || scenario == RESTART_RECOVER) {
+    assert(attempt == (runs - 1) / 4 + 1);
+    if (runs % 4 || (scenario == RESTART_RECOVER && runs == 4))
+      return DFU_BUTTONLESS_TRIGGERED;
+    return runs == 8 ? DFU_OK : DFU_TIMEOUT;
+  }
   if (scenario == BUTTONLESS || scenario == CONFIG_RELOAD) {
     if (runs == 1) return DFU_BUTTONLESS_TRIGGERED;
     if (scenario == CONFIG_RELOAD) assert(cfg->prn == 7);
@@ -122,18 +146,37 @@ const struct dfu_transport *const *dfu_transport_list(size_t *count)
 static void test(enum scenario which)
 {
   scenario = which; runs = finds = maps = opens = config_loads = verifies = fake_now = 0;
+  attempt = cooldowns = 0; in_cooldown = false;
   finished = DFU_STATUS_RESULT_NONE; memset(&config, 0, sizeof(config));
   config.retries = which == MAX_RESTART_BUDGET ? 255 :
-    which == RESTART_BUDGET || which == BUTTONLESS ? 1 : 3;
+    which == RESTART_BUDGET || which == BUTTONLESS ||
+    which == TWO_RESTARTS || which == THREE_RESTARTS ? 1 : 3;
+  config.wedge_cooldown = 7;
   snprintf(config.ble_firmware_mapping, sizeof(config.ble_firmware_mapping), "RAK:rak.zip");
   const char *path = which == WIFI_RETRY ? "/lfs1/wifi.bin" : NULL;
   const char *pin = which == PIN_RETRY ? "C0:00:00:00:00:10 (random)" : NULL;
   assert(dfu_runner_start(path, pin, NULL) == 0);
   assert(!dfu_runner_busy());
-  if (which == RESTART_BUDGET || which == MAX_RESTART_BUDGET || which == LOWER_BUDGET) {
+  if (which == RESTART_BUDGET || which == MAX_RESTART_BUDGET ||
+      which == LOWER_BUDGET || which == LOWER_RETRY_BUDGET) {
     assert(finished == DFU_STATUS_RESULT_RETRIES_EXHAUSTED);
-    assert(runs == (which == MAX_RESTART_BUDGET ? 256u : 2u));
-    assert(config_loads == (which == LOWER_BUDGET ? runs + 1 : runs));
+    assert(runs == (which == MAX_RESTART_BUDGET ? 1020u : 4u));
+    assert(config_loads == (which == LOWER_RETRY_BUDGET ? runs + 1 : runs));
+    assert(cooldowns == (which == MAX_RESTART_BUDGET ? 254u :
+                        which == LOWER_RETRY_BUDGET ? 1u : 0u));
+    assert(fake_now == (runs / 4) * 6000 + cooldowns * 7000);
+  } else if (which == TWO_RESTARTS || which == THREE_RESTARTS) {
+    assert(runs == (which == TWO_RESTARTS ? 3u : 4u));
+    assert(finds == runs && maps == 1 && opens == 1 && verifies == 1);
+    assert(attempt == 1 && cooldowns == 0 && finished == DFU_STATUS_RESULT_OK);
+    assert(fake_now == (runs - 1) * 2000 + 2000); /* unchanged verify settle */
+  } else if (which == RETRY_RESTARTS || which == RESTART_RECOVER) {
+    assert(runs == 8 && finds == 8 && maps == 1 && opens == 1 && verifies == 1);
+    assert(attempt == 2 && cooldowns == 1 && finished == DFU_STATUS_RESULT_OK);
+    assert(fake_now == 21000); /* restart + wedge + unchanged verify settle */
+  } else if (which == STOP_RESTART_COOLDOWN) {
+    assert(runs == 4 && finds == 4 && attempt == 1 && cooldowns == 1);
+    assert(fake_now == 6000 && finished == DFU_STATUS_RESULT_NONE);
   } else if (which == WIFI_RETRY) {
     assert(runs == 3 && finds == 3 && finished == DFU_STATUS_RESULT_TIMEOUT);
   } else {
@@ -147,7 +190,7 @@ int main(int argc, char **argv)
 {
   assert(argc == 2);
   enum scenario which = (enum scenario)atoi(argv[1]);
-  assert(which >= RETRY && which <= PIN_RETRY);
+  assert(which >= RETRY && which <= LOWER_RETRY_BUDGET);
   if (which == THREAD_REUSE) {
     unsigned before = fake_thread_joins; test(RETRY); test(RETRY);
     assert(fake_thread_joins > before);

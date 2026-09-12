@@ -56,6 +56,10 @@ LOG_MODULE_REGISTER(dfu_runner, LOG_LEVEL_INF);
  */
 #define DFU_STACK_SIZE 8192
 #define DFU_PATH_MAX   128
+/* One Legacy attempt can need a jump, invalid-state Reset and pending-app
+ * restart before sending data. Bound a stuck peer without spending retries
+ * on those normal mode transitions. */
+#define DFU_RESTARTS_PER_ATTEMPT 3
 
 /*
  * Resolve a path into whatever shape it actually is.
@@ -399,7 +403,7 @@ static void run_thread(void *a, void *b, void *c)
 	}
 
 	uint8_t attempt = 0;
-	uint16_t restarts = 0;
+	uint8_t restarts = 0;
 	bool first_pass = true;
 	while (attempt < cfg->retries) {
 		/* Re-read config on *every* attempt, not just once per run.
@@ -423,7 +427,7 @@ static void run_thread(void *a, void *b, void *c)
 		}
 		first_pass = false;
 		/* Restart-only iterations still reload and obey a lowered budget. */
-		if (attempt >= cfg->retries || restarts > cfg->retries) {
+		if (attempt >= cfg->retries) {
 			status_result = DFU_STATUS_RESULT_RETRIES_EXHAUSTED;
 			goto fail;
 		}
@@ -567,15 +571,23 @@ static void run_thread(void *a, void *b, void *c)
 		case DFU_BUTTONLESS_TRIGGERED:
 			/* Mode changes must work with retries=1, but cannot reset the
 			 * same attempt forever if a peer never leaves its old mode. */
-			if (++restarts > cfg->retries) {
+			if (++restarts > DFU_RESTARTS_PER_ATTEMPT) {
+				LOG_WRN("DFU runner: mode-change limit — retrying after cooldown");
 				status_result = DFU_STATUS_RESULT_RETRIES_EXHAUSTED;
-				goto fail;
+				attempt++;
+				if (attempt < cfg->retries && cfg->wedge_cooldown) {
+					dfu_status_set_state(DFU_STATUS_COOLDOWN);
+					if (runner_sleep(K_SECONDS(cfg->wedge_cooldown))) {
+						goto stopped;
+					}
+				}
+				break;
 			}
 			LOG_INF("DFU runner: buttonless triggered, rescanning");
 			if (runner_sleep(K_SECONDS(2))) {
 				goto stopped;
 			}
-			continue;    /* consumes the separate restart budget */
+			continue;    /* same attempt, including its mode-change count */
 		case DFU_CONNECT_FAILED:
 			LOG_WRN("DFU runner: connect failed — short cooldown");
 			status_result = dfu_status_from_dfu_result((int)r);
@@ -615,6 +627,9 @@ static void run_thread(void *a, void *b, void *c)
 			}
 			break;
 		}
+		/* Every nonterminal break above consumes an attempt. Only the
+		 * mode-change continue retains this count across rescans. */
+		restarts = 0;
 	}
 	LOG_ERR("DFU runner: FAILED after %u attempts", cfg->retries);
 
