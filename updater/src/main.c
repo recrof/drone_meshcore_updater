@@ -34,6 +34,7 @@
 #include "antenna.h"
 #include "battery.h"
 #include "battery_status.h"
+#include "power_button.h"
 #include "dfu_runner.h"
 #include "ble_scanner.h"
 #include "ble_pairing.h"
@@ -483,6 +484,13 @@ int main(void)
 	 * schedule the first sample — which is wanted early, so the boot line
 	 * above is not the only reading a client can get for the next 10 s. */
 	battery_status_init();
+
+	/* Hold B to power off, on a board that declares the button. Before
+	 * bt_ready() so that a device woken by accident can be put back to sleep
+	 * even if the radio then fails to come up. */
+	LOG_INF("power button: %s", power_button_present() ? "present"
+				    : "absent on this board");
+	power_button_start();
 
 	rc = bt_ready();
 	if (rc) {

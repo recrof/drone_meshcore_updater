@@ -22,6 +22,7 @@ enum led_state {
 	LED_STATE_DFU_RUNNING, /* central-role stream in progress */
 	LED_STATE_DONE_OK,     /* last DFU succeeded, LED solid */
 	LED_STATE_DONE_FAIL,   /* last DFU failed, LED pulses */
+	LED_STATE_OFF,         /* dark; about to power off (power_button.c) */
 };
 
 void led_init(void);

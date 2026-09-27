@@ -114,6 +114,15 @@ pads. Two options, and the cheap one has a catch:
 USB-C from a laptop or a phone charger works too, and is the least fuss while
 you are still setting things up.
 
+**Turning it off (XIAO ESP32-S3).** None of these boards has a power switch.
+On the ESP32-S3, **hold B (BOOT) for 4 seconds**: the LED goes dark, and when
+you let go the board drops into deep sleep, which draws tens of microamps. A
+short press on B (or RESET) wakes it again. The hold is ignored while a USB
+host is connected, so the board stays up while you watch its console, and
+while a DFU run is in progress, because a half-flashed target is worse than a
+flat battery. A power bank or charger with no data connection counts as
+battery. Holding B through RESET still enters download mode as before.
+
 ## Repo layout
 
 Repo root doubles as the **west workspace root** (zephcore-style). The application + `west.yml` live in `updater/`; after `west init -l updater && west update`, the NCS/Zephyr/modules trees appear as siblings of `updater/` at the repo root (all gitignored).

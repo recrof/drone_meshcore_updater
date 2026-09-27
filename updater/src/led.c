@@ -25,6 +25,7 @@
  *   DONE_OK        green solid              green solid           solid
  *   DONE_FAIL      red solid                BOTH, blink-blink-    blink-blink-
  *                                           pause                 pause
+ *   OFF            dark                     dark                  dark
  *
  * **DONE_FAIL is the only thing either fallback has to invent**, and that is
  * deliberate. Everything above it is already distinguishable by rate; only the
@@ -218,6 +219,10 @@ static uint32_t render(enum led_state st, uint32_t step)
 		write_all(true, false, false);
 		return 1000;
 
+	case LED_STATE_OFF:
+		write_all(false, false, false);
+		return 1000;
+
 	default:
 		write_all(false, false, false);
 		return 500;
@@ -286,6 +291,10 @@ static uint32_t render(enum led_state st, uint32_t step)
 		return 150;
 	}
 
+	case LED_STATE_OFF:
+		write_gb(false, false);
+		return 1000;
+
 	default:
 		write_gb(false, false);
 		return 500;
@@ -329,6 +338,10 @@ static uint32_t render(enum led_state st, uint32_t step)
 		gpio_pin_set_dt(&s_status,
 				k_fail_pattern[step % ARRAY_SIZE(k_fail_pattern)]);
 		return 150;
+
+	case LED_STATE_OFF:
+		gpio_pin_set_dt(&s_status, 0);
+		return 1000;
 
 	default:
 		gpio_pin_set_dt(&s_status, 0);
