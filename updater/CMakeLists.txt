@@ -42,6 +42,7 @@ target_sources(app PRIVATE
   src/dfu_transport.c
   src/transport_ble.c
   src/ble_tx_power.c
+  src/power_button.c
 )
 
 # The 1200-baud touch that reboots into the Adafruit bootloader. nRF52840 only:

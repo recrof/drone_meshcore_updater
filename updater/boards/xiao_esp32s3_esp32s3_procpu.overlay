@@ -54,4 +54,20 @@
 	aliases {
 		status-led = &led0;
 	};
+
+	zephyr,user {
+		/*
+		 * The "B" (BOOT) button: GPIO0 to ground, with a pull-up on
+		 * the board, so pressed reads low. Held for 4 s on battery it
+		 * powers the board off; a press wakes it again. See
+		 * power_button.h.
+		 *
+		 * GPIO0 is also the download-mode strap, and this does not
+		 * change that. The strap is sampled only at a chip reset, so
+		 * B held through RESET still enters the ROM downloader.
+		 * GPIO_PULL_UP backs up the board's resistor so the pin does
+		 * not rely on it alone.
+		 */
+		power-button-gpios = <&gpio0 0 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+	};
 };
