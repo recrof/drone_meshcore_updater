@@ -418,6 +418,8 @@ jobs:
             slug: xiao_esp32s3
           - board: xiao_esp32c5/esp32c5/hpcore
             slug: xiao_esp32c5
+          - board: heltec_wifi_lora32_v4/esp32s3/procpu
+            slug: heltec_wifi_lora32_v4
     steps:
       - uses: actions/checkout@v7
 
@@ -434,7 +436,7 @@ jobs:
           # matrix rows: splitting them per row would save a couple of minutes
           # and add a way for a row to be given the wrong compiler, which
           # fails as a confusing configure error rather than as a clear one.
-          #   xtensa-espressif_esp32s3_zephyr-elf  -> xiao_esp32s3
+          #   xtensa-espressif_esp32s3_zephyr-elf  -> xiao_esp32s3, heltec_wifi_lora32_v4
           #   riscv64-zephyr-elf                   -> xiao_esp32c5
           toolchains: xtensa-espressif_esp32s3_zephyr-elf:riscv64-zephyr-elf
 

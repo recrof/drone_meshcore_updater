@@ -381,6 +381,23 @@ void dfu_status_reset(void)
 	mark_dirty(true);
 }
 
+void dfu_status_get(struct dfu_status_view *out)
+{
+	k_spinlock_key_t key = k_spin_lock(&lock);
+	out->state   = snap.state;
+	out->percent = snap.percent;
+	out->result  = snap.result;
+	out->attempt = snap.attempt;
+	out->retries = snap.retries;
+	out->sent    = snap.sent;
+	out->total   = snap.total;
+	memcpy(out->name, snap.name, snap.name_len);
+	out->name[snap.name_len] = '\0';
+	memcpy(out->file, snap.file, snap.file_len);
+	out->file[snap.file_len] = '\0';
+	k_spin_unlock(&lock, key);
+}
+
 enum dfu_status_result dfu_status_from_dfu_result(int dfu_result)
 {
 	switch (dfu_result) {

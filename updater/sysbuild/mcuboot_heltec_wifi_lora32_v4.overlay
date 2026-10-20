@@ -1,0 +1,16 @@
+/*
+ * MCUboot devicetree overlay for the Heltec WiFi LoRa 32 V4.
+ *
+ * Same as mcuboot_xiao_esp32s3.overlay: the bootloader shares the
+ * application's partition table and links into boot_partition.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include "../heltec_v4_partitions.dtsi"
+
+/ {
+	chosen {
+		zephyr,code-partition = &boot_partition;
+	};
+};

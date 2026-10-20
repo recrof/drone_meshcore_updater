@@ -44,6 +44,10 @@ target_sources(app PRIVATE
   src/ble_tx_power.c
 )
 
+target_sources_ifdef(CONFIG_UPDATER_DISPLAY app PRIVATE
+  src/display.c
+)
+
 # The 1200-baud touch that reboots into the Adafruit bootloader. nRF52840 only:
 # it needs GPREGRET, a bootloader that reads it, and a CDC ACM the host can set
 # a line coding on. The nRF54L board is reached through a debug probe and needs

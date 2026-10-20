@@ -224,6 +224,22 @@ void dfu_status_finish(enum dfu_status_result result);
  */
 void dfu_status_reset(void);
 
+/* A copy of the current snapshot, for observers on this device (the status
+ * display). Names are NUL-terminated here, unlike on the wire. */
+struct dfu_status_view {
+	uint8_t  state;     /* enum dfu_status_state */
+	uint8_t  percent;
+	uint8_t  result;    /* enum dfu_status_result */
+	uint8_t  attempt;
+	uint8_t  retries;
+	uint32_t sent;
+	uint32_t total;
+	char     name[DFU_STATUS_NAME_MAX + 1];
+	char     file[DFU_STATUS_FILE_MAX + 1];
+};
+
+void dfu_status_get(struct dfu_status_view *out);
+
 /* Translate a DFU client result. Runner-level failures have no dfu_result and
  * use the DFU_STATUS_RESULT_* constants directly. */
 enum dfu_status_result dfu_status_from_dfu_result(int dfu_result);

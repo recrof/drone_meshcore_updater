@@ -1,0 +1,19 @@
+identifier: heltec_wifi_lora32_v4/esp32s3/procpu
+name: Heltec WiFi LoRa 32 (V4) PROCPU
+type: mcu
+arch: xtensa
+toolchain:
+  - zephyr
+supported:
+  - gpio
+  - uart
+  - i2c
+  - spi
+  - counter
+  - watchdog
+  - entropy
+  - pwm
+  - adc
+  - lora
+  - display
+vendor: heltec

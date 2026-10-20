@@ -57,6 +57,7 @@
 #include <string.h>
 
 #include "app.h"
+#include "display.h"
 
 LOG_MODULE_REGISTER(fsx_stream, LOG_LEVEL_INF);
 
@@ -356,6 +357,7 @@ static ssize_t on_data_write(struct bt_conn *conn, const struct bt_gatt_attr *at
 		reply_error(conn, RC_WRITE_FAILED);
 	} else {
 		s_sess.written += (uint32_t)rc;
+		display_upload_activity();
 		/* Emit an ACK notification every ACK_INTERVAL bytes so the
 		 * client can drain its send window and Chrome's platform BT
 		 * queue doesn't back up and start dropping writes. Check-and-

@@ -49,8 +49,8 @@
  *
  * That is precisely the mixed-generation failure the cache-only note below
  * describes, and it arrived through the one door nothing was watching. */
-const CACHE = "drone-meshcore-updater-v23";
-const SHELL_DIGEST = "b5251a414d919604";
+const CACHE = "drone-meshcore-updater-v24";
+const SHELL_DIGEST = "3a6951ad1d0b75a9";
 
 /*
  * The release firmware staged by CI at firmware/. Kept in its own cache,

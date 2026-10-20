@@ -3,7 +3,7 @@
 Carry a firmware update to a device you cannot reach.
 
 A standalone updater that runs on a **Seeed XIAO** (nRF54LM20A, nRF52840,
-ESP32-S3, ESP32-C5 or MG24), holds a library of firmware bundles, and flashes them into *other*
+ESP32-S3, ESP32-C5 or MG24) or a **Heltec WiFi LoRa 32 V4**, holds a library of firmware bundles, and flashes them into *other*
 devices over the air. It exists for MeshCore repeaters on rooftops, masts and hilltops —
 put it on a drone or in a pocket, get within radio range, and update.
 
@@ -34,6 +34,7 @@ Only needed once, or when updating the updater itself.
    | XIAO nRF52840 | Double-tap **RESET** (the orange LED pulses), then pick the serial port. |
    | XIAO ESP32-S3 | Hold **BOOT**, tap **RESET**, release **BOOT**, then pick the serial port. |
    | XIAO ESP32-C5 | As the ESP32-S3. Bluetooth only for now — see [notes/boards.md](notes/boards.md). |
+   | Heltec WiFi LoRa 32 V4 | Hold **PRG**, tap **RST**, release **PRG**, then pick the serial port. After flashing, tap **RST** once more: the ROM loader does not leave download mode on a USB reset. |
    | XIAO MG24 | **Connect probe**, as the nRF54LM20A. Nothing to press on the board. |
 
 4. **Flash newest**. It downloads the current release, checks it against the
@@ -218,7 +219,7 @@ Via the `build.sh` wrapper:
 ### Other boards
 
 It also builds for the **XIAO nRF52840**, the **XIAO ESP32S3**, the
-**XIAO ESP32-C5** and the **XIAO MG24** — and for the **Sense** variant of the
+**XIAO ESP32-C5**, the **XIAO MG24** and the **Heltec WiFi LoRa 32 V4** — and for the **Sense** variant of the
 first two. Set `BOARD`; every target gets its own build directory, so switching
 does not force a pristine rebuild:
 
@@ -229,6 +230,7 @@ does not force a pristine rebuild:
 ./build.sh xiao_esp32s3/esp32s3/procpu/sense
 ./build.sh esp32c5
 ./build.sh mg24
+./build.sh heltecv4             # Heltec WiFi LoRa 32 V4
 ```
 
 The MG24 needs its own blob fetch (`west blobs fetch hal_silabs`) for the
@@ -236,14 +238,15 @@ Bluetooth link layer, and a non-stock OpenOCD to flash — `build.sh` finds the
 Arduino Silicon Labs core's copy on its own. The **MG24 Sense is the same board
 target**; there is no separate variant to build.
 
-| | XIAO nRF54LM20A | XIAO nRF52840 | XIAO ESP32S3 | XIAO MG24 |
-|---|---|---|---|---|
-| Flashing the updater | web client (CMSIS-DAP), or SWD | web client (serial DFU), or drag `merged.uf2` onto the drive a double-tap of RESET exposes | web client (ROM loader), or `./build.sh flash` | web client (CMSIS-DAP), or SWD |
-| Room for bundles | 8 MB QSPI, ~16 bundles | 2 MB QSPI, ~4 bundles | 4.3 MB internal, ~10 bundles | 4 MB SPI, ~10 bundles |
-| MCUboot slot | 896 KB (31% used) | 368 KB (**80% used**) | 1792 KB (24% used) | 728 KB (43% used) |
-| Status LED | RGB | RGB | one LED — failure blinks twice per cycle | one LED — same |
-| WiFi | no | no | yes (the point of it) | no |
-| Max BLE TX | +8 dBm | +8 dBm | +20 dBm | +20 dBm (build-time only) |
+| | XIAO nRF54LM20A | XIAO nRF52840 | XIAO ESP32S3 | XIAO MG24 | Heltec V4 |
+|---|---|---|---|---|---|
+| Flashing the updater | web client (CMSIS-DAP), or SWD | web client (serial DFU), or drag `merged.uf2` onto the drive a double-tap of RESET exposes | web client (ROM loader), or `./build.sh flash` | web client (CMSIS-DAP), or SWD | web client (ROM loader), or `./build.sh flash` |
+| Room for bundles | 8 MB QSPI, ~16 bundles | 2 MB QSPI, ~4 bundles | 4.3 MB internal, ~10 bundles | 4 MB SPI, ~10 bundles | 16 MB QSPI, ~28 bundles |
+| MCUboot slot | 896 KB (31% used) | 368 KB (**80% used**) | 1792 KB (24% used) | 728 KB (43% used) | 1792 KB (46% used) |
+| Status LED | RGB | RGB | one LED — failure blinks twice per cycle | one LED — same | one LED — same |
+| WiFi | no | no | yes (the point of it) | no | yes |
+| Max BLE TX | +8 dBm | +8 dBm | +20 dBm | +20 dBm (build-time only) | +20 dBm |
+| Battery | measured | measured | — | — | measured (JST connector) |
 
 The **ESP32-S3 exists for ESP32 targets.** MeshCore's ESP32 repeaters do not do
 BLE DFU at all — they update through ElegantOTA, over a WiFi AP they raise on
@@ -267,6 +270,21 @@ venv is created at `.venv-esptool/` and used only for Espressif boards.
 MCUboot is chainloaded from the Adafruit UF2 bootloader that ships on the board,
 which stays put as the recovery path; the ESP32-S3's is a normal MCUboot at
 offset 0.
+
+The **Heltec WiFi LoRa 32 V4** is the same ESP32-S3 port on a board with 16 MB
+of flash, 2 MB of quad PSRAM and a battery connector; its LoRa radio is not
+used. Upstream Zephyr only has the V3, so the board files live in
+`updater/boards/heltec/`. Tested on a V4.2: bundle upload over BLE (~46 KB/s
+for a 363 KB bundle), DFU of an nRF52 MeshCore repeater including the
+buttonless jump (~15 KB/s), and the battery reading against a bench supply.
+
+It also has a 128×64 OLED, which this build uses as a **status display**
+(`CONFIG_UPDATER_DISPLAY`, LVGL): one screen with the DFU state, target,
+bundle and a progress bar, one with battery, BLE client, bundle count and free
+space; **PRG** switches between them. The display only reads state, it never
+drives a run, and it blanks after 60 s of nothing changing
+(`CONFIG_UPDATER_DISPLAY_TIMEOUT_S`). Any board with a `zephyr,display` can
+enable it.
 
 Pushing an update for the wrong board over Bluetooth used to be a real foot-gun
 — MCUboot checks the signature, not the architecture. The firmware now reports

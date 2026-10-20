@@ -1,0 +1,37 @@
+# Application Kconfig for drone_meshcore_updater.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+menu "Drone MeshCore Updater"
+
+DT_CHOSEN_Z_DISPLAY := zephyr,display
+
+config UPDATER_DISPLAY
+	bool "Status display"
+	depends on $(dt_chosen_enabled,$(DT_CHOSEN_Z_DISPLAY))
+	select DISPLAY
+	select LVGL
+	select LV_FONT_MONTSERRAT_12
+	select LV_FONT_MONTSERRAT_14
+	# sw0 switches screens and wakes the panel, where the board has one.
+	select INPUT if $(dt_compat_enabled,gpio-keys)
+	help
+	  Show the updater's state on the board's display (zephyr,display):
+	  DFU progress, battery, BLE client and bundle storage. Read-only:
+	  the display observes dfu_status, battery and storage and never
+	  drives a run.
+
+if UPDATER_DISPLAY
+
+config UPDATER_DISPLAY_TIMEOUT_S
+	int "Seconds of inactivity before the display turns off"
+	default 60
+	help
+	  0 keeps the display on. Any state change, or a press of the board's
+	  sw0 button, turns it back on.
+
+endif # UPDATER_DISPLAY
+
+endmenu
+
+source "Kconfig.zephyr"

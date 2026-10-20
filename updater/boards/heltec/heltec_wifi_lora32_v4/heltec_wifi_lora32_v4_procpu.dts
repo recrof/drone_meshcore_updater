@@ -1,0 +1,215 @@
+/*
+ * Heltec WiFi LoRa 32 (V4), PROCPU.
+ *
+ * Derived from Zephyr's heltec_wifi_lora32_v3. What differs on the V4:
+ *
+ *   - SoC is an ESP32-S3R2 (2 MB in-package quad PSRAM) with a 16 MB external
+ *     quad flash, instead of the V3's ESP32-S3FN8.
+ *   - USB-C goes straight to the S3's USB-Serial-JTAG (GPIO19/20, VID 303A),
+ *     not through a CP2102, so the console is usb_serial rather than uart0.
+ *   - ADC_Ctrl (GPIO37) is active HIGH, as MeshCore's heltec_v4 variant
+ *     drives it (the V3 is active LOW).
+ *   - Vext_Ctrl (GPIO36) is still active LOW, as on the V3 - measured on a
+ *     V4.2: driven high, the SSD1306 does not ACK (-ETIMEDOUT); driven low it
+ *     comes up. MeshCore's heltec_v4 variant has PIN_VEXT_EN_ACTIVE=HIGH,
+ *     which does not match this board.
+ *   - The LoRa path has a front-end module (GC1109 / KCT8103L) on GPIO7
+ *     (LDO enable), GPIO2 (CSD) and GPIO46 (CPS). Not described here; the
+ *     pins are left at their reset state, which keeps the FEM unpowered.
+ *
+ * Pins verified against MeshCore variants/heltec_v4 and checked on a V4.2
+ * board with esptool (ESP32-S3 QFN56 rev v0.2, 2 MB PSRAM, 16 MB flash).
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/dts-v1/;
+
+#include <espressif/esp32s3/esp32s3_r2.dtsi>
+#include "heltec_wifi_lora32_v4-pinctrl.dtsi"
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/dt-bindings/lora/sx126x.h>
+#include <espressif/partitions_0x0_amp_16M.dtsi>
+
+/ {
+	model = "Heltec Wi-Fi LoRa32 V4 PROCPU";
+	compatible = "espressif,esp32s3";
+
+	aliases {
+		led0 = &led0;
+		uart-0 = &uart0;
+		i2c-0 = &i2c0;
+		lora0 = &lora0;
+		sw0 = &button0;
+		watchdog0 = &wdt0;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led0: led {
+			gpios = <&gpio1 3 GPIO_ACTIVE_HIGH>;	/* GPIO35 */
+			label = "White LED";
+		};
+	};
+
+	buttons {
+		compatible = "gpio-keys";
+
+		button0: button_0 {
+			gpios = <&gpio0 0 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "PRG Key";
+			zephyr,code = <INPUT_KEY_0>;
+		};
+	};
+
+	/* VBAT -> 390k -> GPIO1 (ADC1_CH0) -> 100k -> switched GND (ADC_Ctrl).
+	 *
+	 * ADC1 is &adc0: Zephyr numbers the ESP32-S3's SAR units from zero
+	 * (adc0 = unit 1, adc1 = unit 2). &adc1 channel 0 is ADC2_CH0, which is
+	 * GPIO11 - the LoRa MISO line, idling at ~0.6 V - and is what the V3
+	 * board this was derived from reads. */
+	vbatt: vbatt {
+		compatible = "voltage-divider";
+		io-channels = <&adc0 0>;
+		output-ohms = <100000>;
+		full-ohms = <(100000 + 390000)>;
+		power-gpios = <&gpio1 5 GPIO_ACTIVE_HIGH>;	/* GPIO37, ADC_Ctrl */
+		power-on-sample-delay-us = <10000>;
+		/* adc_esp32 rejects sequence.calibrate with -ENOTSUP; the driver
+		 * applies the eFuse calibration on its own. */
+		skip-calibration;
+	};
+
+	vext_ctrl: vext_ctrl {
+		compatible = "power-domain-gpio";
+		enable-gpios = <&gpio1 4 GPIO_ACTIVE_LOW>;	/* GPIO36 */
+		#power-domain-cells = <0>;
+		label = "Vext Control";
+	};
+
+	chosen {
+		zephyr,sram = &sram1;
+		zephyr,console = &usb_serial;
+		zephyr,shell-uart = &usb_serial;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &slot0_partition;
+		zephyr,bt-hci = &esp32_bt_hci;
+		zephyr,display = &ssd1306_128x64;
+	};
+};
+
+&flash0 {
+	reg = <0x0 DT_SIZE_M(16)>;
+};
+
+&usb_serial {
+	status = "okay";
+};
+
+&uart0 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-names = "default";
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+&gpio1 {
+	status = "okay";
+};
+
+&adc0 {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1_4";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
+};
+
+&i2c0 {
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_FAST>;
+	pinctrl-0 = <&i2c0_default>;
+	pinctrl-names = "default";
+
+	ssd1306_128x64: display-controller@3c {
+		compatible = "solomon,ssd1306";
+		reg = <0x3c>;
+		width = <128>;
+		height = <64>;
+		segment-offset = <0>;
+		page-offset = <0>;
+		display-offset = <0>;
+		multiplex-ratio = <63>;
+		segment-remap;
+		com-invdir;
+		inversion-on;
+		prechargep = <0x22>;
+		reset-gpios = <&gpio0 21 GPIO_ACTIVE_LOW>;
+		power-domains = <&vext_ctrl>;
+	};
+};
+
+&spi2 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+	pinctrl-0 = <&spim2_default>;
+	pinctrl-names = "default";
+
+	cs-gpios = <&gpio0 8 GPIO_ACTIVE_LOW>;
+
+	lora0: modem@0 {
+		compatible = "semtech,sx1262";
+		reg = <0>;
+		reset-gpios = <&gpio0 12 (GPIO_OPEN_DRAIN | GPIO_ACTIVE_LOW)>;
+		busy-gpios = <&gpio0 13 GPIO_ACTIVE_HIGH>;
+		dio1-gpios = <&gpio0 14 GPIO_ACTIVE_HIGH>;
+		dio2-tx-enable;
+		dio3-tcxo-voltage = <SX126X_DIO3_TCXO_1V8>;
+		tcxo-power-startup-delay-ms = <5>;
+		spi-max-frequency = <4000000>;
+	};
+};
+
+&timer0 {
+	status = "okay";
+};
+
+&timer1 {
+	status = "okay";
+};
+
+&timer2 {
+	status = "okay";
+};
+
+&timer3 {
+	status = "okay";
+};
+
+&wdt0 {
+	status = "okay";
+};
+
+&trng0 {
+	status = "okay";
+};
+
+&esp32_bt_hci {
+	status = "okay";
+};
+
+&wifi {
+	status = "okay";
+};

@@ -96,6 +96,7 @@ export const BOARD_LABELS = {
   rak4631: "RAK4631",
   xiao_esp32s3: "XIAO ESP32-S3",
   xiao_esp32c5: "XIAO ESP32-C5",
+  heltec_wifi_lora32_v4: "Heltec WiFi LoRa 32 V4",
   xiao_mg24: "XIAO MG24",
 };
 

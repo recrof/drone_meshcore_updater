@@ -1,0 +1,32 @@
+/*
+ * Devicetree overlay for the Heltec WiFi LoRa 32 V4.
+ *
+ * Same role as the XIAO ESP32S3 port (see xiao_esp32s3_esp32s3_procpu.overlay)
+ * on a board with twice the flash and a battery connector. The board files
+ * live in boards/heltec/heltec_wifi_lora32_v4/ because upstream Zephyr only
+ * has the V3.
+ *
+ * What the board already provides: usb_serial console, &wifi and
+ * &esp32_bt_hci, the battery divider (vbatt, gated by ADC_Ctrl), the white
+ * LED, the PRG button and the OLED. The OLED is described but nothing in this
+ * build enables a display driver, so Vext stays off.
+ *
+ * What this file does: replace the partition table with the 16 MB layout and
+ * name the LED and the battery divider for led.c and battery.c.
+ */
+
+#include "../common.dtsi"
+#include "../heltec_v4_partitions.dtsi"
+
+/ {
+	chosen {
+		/* Already the board's default; restated because the partition
+		 * table is replaced wholesale. */
+		zephyr,code-partition = &slot0_partition;
+	};
+
+	aliases {
+		status-led = &led0;
+		battery-voltage = &vbatt;
+	};
+};

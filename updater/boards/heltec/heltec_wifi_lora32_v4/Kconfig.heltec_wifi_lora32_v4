@@ -1,0 +1,12 @@
+# Heltec WiFi LoRa 32 (V4) board configuration
+#
+# Derived from Zephyr's heltec_wifi_lora32_v3. The V4 swaps the V3's
+# ESP32-S3FN8 (8 MB in-package flash, no PSRAM) for an ESP32-S3R2 (2 MB
+# in-package quad PSRAM) with a 16 MB external flash.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+config BOARD_HELTEC_WIFI_LORA32_V4
+	select SOC_ESP32S3_R2
+	select SOC_ESP32S3_PROCPU if BOARD_HELTEC_WIFI_LORA32_V4_ESP32S3_PROCPU
+	select SOC_ESP32S3_APPCPU if BOARD_HELTEC_WIFI_LORA32_V4_ESP32S3_APPCPU

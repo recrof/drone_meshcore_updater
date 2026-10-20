@@ -22,6 +22,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/mgmt/mcumgr/mgmt/callbacks.h>
 #include <zephyr/mgmt/mcumgr/grp/fs_mgmt/fs_mgmt_callbacks.h>
+#include "display.h"
 #include <string.h>
 #include <stdbool.h>
 #include "app.h"
@@ -131,6 +132,7 @@ static enum mgmt_cb_return fs_access_cb(uint32_t event,
 
 	const char *why = NULL;
 	if (firmware_name_acceptable(ev->filename, &why)) {
+		display_upload_activity();
 		return MGMT_CB_OK;
 	}
 

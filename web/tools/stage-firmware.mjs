@@ -95,6 +95,7 @@ export const USB_METHODS = {
    * a single-file artifact at all — see `parts` below. */
   xiao_esp32s3: "esptool",
   xiao_esp32c5: "esptool",
+  heltec_wifi_lora32_v4: "esptool",
 
   /* Also SWD through an on-board SAMD11 CMSIS-DAP probe — the same
    * arrangement as the nRF54L XIAO, and the same method string, because this
@@ -159,6 +160,19 @@ export const PART_LAYOUT = {
    * pasting the S3's 0x0 here fails immediately instead of at the point where
    * someone's board stops booting with its console already off.
    */
+  /* Same offsets as the XIAO ESP32S3: the 16 MB table only grows the
+   * LittleFS partition at the end. Carried separately because the test
+   * resolves each label in this board's own dtsi. */
+  heltec_wifi_lora32_v4: {
+    dtsi: "updater/heltec_v4_partitions.dtsi",
+    parts: [
+      { name: "mcuboot.bin", from: ["mcuboot", "zephyr", "zephyr.bin"],
+        offset: 0x0, partition: "boot_partition" },
+      { name: "app.signed.bin", from: ["updater", "zephyr", "zephyr.signed.bin"],
+        offset: 0x20000, partition: "slot0_partition" },
+    ],
+  },
+
   xiao_esp32c5: {
     dtsi: "updater/esp32c5_partitions.dtsi",
     parts: [
